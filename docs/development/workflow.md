@@ -98,9 +98,9 @@
 
 1. **Test**：单元测试、路径安全边界测试、匿名化 TagStudio SQLite fixture 导入与搜索测试。
 2. **Typecheck**：Host、Client 及测试类型检查。
-3. **Build**：编译、Typert 生成、Host/Client bundle。
-4. **Bundle consistency**：重新生成后，检查入库产物与源码一致且无未提交差异。
-5. **Packaging**：`.tgz` 打包、manifest、`cordis.patch.yml`、入口与 locale 完整性核对。
+3. **Build**：编译、Typert 生成、Host/Client bundle，并校验外部 import 仅包含 `@deepseek-ai/cordis` 与 `node:*`。
+4. **Packaging（`./scripts/pack.sh`）**：默认输出到仓库内相对路径 `./dist/dsh-media-library-<version>-<short-sha>.tgz`（也支持传入任意相对路径参数，如 `./scripts/pack.sh ../dsh-media-library-local-data/artifacts` 供 Windows 桌面端冷安装追溯）。
+5. **WSL DSH Web 三层运行态验证（`./scripts/verify-web.sh`）**：在交付 Windows DSH Desktop 人工验收前，必须在隔离 `DSH_HOME` 的 `web` profile 中完成 `.tgz` 冷安装（拒绝 `link:` 依赖）、启动 `dsh web` 校验 `boot.html` 与 `/plugins/??...` HTTP 200，并通过 Playwright 无头 Chromium 真点测侧栏入口、面板渲染及 Host RPC 往返。
 
 ### 3.2 Seam Check（接缝检查）与证据分级
 
@@ -110,7 +110,7 @@
    - `VERIFIED (scope: local_unit_mocked)`：纯逻辑或 Mock 单元测试通过（如 Linux 下跑 `path.win32` UNC 规范化与防越界测试、React 组件状态测试）。
    - `VERIFIED (scope: sqlite_fixture)`：基于匿名化 SQLite 样本库的真实 SQL/迁移/盘点测试通过。
 2. **跨层与实机接缝证据（`seam_status`）**：
-   - **Host ↔ Remote ↔ Client 接缝**：Typert 契约参数/返回值、错误码与 `revision` 乐观并发字段在三端严格对齐。
+   - **Host ↔ Remote ↔ Client 接缝（`wsl_dsh_web_cold_install_e2e`）**：Typert 契约参数/返回值、错误码与 `revision` 乐观并发字段在三端严格对齐，且通过 `./scripts/verify-web.sh` 三层冷安装与 Playwright 浏览器验证。
    - **SQLite ↔ TagStudio 源库接缝**：源库 SHA-256 未变、`legacy_ids` 对照完整、`foreign_key_check` 与 `integrity_check` 通过。
    - **Windows DSH Desktop ↔ NAS SMB ↔ Native Opener 接缝（`windows_smb_e2e`）**：在真实 Windows DSH Desktop 中冷安装 `.tgz`，对真实 SMB 共享执行默认打开（拉起 PotPlayer）与 Explorer `/select` 定位。
    - 在 Linux 开发环境或未连接真实 NAS 的环境中，`windows_smb_e2e` 必须诚实标记为 `NOT_VERIFIED (reason: linux_env_no_windows_smb)`，严禁将“命令拼接单测通过”报告为端到端已验证。

@@ -9,7 +9,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 HARNESS_DIR="${DSH_HARNESS_DIR:-/home/aaevi/projects/deepseek-harness}"
-TGZ="${1:-$REPO_ROOT/dist/deepseek-ai-dsh-experimental-media-library-0.1.0.tgz}"
+VERSION="$(node -p "require('$REPO_ROOT/bundle/package.json').version")"
+SHORT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+TGZ="${1:-$REPO_ROOT/dist/dsh-media-library-${VERSION}-${SHORT_SHA}.tgz}"
 PORT="${DSH_VERIFY_PORT:-3199}"
 
 if [[ ! -f "$TGZ" ]]; then
