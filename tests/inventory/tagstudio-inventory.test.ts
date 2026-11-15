@@ -196,7 +196,13 @@ describe('TagStudio Read-Only Inventory & Multi-Candidate Comparator (Issue #2)'
 
   it('unit helpers: normalizeRelativeMediaPath, extractCatalogNumber, extractIsoDate handle edge cases', () => {
     assert.equal(extractCatalogNumber('fc2 ppv 1234567'), 'FC2-PPV-1234567')
+    assert.equal(extractCatalogNumber('FC2-1476760-1hana.mp4'), 'FC2-PPV-1476760')
     assert.equal(extractCatalogNumber('2026-10-15_abp_909a.mp4'), 'ABP-909A')
+    assert.equal(extractCatalogNumber('300MAAN-341 title.mp4'), '300MAAN-341')
+    assert.equal(extractCatalogNumber('T28-513 title.mp4'), 'T28-513')
+    assert.equal(extractCatalogNumber('T-28634 title.mp4'), 'T-28634')
+    assert.equal(extractCatalogNumber('MBR-AA024 title.mp4'), 'MBR-AA024')
+    assert.equal(extractCatalogNumber('061315_01-10mu-1080p.mp4'), '10MU-061315_01')
     assert.equal(extractCatalogNumber('UTF-8 text SHA-256'), null)
 
     assert.equal(extractIsoDate('2026.11.05'), '2026-11-05')
