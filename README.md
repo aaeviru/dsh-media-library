@@ -20,11 +20,11 @@ Out of scope: embedded playback, transcoding, thumbnails, and Synology Photos.
 
 The initial architecture is a Windows DSH Desktop plugin (React + Typert Remote + Host) with a local SQLite database. NAS stores the original media files. SQLite must not be opened directly over SMB. A NAS-side database/API is deferred until there is a real second writer.
 
-See [the detailed design](docs/design.md).
+See [the detailed design](docs/design.md) and [the development & agent workflow specification](docs/development/workflow.md).
 
 ## Delivery plan
 
-Work is divided into M1-M4 GitHub issues. Start with the M1 Host/UNC spike; do not begin production migration before that issue passes.
+Work is divided into M1-M4 GitHub issues governed by [Issue Contracts and Seam Checks](docs/development/workflow.md). Start with the M1 Host/UNC spike ([#1](https://github.com/aaeviru/dsh-media-library/issues/1)) and TagStudio read-only inventory ([#2](https://github.com/aaeviru/dsh-media-library/issues/2)); do not begin production migration before those issues pass.
 
 ## References
 
