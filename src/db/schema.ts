@@ -3,12 +3,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
 
-export const CURRENT_SCHEMA_VERSION = 1
+export const CURRENT_SCHEMA_VERSION = 2
 
 export interface SchemaMigration {
   readonly version: number
   readonly description: string
   readonly up: (db: DatabaseSync) => void
+  readonly rebuildsReferencedTables?: boolean
 }
 
 export interface SchemaVersionRecord {
@@ -241,7 +242,48 @@ export const V1_SCHEMA_MIGRATION: SchemaMigration = {
   },
 }
 
-export const DEFAULT_MIGRATIONS: readonly SchemaMigration[] = [V1_SCHEMA_MIGRATION]
+export const V2_MEDIA_STATUS_MIGRATION: SchemaMigration = {
+  version: 2,
+  description: 'Persist unmapped/permission states and index stable keyset ordering',
+  rebuildsReferencedTables: true,
+  up(db): void {
+    // SQLite's documented table-rebuild procedure: FK enforcement is disabled by
+    // the runner BEFORE BEGIN, then foreign_key_check runs before COMMIT.
+    // Keep the AUTOINCREMENT high-water mark, including previously deleted IDs.
+    const sequence = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'media_files'").get()?.seq ?? 0
+    db.exec(`
+      CREATE TABLE media_files_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        root_id TEXT NOT NULL REFERENCES media_roots(id) ON DELETE RESTRICT,
+        relative_path TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        extension TEXT NOT NULL,
+        title TEXT,
+        catalog_number TEXT,
+        catalog_source TEXT CHECK (catalog_source IN ('text_field', 'filename', 'directory', 'manual') OR catalog_source IS NULL),
+        media_date TEXT,
+        date_source TEXT CHECK (date_source IN ('datetime_field', 'text_field', 'filename_or_path', 'manual') OR date_source IS NULL),
+        added_at TEXT,
+        file_size INTEGER,
+        file_mtime TEXT,
+        status TEXT NOT NULL DEFAULT 'indexed' CHECK (status IN ('indexed', 'missing', 'offline', 'unmapped', 'permission_denied')),
+        source_key TEXT,
+        revision INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(root_id, relative_path)
+      );
+      INSERT INTO media_files_v2 SELECT * FROM media_files;
+      DROP TABLE media_files;
+      ALTER TABLE media_files_v2 RENAME TO media_files;
+      CREATE INDEX idx_media_files_catalog_number ON media_files(catalog_number);
+      CREATE INDEX idx_media_files_media_date ON media_files(media_date DESC, id DESC);
+      CREATE INDEX idx_media_files_keyset_order ON media_files(COALESCE(media_date, '') DESC, id DESC);
+      CREATE INDEX idx_media_files_filename ON media_files(filename);
+    `)
+    db.prepare("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'media_files'").run(sequence)
+  },
+}
+
+export const DEFAULT_MIGRATIONS: readonly SchemaMigration[] = [V1_SCHEMA_MIGRATION, V2_MEDIA_STATUS_MIGRATION]
 
 function ensureSchemaVersionsTable(db: DatabaseSync): void {
   db.exec(`
@@ -286,7 +328,7 @@ export async function migrateDatabase(
   ensureSchemaVersionsTable(db)
 
   const migrations = [...(options?.migrations ?? DEFAULT_MIGRATIONS)].sort((a, b) => a.version - b.version)
-  const appVersion = options?.appVersion ?? '0.1.0'
+  const appVersion = options?.appVersion ?? '0.2.0'
   const nowFn = options?.now ?? (() => new Date())
 
   const previousVersion = getCurrentSchemaVersion(db)
@@ -316,8 +358,9 @@ export async function migrateDatabase(
   )
 
   for (const migration of pending) {
-    db.exec('BEGIN IMMEDIATE;')
+    if (migration.rebuildsReferencedTables) db.exec('PRAGMA foreign_keys = OFF;')
     try {
+      db.exec('BEGIN IMMEDIATE;')
       migration.up(db)
       insertVersionStmt.run(migration.version, nowFn().toISOString(), appVersion, migration.description)
       const health = runDatabaseHealthChecks(db)
@@ -335,6 +378,8 @@ export async function migrateDatabase(
         // Ignore rollback error if transaction was already aborted
       }
       throw err
+    } finally {
+      if (migration.rebuildsReferencedTables) db.exec('PRAGMA foreign_keys = ON;')
     }
   }
 

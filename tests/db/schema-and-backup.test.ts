@@ -16,6 +16,7 @@ import {
   openMediaLibraryDatabase,
   resolveLocalDatabasePath,
   runDatabaseHealthChecks,
+  V1_SCHEMA_MIGRATION,
   type SchemaMigration,
 } from '../../src/db/schema.ts'
 
@@ -67,7 +68,7 @@ describe('Local SQLite Schema, Migration Runner & Backup/Restore (Issue #3 B1, B
     )
   })
 
-  it('B1 & B2: initializes v1 schema with foreign keys enabled, indexes created, and health checks passing', async () => {
+  it('B1 & B2: initializes current schema with foreign keys enabled, indexes created, and health checks passing', async () => {
     const dbPath = path.join(tempRoot, 'v1-init', 'library.sqlite3')
     const { db } = openMediaLibraryDatabase({ dbPath })
     try {
@@ -77,14 +78,14 @@ describe('Local SQLite Schema, Migration Runner & Backup/Restore (Issue #3 B1, B
       const res1 = await migrateDatabase(db, { dbPath })
       assert.equal(res1.previousVersion, 0)
       assert.equal(res1.currentVersion, CURRENT_SCHEMA_VERSION)
-      assert.deepEqual(res1.appliedVersions, [1])
+      assert.deepEqual(res1.appliedVersions, [1, 2])
       assert.equal(res1.preUpgradeBackupPath, null)
       assert.equal(res1.health.ok, true)
 
       // Re-running migrateDatabase is a no-op
       const res2 = await migrateDatabase(db, { dbPath })
-      assert.equal(res2.previousVersion, 1)
-      assert.equal(res2.currentVersion, 1)
+      assert.equal(res2.previousVersion, CURRENT_SCHEMA_VERSION)
+      assert.equal(res2.currentVersion, CURRENT_SCHEMA_VERSION)
       assert.deepEqual(res2.appliedVersions, [])
 
       // Enforce ON DELETE RESTRICT on tags referenced by media_tags
@@ -118,7 +119,7 @@ describe('Local SQLite Schema, Migration Runner & Backup/Restore (Issue #3 B1, B
     const { db } = openMediaLibraryDatabase({ dbPath })
 
     try {
-      await migrateDatabase(db, { dbPath, backupDir })
+      await migrateDatabase(db, { dbPath, backupDir, migrations: [V1_SCHEMA_MIGRATION] })
       db.exec(`
         INSERT INTO media_roots (id, name, canonical_unc_root, enabled, created_at)
         VALUES ('nas-main', 'NAS', '\\\\NAS\\Media', 1, '2026-11-15T00:00:00Z');
@@ -139,7 +140,7 @@ describe('Local SQLite Schema, Migration Runner & Backup/Restore (Issue #3 B1, B
           migrateDatabase(db, {
             dbPath,
             backupDir,
-            migrations: [...DEFAULT_MIGRATIONS, failingV2],
+            migrations: [V1_SCHEMA_MIGRATION, failingV2],
           }),
         /Simulated v2 migration failure/,
       )
@@ -162,12 +163,57 @@ describe('Local SQLite Schema, Migration Runner & Backup/Restore (Issue #3 B1, B
       const upgradeRes = await migrateDatabase(db, {
         dbPath,
         backupDir,
-        migrations: [...DEFAULT_MIGRATIONS, validV2],
+        migrations: [V1_SCHEMA_MIGRATION, validV2],
       })
       assert.equal(upgradeRes.previousVersion, 1)
       assert.equal(upgradeRes.currentVersion, 2)
       assert.deepEqual(upgradeRes.appliedVersions, [2])
       assert.ok(upgradeRes.preUpgradeBackupPath && existsSync(upgradeRes.preUpgradeBackupPath))
+    } finally {
+      db.close()
+    }
+  })
+
+  it('B4: upgrades a populated v1 database without losing associations, text, sequence or FK enforcement', async () => {
+    const dbPath = path.join(tempRoot, 'status-upgrade', 'library.sqlite3')
+    const { db } = openMediaLibraryDatabase({ dbPath })
+    try {
+      await migrateDatabase(db, { dbPath, migrations: [V1_SCHEMA_MIGRATION] })
+      db.exec(`
+        INSERT INTO media_roots VALUES ('nas-main', 'NAS', '\\\\NAS\\Media', 1, '2026-11-15');
+        INSERT INTO media_files(id, root_id, relative_path, filename, extension, status)
+          VALUES (1, 'nas-main', 'a.mkv', 'a.mkv', 'mkv', 'offline'),
+                 (99, 'nas-main', 'deleted.mkv', 'deleted.mkv', 'mkv', 'indexed');
+        DELETE FROM media_files WHERE id = 99;
+        INSERT INTO tags(id, name, normalized_name, created_at, updated_at) VALUES (1, 'A', 'a', 'now', 'now');
+        INSERT INTO media_tags(media_id, tag_id, created_at) VALUES (1, 1, 'now');
+        INSERT INTO media_text_fields(media_id, field_name, field_value) VALUES (1, 'title', 'Preserve me');
+      `)
+      const snapshot = () => ['media_files', 'media_tags', 'media_text_fields'].map(table => db.prepare(`SELECT * FROM ${table}`).all())
+      const before = snapshot()
+      const failedUpgrade: SchemaMigration = {
+        ...DEFAULT_MIGRATIONS[1]!,
+        up(conn) {
+          DEFAULT_MIGRATIONS[1]!.up(conn)
+          throw new Error('fail after rebuild')
+        },
+      }
+      await assert.rejects(migrateDatabase(db, { dbPath, migrations: [V1_SCHEMA_MIGRATION, failedUpgrade] }), /fail after rebuild/)
+      assert.equal(getCurrentSchemaVersion(db), 1)
+      assert.deepEqual(snapshot(), before)
+      assert.equal(db.prepare('PRAGMA foreign_keys').get()?.foreign_keys, 1)
+      const migrated = await migrateDatabase(db, { dbPath })
+      assert.ok(migrated.preUpgradeBackupPath && existsSync(migrated.preUpgradeBackupPath))
+      assert.deepEqual(snapshot(), before)
+      for (const status of ['unmapped', 'permission_denied', 'indexed', 'missing', 'offline']) {
+        db.prepare('UPDATE media_files SET status = ? WHERE id = 1').run(status)
+      }
+      assert.throws(() => db.exec("UPDATE media_files SET status = 'invalid'"), /CHECK constraint failed/)
+      assert.throws(() => db.exec('DELETE FROM media_roots'), /FOREIGN KEY constraint failed/)
+      const inserted = db.prepare("INSERT INTO media_files(root_id, relative_path, filename, extension) VALUES ('nas-main', 'b.mkv', 'b.mkv', 'mkv')").run()
+      assert.equal(Number(inserted.lastInsertRowid), 100)
+      assert.equal(runDatabaseHealthChecks(db).ok, true)
+      assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_media_files_keyset_order'").get())
     } finally {
       db.close()
     }
