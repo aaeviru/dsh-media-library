@@ -277,31 +277,65 @@ export function normalizeLookupKey(value: string): string {
 }
 
 /**
- * Extract and normalize a catalog number candidate (e.g. `abc-123`, `ABC_00123`, `FC2-PPV-123456`).
+ * Extract and normalize a catalog number candidate:
+ * - Standard & MGS/Sirouto hyphenated codes: `ABC-123`, `300MAAN-341`, `T28-513`, `T-28634`, `MBR-AA024`
+ * - FC2 codes with or without PPV: `FC2-PPV-1234567`, `FC2-1476760` -> `FC2-PPV-<digits>`
+ * - Date-indexed uncensored codes: `061315_01-10mu`, `052615_086-1pon`, `052215_221-caribpr`
  * Returns null if no recognizable catalog number pattern is present.
  */
-const CATALOG_REGEX =
-  /(?<![A-Za-z0-9])(?:FC2[\s-_]*PPV[\s-_]*\d{5,8}|[A-Za-z]{2,6}[-_]\d{2,6}[A-Za-z]?)(?![A-Za-z0-9])/i
+const FC2_REGEX = /(?<![A-Za-z0-9])FC2[\s-_]*(?:PPV[\s-_]*)?(\d{5,8})(?![A-Za-z0-9])/i
+const UNCENSORED_STUDIO_REGEX =
+  /(?<![A-Za-z0-9])(\d{6}[_-]\d{2,4})[-_](1pon(?:do)?|10mu(?:sume)?|carib(?:pr)?|pacopacomama)(?![A-Za-z0-9])/i
+const STANDARD_CATALOG_REGEX =
+  /(?<![A-Za-z0-9])(\d{0,3}[A-Za-z]{1,6}\d{0,2})[-_]([A-Za-z]{0,2}\d{2,6})([A-Za-z])?(?![A-Za-z0-9])/i
+
+const IGNORED_CATALOG_PREFIXES = new Set([
+  'UTF',
+  'ISO',
+  'SHA',
+  'WIN',
+  'PART',
+  'CD',
+  'DISC',
+  'DISK',
+  'FPS',
+  'AAC',
+  'MP',
+  'WMV',
+  'AVI',
+  'MKV',
+])
 
 export function extractCatalogNumber(text: string | null | undefined): string | null {
   if (!text) return null
-  const match = CATALOG_REGEX.exec(text)
-  if (!match) return null
-  const raw = match[0].toUpperCase().trim()
-  if (/^FC2/i.test(raw)) {
-    const digits = raw.match(/\d{5,8}/)?.[0]
-    return digits ? `FC2-PPV-${digits}` : null
+
+  const fc2Match = FC2_REGEX.exec(text)
+  if (fc2Match) {
+    return `FC2-PPV-${fc2Match[1]}`
   }
-  const parts = raw.match(/^([A-Z]{2,6})[-_](\d{2,6})([A-Z])?$/)
-  if (!parts) return null
-  const prefix = parts[1]
-  const num = parts[2]
-  const suffix = parts[3] ?? ''
-  // Ignore common non-catalog tokens like UTF-8, ISO-8859, WIN-32, SHA-256, MP4, etc.
-  if (prefix === 'UTF' || prefix === 'ISO' || prefix === 'SHA' || prefix === 'WIN') {
+
+  const uncensoredMatch = UNCENSORED_STUDIO_REGEX.exec(text)
+  if (uncensoredMatch) {
+    const code = uncensoredMatch[1]!.replace(/-/g, '_')
+    const studio = uncensoredMatch[2]!.toUpperCase()
+    return `${studio}-${code}`
+  }
+
+  const stdMatch = STANDARD_CATALOG_REGEX.exec(text)
+  if (!stdMatch) return null
+  const prefix = stdMatch[1]!.toUpperCase()
+  const numberPart = stdMatch[2]!.toUpperCase()
+  const suffix = (stdMatch[3] ?? '').toUpperCase()
+
+  // Must contain at least one letter in prefix, and not be an ignored technical token
+  if (!/[A-Z]/.test(prefix) || IGNORED_CATALOG_PREFIXES.has(prefix)) {
     return null
   }
-  return `${prefix}-${num}${suffix}`
+  // Single-letter prefixes (e.g. T-28634, C-2058) require at least 4 digits to avoid matching e.g. 'v-10'
+  if (prefix.length === 1 && numberPart.length < 4) {
+    return null
+  }
+  return `${prefix}-${numberPart}${suffix}`
 }
 
 /**
