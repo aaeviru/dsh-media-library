@@ -3,6 +3,7 @@ import Schema from '@deepseek-ai/schemastery';
 
 export interface Config {
   uncRoot: Volatile<string>;
+  tagstudioCopyPath: Volatile<string>;
   dataDir: string;
   probeTimeoutMs: number;
 }
@@ -10,7 +11,11 @@ export interface Config {
 export const Config = Schema.object({
   uncRoot: Schema.string()
     .default('\\\\NAS\\MediaTest')
-    .description('Canonical Windows UNC root path for M1 Host/SMB spike verification (e.g. \\\\SynologyNAS\\Media\\Library).')
+    .description('Canonical Windows UNC root path for NAS media share (e.g. \\\\SynologyNAS\\Media\\Library).')
+    .volatile(),
+  tagstudioCopyPath: Schema.string()
+    .default('')
+    .description('Optional local path to a read-only TagStudio ts_library.sqlite copy for one-click import.')
     .volatile(),
   dataDir: Schema.string()
     .default('media-library')

@@ -10,12 +10,13 @@ git diff --check
 echo "==> [2/5] Building plugin bundle and verifying typecheck & external imports..."
 ./scripts/build-bundle.sh
 
-echo "==> [3/5] Running unit and integration tests..."
+echo "==> [3/5] Running unit, SQLite fixture, search, and 10k/100k benchmark tests..."
 node --experimental-strip-types --test \
   tests/inventory/tagstudio-inventory.test.ts \
   tests/host/unc-spike.test.ts \
   tests/db/schema-and-backup.test.ts \
-  tests/import/tagstudio-importer.test.ts
+  tests/import/tagstudio-importer.test.ts \
+  tests/search/*.test.ts
 
 echo "==> [4/5] Verifying .tgz package creation (portable relative default ./dist)..."
 PACKED_TGZ="$(./scripts/pack.sh ./dist | tail -n 1)"

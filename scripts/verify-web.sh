@@ -3,7 +3,7 @@
 #   1. Install packed .tgz into an isolated DSH_HOME web profile
 #   2. Start `dsh web` and verify boot.html + /plugins/??... HTTP 200
 #   3. Drive headless Chromium via Playwright to click the Media Library sidebar icon,
-#      verify spikeStatus() diagnostics, and trigger openMedia('m1-missing-file') RPC.
+#      verify search filters, keyboard/context-menu actions, and Host RPC errors.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,12 +29,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$WORK/home" "$WORK/data" "$WORK/cache"
+mkdir -p "$WORK/home" "$WORK/data" "$WORK/cache" "$WORK/fixture"
 export DSH_HOME="$WORK/home"
 export XDG_DATA_HOME="$WORK/data"
 export XDG_CACHE_HOME="$WORK/cache"
 export PLAYWRIGHT_BROWSERS_PATH="$HARNESS_DIR/node_modules/.cache/ms-playwright"
 export PATH="$HARNESS_DIR/node_modules/.bin:$PATH"
+export FIXTURE_DB="$WORK/fixture/ts_library.sqlite"
+
+export VERIFY_REPO_ROOT="$REPO_ROOT"
+node --experimental-strip-types --input-type=module -e '
+const { createM2ImportTagStudioFixture } = await import(
+  `${process.env.VERIFY_REPO_ROOT}/src/inventory/fixture-builder.ts`
+);
+createM2ImportTagStudioFixture(process.env.FIXTURE_DB);
+'
 
 cd "$HARNESS_DIR"
 echo "==> [Web 1/3] Installing $(basename "$TGZ") into isolated DSH web profile..."
@@ -90,12 +99,17 @@ fi
 echo "==> [Web 3/3] Running Playwright headless Chromium E2E click & RPC verification..."
 node --input-type=module -e '
 import assert from "node:assert/strict";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { chromium } from "/home/aaevi/projects/deepseek-harness/apps/web/node_modules/playwright/index.mjs";
 
 const url = process.env.TOKEN_URL;
+const fixtureDb = process.env.FIXTURE_DB;
 const browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+let page;
 try {
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  page.setDefaultTimeout(10000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
 
@@ -112,22 +126,260 @@ try {
 
   const mediaBtn = page.locator("button[aria-label=\"Media Library\"], button[aria-label=\"媒体库\"]").first();
   await mediaBtn.click({ force: true });
-  await page.waitForTimeout(1500);
+  await page.waitForSelector("[data-testid=\"search-submit-btn\"]", { timeout: 10000 });
 
   const h2 = await page.locator("h2").allTextContents();
   assert.ok(h2.some((text) => text.includes("Media Library") || text.includes("媒体库")), `Unexpected h2: ${JSON.stringify(h2)}`);
 
-  const openButtons = page.getByRole("button", { name: /Open Default Player|调用默认播放器打开/i });
-  const openCount = await openButtons.count();
-  assert.equal(openCount, 6, `Expected 6 Open buttons, found ${openCount}`);
+  // Verify initial empty state and import fixture via UI
+  await page.waitForSelector("[data-testid=\"empty-results-state\"]", { timeout: 5000 });
+  await page.fill("[data-testid=\"import-source-input\"]", fixtureDb);
+  const tImportStart = performance.now();
+  await page.click("[data-testid=\"import-submit-btn\"]");
+  await page.waitForSelector("[data-testid=\"media-results-table\"]", { timeout: 10000 });
+  const firstResultDisplayMs = performance.now() - tImportStart;
+  console.log(`UI first result display (including fixture import): ${firstResultDisplayMs.toFixed(1)}ms; target <1000ms`);
+  assert.ok(firstResultDisplayMs < 1000, `Expected UI first result display <1000ms, took ${firstResultDisplayMs.toFixed(1)}ms`);
 
-  await openButtons.last().click({ force: true });
-  await page.waitForTimeout(1000);
+  const rowCount = await page.locator("tr[data-testid^=\"media-row-\"]").count();
+  assert.equal(rowCount, 6, `Expected 6 imported media rows, found ${rowCount}`);
 
-  const afterClickText = await page.locator("body").innerText();
-  assert.ok(afterClickText.includes("m1-missing-file") && afterClickText.includes("FILE_NOT_FOUND"), "Expected FILE_NOT_FOUND result after clicking Open on m1-missing-file");
+  const waitRows = async count => {
+    await page.waitForFunction(expected =>
+      document.querySelectorAll("tr[data-testid^=\"media-row-\"]").length === expected &&
+      !document.querySelector("[data-testid=\"search-submit-btn\"]").disabled,
+      count
+    );
+  };
+  const search = async count => {
+    await page.click("[data-testid=\"search-submit-btn\"]");
+    await waitRows(count);
+  };
+  const reset = async () => {
+    await page.click("[data-testid=\"search-reset-btn\"]");
+    await waitRows(6);
+  };
+
+  // Alias suggestions identify the same tag; selecting two tags takes their intersection.
+  const suggestions = page.locator("[data-testid=\"tag-suggestions-list\"]");
+  await page.fill("[data-testid=\"tag-search-input\"]", "Studio Alpha");
+  const studioOption = suggestions.getByRole("button", { name: /^Studio Alpha/ });
+  await studioOption.waitFor();
+  const studioTestId = await studioOption.getAttribute("data-testid");
+  await page.fill("[data-testid=\"tag-search-input\"]", "alpha");
+  await page.locator(`[data-testid="${studioTestId}"]`).click();
+  await waitRows(2);
+  await page.fill("[data-testid=\"tag-search-input\"]", "PA");
+  await suggestions.getByRole("button", { name: /^Performer A / }).click();
+  await waitRows(1);
+  assert.ok((await page.locator("tr[data-testid^=\"media-row-\"]").innerText()).includes("LIB-101_part1"));
+  await reset();
+
+  // Catalog prefix mode, inclusive date bounds, literal text, empty and error states.
+  await page.fill("[data-testid=\"search-catalog-input\"]", "lib");
+  await search(0);
+  await page.click("[data-testid=\"catalog-mode-prefix\"]");
+  await search(2);
+  await reset();
+  await page.fill("[data-testid=\"search-date-from-input\"]", "2026-10-15");
+  await page.fill("[data-testid=\"search-date-to-input\"]", "2026-11-01");
+  await search(3);
+  await reset();
+  await page.fill("[data-testid=\"search-keyword-input\"]", "中文目录");
+  await search(1);
+  await reset();
+  await page.fill("[data-testid=\"search-date-from-input\"]", "not-a-date");
+  await page.click("[data-testid=\"search-submit-btn\"]");
+  await page.locator("[data-testid=\"media-library-error-banner\"]").waitFor();
+  await reset();
+  // Unary Typert RPCs use HTTP; hold a real response until busy is asserted.
+  const searchRoute = "**/api/mediaLibrary/searchMedia";
+  let releaseResponse;
+  const responseGate = new Promise(resolve => { releaseResponse = resolve; });
+  await page.route(searchRoute, async route => {
+    const response = await route.fetch();
+    await responseGate;
+    await route.fulfill({ response });
+  });
+  try {
+    const requested = page.waitForRequest(searchRoute);
+    await page.click("[data-testid=\"search-submit-btn\"]");
+    await requested;
+    assert.equal(await page.locator("[data-testid=\"search-submit-btn\"]").isDisabled(), true);
+  } finally {
+    releaseResponse();
+  }
+  await waitRows(6);
+  await page.unroute(searchRoute);
+  console.log("Browser busy state verified with a controlled real-RPC response delay.");
+  console.log("Browser filters verified: alias identity, tag AND, exact/prefix, inclusive dates, text, empty and error recovery.");
+
+  // Test catalog filter ("ABP-909")
+  await page.fill("[data-testid=\"search-catalog-input\"]", "ABP-909");
+  await page.click("[data-testid=\"search-submit-btn\"]");
+  const filteredRows = page.locator("tr[data-testid^=\"media-row-\"]");
+  await assert.doesNotReject(() => page.waitForFunction(() =>
+    document.querySelectorAll("tr[data-testid^=\"media-row-\"]").length === 1
+  ));
+
+  await filteredRows.first().focus();
+  await page.keyboard.press("r");
+  await page.waitForFunction(() => {
+    const text = document.querySelector("[data-testid=\"last-action-banner\"]")?.textContent;
+    return text?.includes("reveal(") && text.includes("FILE_NOT_FOUND");
+  });
+  await filteredRows.first().focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => {
+    const text = document.querySelector("[data-testid=\"last-action-banner\"]")?.textContent;
+    return text?.includes("open(") && text.includes("FILE_NOT_FOUND");
+  });
+  await filteredRows.first().click({ button: "right" });
+  await page.locator("[data-testid=\"media-row-context-menu\"]").waitFor();
+  await page.keyboard.press("Escape");
+  await page.locator("[data-testid=\"media-row-context-menu\"]").waitFor({ state: "detached" });
+  console.log("Browser keyboard actions verified: R reveal, Enter open, Escape dismiss; actual Host RPC returns FILE_NOT_FOUND on Linux.");
+
+  // Test context menu -> Open Default Player on missing NAS file
+  await filteredRows.first().click({ button: "right" });
+  await page.waitForSelector("[data-testid=\"media-row-context-menu\"]", { timeout: 3000 });
+  await page.click("[data-testid=\"context-menu-open-btn\"]");
+  await page.waitForSelector("[data-testid=\"last-action-banner\"]", { timeout: 5000 });
+
+  const toastText = await page.locator("[data-testid=\"last-action-banner\"]").innerText();
+  assert.ok(toastText.includes("FILE_NOT_FOUND"), `Expected FILE_NOT_FOUND in toast banner, got: ${toastText}`);
+  await page.waitForSelector("[data-testid=\"media-status-missing\"]", { timeout: 3000 });
+
+  // Also verify M1 spike diagnostics drawer remains functional
+  if (!await page.locator("[data-testid=\"diagnostics-drawer\"]").isVisible()) {
+    await page.click("[data-testid=\"toggle-diagnostics-btn\"]");
+  }
+  await page.waitForSelector("[data-testid=\"diagnostics-drawer\"]", { timeout: 3000 });
+  await page.locator("[data-testid=\"diagnostics-drawer\"]")
+    .getByRole("button", { name: /Open Default Player|调用默认播放器打开/i }).last().click();
+  await page.waitForFunction(() =>
+    document.querySelector("[data-testid=\"last-action-banner\"]")?.textContent.includes("m1-missing-file")
+  );
+
+  const bodyText = await page.locator("body").innerText();
+  assert.ok(bodyText.includes("m1-missing-file") && bodyText.includes("FILE_NOT_FOUND"), "Expected M1 spike result for m1-missing-file");
   assert.deepEqual(errors, []);
-  console.log("Playwright Web E2E verification passed: panel rendered, spikeStatus loaded, and openMedia RPC returned FILE_NOT_FOUND.");
+
+  // Add anonymous rows to the isolated destination DB to exercise actual UI pagination.
+  const db = new DatabaseSync(path.join(process.env.DSH_HOME, "media-library/library.sqlite3"));
+  try {
+    const root = db.prepare("SELECT id FROM media_roots LIMIT 1").get();
+    const insert = db.prepare(`
+      INSERT INTO media_files(id, root_id, relative_path, filename, extension, catalog_number, media_date)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (let id = 1000; id < 1060; id++) {
+      insert.run(id, root.id, `page${id}.mkv`, `page${id}.mkv`, "mkv", `PAGE-${id}`, "2020-01-01");
+    }
+    const updateStatus = db.prepare("UPDATE media_files SET status = ? WHERE id = ?");
+    for (const [id, status] of [[1000, "offline"], [1001, "unmapped"], [1002, "permission_denied"]]) {
+      updateStatus.run(status, id);
+    }
+  } finally {
+    db.close();
+  }
+  await page.click("[data-testid=\"search-reset-btn\"]");
+  await waitRows(50);
+  await page.fill("[data-testid=\"search-catalog-input\"]", "ABP-909");
+  await page.click("[data-testid=\"load-more-btn\"]");
+  await page.locator("[data-testid=\"load-more-btn\"]").waitFor({ state: "detached" });
+  const pageSummary = await page.locator("[data-testid=\"search-results-summary\"]").innerText();
+  const counts = pageSummary.match(/\((\d+) \/ (\d+)/);
+  const mixedPagination = !counts || Number(counts[1]) !== 66 || Number(counts[2]) !== 66;
+  const pagedIds = await page.locator("tr[data-testid^=\"media-row-\"]").evaluateAll(rows => rows.map(row => row.dataset.testid));
+  assert.equal(new Set(pagedIds).size, 66, "Pagination must neither repeat nor omit rows");
+  for (const status of ["offline", "unmapped", "permission_denied"]) {
+    await page.locator(`[data-testid="media-status-${status}"]`).waitFor();
+  }
+  await page.locator("[data-testid=\"media-status-missing\"]").first().waitFor();
+  console.log(`Pagination after editing draft filters and loading more: ${pageSummary}`);
+
+  // A context menu must remain clickable when invoked at a row edge.
+  const edgeRow = page.locator("tr[data-testid^=\"media-row-\"]").first();
+  await edgeRow.scrollIntoViewIfNeeded();
+  const rowBox = await edgeRow.boundingBox();
+  await edgeRow.click({ button: "right", position: { x: rowBox.width - 4, y: rowBox.height / 2 } });
+  const menuBox = await page.locator("[data-testid=\"media-row-context-menu\"]").boundingBox();
+  const viewport = page.viewportSize();
+  const clippedMenu = menuBox.x < 0 || menuBox.y < 0 ||
+    menuBox.x + menuBox.width > viewport.width || menuBox.y + menuBox.height > viewport.height;
+  console.log("Context menu edge geometry:", JSON.stringify({ menuBox, viewport, clippedMenu }));
+  assert.deepEqual(
+    { mixedPagination: Boolean(mixedPagination), clippedMenu },
+    { mixedPagination: false, clippedMenu: false },
+    "UI acceptance requires consistent pagination and a context menu contained in the viewport"
+  );
+  await page.click("[data-testid=\"context-menu-open-btn\"]");
+  await page.locator("[data-testid=\"media-row-context-menu\"]").waitFor({ state: "detached" });
+  // Bottom/right corner and a narrow viewport must also leave both actions visible.
+  await page.setViewportSize({ width: 640, height: 480 });
+  await edgeRow.scrollIntoViewIfNeeded();
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await edgeRow.evaluate(element => element.dispatchEvent(new MouseEvent("contextmenu", {
+    bubbles: true, cancelable: true, view: window, clientX: 638, clientY: 478, button: 2,
+  })));
+  const cornerBox = await page.locator("[data-testid=\"media-row-context-menu\"]").boundingBox();
+  assert.ok(cornerBox.x >= 0 && cornerBox.y >= 0 && cornerBox.x + cornerBox.width <= 640 && cornerBox.y + cornerBox.height <= 480);
+  await page.click("[data-testid=\"context-menu-reveal-btn\"]");
+  await page.locator("[data-testid=\"media-row-context-menu\"]").waitFor({ state: "detached" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // Measure actual 100k result rendering separately from the six-row import.
+  // This is a warm Host/UI search; cold Host initialization is measured in B5.
+  const benchDb = new DatabaseSync(path.join(process.env.DSH_HOME, "media-library/library.sqlite3"));
+  try {
+    benchDb.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE;");
+    const root = benchDb.prepare("SELECT id FROM media_roots LIMIT 1").get();
+    benchDb.prepare(`
+      WITH RECURSIVE seq(n) AS (SELECT 1060 UNION ALL SELECT n + 1 FROM seq WHERE n < 100993)
+      INSERT INTO media_files(id, root_id, relative_path, filename, extension, catalog_number, media_date)
+      SELECT n, ?, printf(?, n), printf(?, n), ?, printf(?, n % 9000), CASE WHEN n % 5 = 0 THEN NULL ELSE ? END FROM seq
+    `).run(root.id, "bench/video_%d.mkv", "video_%d.mkv", "mkv", "ABP-%04d", "2026-01-01");
+    benchDb.prepare(`
+      WITH RECURSIVE seq(n) AS (SELECT 10000 UNION ALL SELECT n + 1 FROM seq WHERE n < 10249)
+      INSERT INTO tags(id, name, normalized_name, created_at, updated_at)
+      SELECT n, printf(?, n), printf(?, n), ?, ? FROM seq
+    `).run("BenchTag_%d", "benchtag_%d", "2026-01-01", "2026-01-01");
+    for (const offset of [0, 1]) {
+      benchDb.prepare(`INSERT INTO media_tags(media_id, tag_id, source, created_at)
+        SELECT id, 10000 + (id + ?) % 250, ?, ? FROM media_files`).run(offset, "tagstudio-import", "2026-01-01");
+    }
+    benchDb.exec("COMMIT; ANALYZE;");
+    assert.equal(benchDb.prepare("SELECT COUNT(*) AS count FROM media_files").get().count, 100000);
+  } finally {
+    benchDb.close();
+  }
+  const first100kStart = performance.now();
+  await page.click("[data-testid=\"search-reset-btn\"]");
+  await page.waitForFunction(() =>
+    document.querySelector("[data-testid=\"search-results-summary\"]")?.textContent.includes("50 / 100000") &&
+    !document.querySelector("[data-testid=\"search-submit-btn\"]").disabled
+  );
+  const first100kMs = performance.now() - first100kStart;
+  console.log(`100k UI first page search/render (warm Host): ${first100kMs.toFixed(1)}ms; target <1000ms`);
+  assert.ok(first100kMs < 1000, `100k result rendering took ${first100kMs.toFixed(1)}ms`);
+  assert.deepEqual(errors, []);
+  console.log(`Playwright Web E2E verification passed (firstResultDisplayMs=${firstResultDisplayMs.toFixed(1)}ms): import, search filter, context menu openMedia, missing badge, and M1 diagnostics verified.`);
+} catch (error) {
+  if (page) {
+    console.error("Browser failure geometry:", JSON.stringify(await page.evaluate(() => {
+      const rect = selector => {
+        const element = document.querySelector(selector);
+        return element ? element.getBoundingClientRect().toJSON() : null;
+      };
+      return {
+        viewport: { width: innerWidth, height: innerHeight },
+        menu: rect("[data-testid=\"media-row-context-menu\"]"),
+        openButton: rect("[data-testid=\"context-menu-open-btn\"]"),
+      };
+    })));
+    await page.screenshot({ path: "/tmp/issue-4-e2e-failure.png", fullPage: true });
+  }
+  throw error;
 } finally {
   await browser.close();
 }

@@ -2,13 +2,25 @@ import type { Context } from '@deepseek-ai/cordis';
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { Config } from './config.ts';
 import { MediaLibrarySpikeService } from './spike-service.ts';
-import type { MediaActionResult, SpikeStatus } from './types.ts';
+import type {
+  GetMediaInput,
+  ImportTagStudioInput,
+  ImportTagStudioResult,
+  LibraryOverview,
+  ListTagsInput,
+  ListTagsResult,
+  MediaActionResult,
+  MediaDetailItem,
+  SearchMediaInput,
+  SearchMediaResult,
+  SpikeStatus,
+} from './types.ts';
 
 export type { Config } from './config.ts';
 
 /**
  * Host Remote service for the Media Library plugin.
- * Exposes a strictly mediaId-based RPC surface over Typert (`mediaLibrary` namespace).
+ * Exposes a strictly mediaId- and controlled-query-based RPC surface over Typert (`mediaLibrary` namespace).
  */
 export class MediaLibraryRemote extends TypertRemoteService {
   static inject = ['typert'];
@@ -24,6 +36,7 @@ export class MediaLibraryRemote extends TypertRemoteService {
     this.spikeService = new MediaLibrarySpikeService({
       dataDirName: config.dataDir,
       configuredUncRoot: () => config.uncRoot.get(),
+      configuredTagStudioCopyPath: () => config.tagstudioCopyPath.get(),
       probeTimeoutMs: config.probeTimeoutMs,
     });
   }
@@ -34,6 +47,46 @@ export class MediaLibraryRemote extends TypertRemoteService {
   @Remote('spikeStatus')
   async spikeStatus(): Promise<SpikeStatus> {
     return this.spikeService.getSpikeStatus();
+  }
+
+  /**
+   * Read local SQLite database overview, counts, and last import summary.
+   */
+  @Remote('getLibraryOverview')
+  async getLibraryOverview(): Promise<LibraryOverview> {
+    return this.spikeService.getLibraryOverview();
+  }
+
+  /**
+   * List or search tags by name, shorthand, or alias.
+   */
+  @Remote('listTags')
+  async listTags(input?: ListTagsInput): Promise<ListTagsResult> {
+    return this.spikeService.listTags(input);
+  }
+
+  /**
+   * Search imported media by text, catalog number, date range, and multi-tag AND filters with stable keyset pagination.
+   */
+  @Remote('searchMedia')
+  async searchMedia(input?: SearchMediaInput): Promise<SearchMediaResult> {
+    return this.spikeService.searchMedia(input);
+  }
+
+  /**
+   * Get full details for a single media item by its mediaId.
+   */
+  @Remote('getMedia')
+  async getMedia(input: GetMediaInput): Promise<MediaDetailItem | null> {
+    return this.spikeService.getMedia(input);
+  }
+
+  /**
+   * Import a read-only TagStudio ts_library.sqlite copy into the local SQLite database.
+   */
+  @Remote('importTagStudioCopy')
+  async importTagStudioCopy(input?: ImportTagStudioInput): Promise<ImportTagStudioResult> {
+    return this.spikeService.importTagStudioCopy(input);
   }
 
   /**
