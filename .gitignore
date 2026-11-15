@@ -1,0 +1,11 @@
+/node_modules/
+/lib/
+/bundle/lib/
+/bundle/locale/
+/bundle/cordis.patch.yml
+/dist/
+/coverage/
+.env
+*.tsbuildinfo
+*.tgz
+worktree-*
