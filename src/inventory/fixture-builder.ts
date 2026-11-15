@@ -282,3 +282,37 @@ export function createMultiCandidateFixtureSet(baseDir: string): {
     mediaRootDir,
   }
 }
+
+/**
+ * Create an extended anonymized TagStudio v400 fixture specifically exercising all M2 import rules (`D2.1..D2.5`):
+ * - All entries/tags/aliases/orphans from `createAnonymizedTagStudioV400Fixture`
+ * - Entry 7 (`Thumbs.db`) & Entry 8 (`.vsmeta`) with tag associations -> exercises `D2.5` sidecar filtering + `D2.1` `skippedSidecarTagEntries`
+ * - Entry 9 (`2026/11/FC2-1476760/video.mp4`) tagged with both duplicate tags `1001` (`Studio Alpha`) and `1002` (`studio alpha`) -> exercises `D2.2` parent-dir catalog normalization (`FC2-PPV-1476760`) and `D2.4` `deduplicatedAfterTagMerge`
+ * - Tag `1005` (`Performer C`) sharing alias `Actor_A_Alias` with Tag `1000` -> exercises shared/ambiguous alias reporting across distinct tags
+ */
+export function createM2ImportTagStudioFixture(dbFilePath: string): void {
+  createAnonymizedTagStudioV400Fixture(dbFilePath)
+  const db = new DatabaseSync(dbFilePath)
+  try {
+    db.exec(`
+      INSERT INTO tags (id, name, shorthand, is_category, is_hidden, disambiguation_id) VALUES
+        (1005, 'Performer C', 'PC', 0, 0, NULL);
+
+      INSERT INTO tag_aliases (id, name, tag_id) VALUES
+        (6, 'actor_a_alias', 1005);
+
+      INSERT INTO entries (id, path, filename, suffix, date_created, date_modified, date_added) VALUES
+        (7, '2026/11/LIB-101/Thumbs.db', 'Thumbs.db', 'db', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', '2026-11-02T00:00:00Z'),
+        (8, '2026/11/LIB-101/LIB-101_part1.mkv.vsmeta', 'LIB-101_part1.mkv.vsmeta', 'vsmeta', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z', '2026-11-02T00:00:00Z'),
+        (9, '2026/11/FC2-1476760/video.mp4', 'video.mp4', 'mp4', '2026-11-03T00:00:00Z', '2026-11-03T00:00:00Z', '2026-11-04T00:00:00Z');
+
+      INSERT INTO tag_entries (tag_id, entry_id) VALUES
+        (1000, 7),
+        (1001, 8),
+        (1001, 9),
+        (1002, 9);
+    `)
+  } finally {
+    db.close()
+  }
+}
