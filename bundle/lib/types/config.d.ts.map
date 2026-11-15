@@ -1,0 +1,1 @@
+{"version":3,"file":"config.d.ts","sourceRoot":"","sources":["../../src/config.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,QAAQ,EAAE,MAAM,qBAAqB,CAAC;AACpD,OAAO,MAAM,MAAM,0BAA0B,CAAC;AAE9C,MAAM,WAAW,MAAM;IACrB,OAAO,EAAE,QAAQ,CAAC,MAAM,CAAC,CAAC;IAC1B,OAAO,EAAE,MAAM,CAAC;IAChB,cAAc,EAAE,MAAM,CAAC;CACxB;AAED,eAAO,MAAM,MAAM;;;;;;;;aAYjB,CAAC"}

@@ -1,0 +1,4 @@
+# Installed-bundle composition; resolves the package by name from the profile.
+- insert:
+    - id: media-library
+      name: '@deepseek-ai/dsh-experimental-media-library'
