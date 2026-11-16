@@ -1,7 +1,11 @@
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type {
   AliasInput,
+  CreateBackupInput,
+  CreateBackupResult,
   CreateTagInput,
+  ExportMappingReportInput,
+  ExportMappingReportResult,
   GetMediaInput,
   ImportTagStudioInput,
   ImportTagStudioResult,
@@ -13,6 +17,7 @@ import type {
   MergePreviewResult,
   MergeTagsInput,
   MergeTagsResult,
+  OpsStatus,
   PreviewMergeInput,
   RenameTagInput,
   SearchMediaInput,
@@ -42,4 +47,7 @@ export interface MediaLibraryNamespace {
   mergeTags: (input: MergeTagsInput) => Promise<RemoteResult<MergeTagsResult>>;
   archiveTag: (input: TagRevisionInput) => Promise<RemoteResult<TagMutationResult>>;
   restoreTag: (input: TagRevisionInput) => Promise<RemoteResult<TagMutationResult>>;
+  getOpsStatus: () => Promise<RemoteResult<OpsStatus>>;
+  createBackup: (input: CreateBackupInput) => Promise<RemoteResult<CreateBackupResult>>;
+  exportMappingReport: (input: ExportMappingReportInput) => Promise<RemoteResult<ExportMappingReportResult>>;
 }

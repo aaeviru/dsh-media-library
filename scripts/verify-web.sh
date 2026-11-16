@@ -425,6 +425,25 @@ try {
   await page.click("[data-testid=\"toggle-tag-mgmt-btn\"]");
   console.log("Issue #5 M3 UI E2E (XSS-as-data, create/alias/rename/archive/restore, batch tag, merge preview+confirm): PASS");
 
+  // Issue #6 M3 Ops E2E: open Backup & Ops panel, create verified backup, export JSON & CSV mapping reports
+  await page.click("[data-testid=\"toggle-ops-panel-btn\"]");
+  await page.waitForSelector("[data-testid=\"ops-panel\"]");
+  await page.click("[data-testid=\"create-backup-btn\"]");
+  await page.waitForSelector("[data-testid=\"backup-result-banner\"]");
+  const backupBanner = await page.locator("[data-testid=\"backup-result-banner\"]").innerText();
+  assert.ok(backupBanner.includes("Backup OK:"), `Expected Backup OK banner, got: ${backupBanner}`);
+  await page.waitForSelector("[data-testid=\"ops-backup-list\"]");
+
+  await page.click("[data-testid=\"export-json-btn\"]");
+  await page.waitForSelector("[data-testid=\"export-result-banner\"]");
+  const jsonBanner = await page.locator("[data-testid=\"export-result-banner\"]").innerText();
+  assert.ok(jsonBanner.includes(".json"), `Expected .json export banner, got: ${jsonBanner}`);
+
+  await page.click("[data-testid=\"export-csv-btn\"]");
+  await page.waitForFunction(() => document.querySelector("[data-testid=\"export-result-banner\"]")?.textContent?.includes(".csv"));
+  await page.click("[data-testid=\"toggle-ops-panel-btn\"]");
+  console.log("Issue #6 M3 Ops E2E (verified backup, retention list, JSON/CSV export): PASS");
+
   // Measure actual 100k result rendering separately from the six-row import.
   // This is a warm Host/UI search; cold Host initialization is measured in B5.
   const benchDb = new DatabaseSync(path.join(process.env.DSH_HOME, "media-library/library.sqlite3"));

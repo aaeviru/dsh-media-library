@@ -4,7 +4,11 @@ import { Config } from './config.ts';
 import { MediaLibrarySpikeService } from './spike-service.ts';
 import type {
   AliasInput,
+  CreateBackupInput,
+  CreateBackupResult,
   CreateTagInput,
+  ExportMappingReportInput,
+  ExportMappingReportResult,
   GetMediaInput,
   ImportTagStudioInput,
   ImportTagStudioResult,
@@ -16,6 +20,7 @@ import type {
   MergePreviewResult,
   MergeTagsInput,
   MergeTagsResult,
+  OpsStatus,
   PreviewMergeInput,
   RenameTagInput,
   SearchMediaInput,
@@ -48,6 +53,10 @@ export class MediaLibraryRemote extends TypertRemoteService {
       dataDirName: config.dataDir,
       configuredUncRoot: () => config.uncRoot.get(),
       configuredTagStudioCopyPath: () => config.tagstudioCopyPath.get(),
+      configuredNasBackupDir: () => config.nasBackupDir.get(),
+      backupRetentionCount: config.backupRetentionCount,
+      preMigrateRetentionCount: config.preMigrateRetentionCount,
+      autoDailyBackup: config.autoDailyBackup,
       probeTimeoutMs: config.probeTimeoutMs,
     });
   }
@@ -188,5 +197,29 @@ export class MediaLibraryRemote extends TypertRemoteService {
   @Remote('restoreTag')
   async restoreTag(input: TagRevisionInput): Promise<TagMutationResult> {
     return this.spikeService.restoreTag(input);
+  }
+
+  /**
+   * Read backup retention, degraded-mode status, and managed backup inventory.
+   */
+  @Remote('getOpsStatus')
+  async getOpsStatus(): Promise<OpsStatus> {
+    return this.spikeService.getOpsStatus();
+  }
+
+  /**
+   * Create a verified online SQLite backup and prune excess old plugin backups.
+   */
+  @Remote('createBackup')
+  async createBackup(input?: CreateBackupInput): Promise<CreateBackupResult> {
+    return this.spikeService.createBackup(input);
+  }
+
+  /**
+   * Export a portable JSON or CSV mapping report for recovery and audit.
+   */
+  @Remote('exportMappingReport')
+  async exportMappingReport(input: ExportMappingReportInput): Promise<ExportMappingReportResult> {
+    return this.spikeService.exportMappingReport(input);
   }
 }
