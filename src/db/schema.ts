@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
 
-export const CURRENT_SCHEMA_VERSION = 2
+export const CURRENT_SCHEMA_VERSION = 3
 
 export interface SchemaMigration {
   readonly version: number
@@ -283,7 +283,31 @@ export const V2_MEDIA_STATUS_MIGRATION: SchemaMigration = {
   },
 }
 
-export const DEFAULT_MIGRATIONS: readonly SchemaMigration[] = [V1_SCHEMA_MIGRATION, V2_MEDIA_STATUS_MIGRATION]
+export const V3_TAG_MANAGEMENT_MIGRATION: SchemaMigration = {
+  version: 3,
+  description: 'Safe tag management: tags.archived_at, tags.merged_into_id and append-only mutation_log audit table',
+  up(db): void {
+    db.exec(`
+      ALTER TABLE tags ADD COLUMN archived_at TEXT;
+      ALTER TABLE tags ADD COLUMN merged_into_id INTEGER REFERENCES tags(id) ON DELETE RESTRICT;
+      CREATE TABLE mutation_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        action TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        result TEXT NOT NULL
+      );
+      CREATE INDEX idx_mutation_log_action_ts ON mutation_log(action, ts);
+      CREATE INDEX idx_tags_archived_at ON tags(archived_at);
+    `)
+  },
+}
+
+export const DEFAULT_MIGRATIONS: readonly SchemaMigration[] = [
+  V1_SCHEMA_MIGRATION,
+  V2_MEDIA_STATUS_MIGRATION,
+  V3_TAG_MANAGEMENT_MIGRATION,
+]
 
 function ensureSchemaVersionsTable(db: DatabaseSync): void {
   db.exec(`
@@ -328,7 +352,7 @@ export async function migrateDatabase(
   ensureSchemaVersionsTable(db)
 
   const migrations = [...(options?.migrations ?? DEFAULT_MIGRATIONS)].sort((a, b) => a.version - b.version)
-  const appVersion = options?.appVersion ?? '0.2.0'
+  const appVersion = options?.appVersion ?? '0.3.0'
   const nowFn = options?.now ?? (() => new Date())
 
   const previousVersion = getCurrentSchemaVersion(db)

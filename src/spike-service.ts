@@ -15,11 +15,24 @@ import {
 } from './db/schema.ts';
 import { importTagStudioDatabase, type TagStudioImportReport } from './import/tagstudio-importer.ts';
 import {
+  addAlias,
+  archiveTag,
+  createTag,
+  mergeTags,
+  previewMerge,
+  removeAlias,
+  renameTag,
+  restoreTag,
+  setMediaTags,
+} from './mutations/index.ts';
+import {
   getMediaDetailInDatabase,
   listTagsInDatabase,
   searchMediaInDatabase,
 } from './search/search-repository.ts';
 import type {
+  AliasInput,
+  CreateTagInput,
   GetMediaInput,
   ImportTagStudioInput,
   ImportTagStudioResult,
@@ -32,9 +45,18 @@ import type {
   MediaDetailItem,
   MediaFileStatus,
   MediaRootConfig,
+  MergePreviewResult,
+  MergeTagsInput,
+  MergeTagsResult,
+  PreviewMergeInput,
+  RenameTagInput,
   SearchMediaInput,
   SearchMediaResult,
+  SetMediaTagsInput,
+  SetMediaTagsResult,
   SpikeStatus,
+  TagMutationResult,
+  TagRevisionInput,
 } from './types.ts';
 import {
   normalizeCanonicalUncRoot,
@@ -471,6 +493,45 @@ export class MediaLibrarySpikeService {
 
   async getMedia(input: GetMediaInput): Promise<MediaDetailItem | null> {
     return this.withInitializedDatabase((db) => getMediaDetailInDatabase(db, input.mediaId));
+  }
+
+  // --- Issue #5 tag / alias management: every write goes through src/mutations (single transaction,
+  // revision checks, mutation_log audit). Inputs are ids and controlled strings only.
+
+  async createTag(input: CreateTagInput): Promise<TagMutationResult> {
+    return this.withInitializedDatabase((db) => createTag(db, input));
+  }
+
+  async renameTag(input: RenameTagInput): Promise<TagMutationResult> {
+    return this.withInitializedDatabase((db) => renameTag(db, input));
+  }
+
+  async addAlias(input: AliasInput): Promise<TagMutationResult> {
+    return this.withInitializedDatabase((db) => addAlias(db, input));
+  }
+
+  async removeAlias(input: AliasInput): Promise<TagMutationResult> {
+    return this.withInitializedDatabase((db) => removeAlias(db, input));
+  }
+
+  async setMediaTags(input: SetMediaTagsInput): Promise<SetMediaTagsResult> {
+    return this.withInitializedDatabase((db) => setMediaTags(db, input));
+  }
+
+  async previewMerge(input: PreviewMergeInput): Promise<MergePreviewResult> {
+    return this.withInitializedDatabase((db) => previewMerge(db, input));
+  }
+
+  async mergeTags(input: MergeTagsInput): Promise<MergeTagsResult> {
+    return this.withInitializedDatabase((db) => mergeTags(db, input));
+  }
+
+  async archiveTag(input: TagRevisionInput): Promise<TagMutationResult> {
+    return this.withInitializedDatabase((db) => archiveTag(db, input));
+  }
+
+  async restoreTag(input: TagRevisionInput): Promise<TagMutationResult> {
+    return this.withInitializedDatabase((db) => restoreTag(db, input));
   }
 
   async importTagStudioCopy(input?: ImportTagStudioInput): Promise<ImportTagStudioResult> {
