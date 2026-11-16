@@ -14,7 +14,7 @@ echo "==> [3/5] Running unit, SQLite fixture, search, and 10k/100k benchmark tes
 node --experimental-strip-types --test \
   tests/inventory/tagstudio-inventory.test.ts \
   tests/host/unc-spike.test.ts \
-  tests/db/schema-and-backup.test.ts \
+  tests/db/*.test.ts \
   tests/import/tagstudio-importer.test.ts \
   tests/search/*.test.ts \
   tests/mutations/*.test.ts

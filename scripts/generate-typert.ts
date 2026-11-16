@@ -119,6 +119,11 @@ const MUTATION_SCHEMAS = [
     r =>
       `let _mediaLibrary_${r.key}$schema$value\nconst _mediaLibrary_${r.key}$schema = () => (_mediaLibrary_${r.key}$schema$value ??= z.union([${zObject(r.fields)}, _mediaLibrary_mutationError()]))`,
   ),
+  `let _mediaLibrary_createBackupInput$schema$value\nconst _mediaLibrary_createBackupInput$schema = () => (_mediaLibrary_createBackupInput$schema$value ??= z.object({ reason: z.enum(['manual', 'daily']).readonly().optional() }).readonly().optional())`,
+  `let _mediaLibrary_createBackupResult$schema$value\nconst _mediaLibrary_createBackupResult$schema = () => (_mediaLibrary_createBackupResult$schema$value ??= z.object({ ok: BOOL, backupPath: STR.optional(), sha256: STR.optional(), size: NUM.optional(), prunedCount: NUM.optional(), nasCopyPath: STR.nullable().optional(), nasCopyWarning: STR.nullable().optional(), error: STR.optional() }).readonly())`,
+  `let _mediaLibrary_exportMappingReportInput$schema$value\nconst _mediaLibrary_exportMappingReportInput$schema = () => (_mediaLibrary_exportMappingReportInput$schema$value ??= z.object({ format: z.enum(['json', 'csv']).readonly() }).readonly())`,
+  `let _mediaLibrary_exportMappingReportResult$schema$value\nconst _mediaLibrary_exportMappingReportResult$schema = () => (_mediaLibrary_exportMappingReportResult$schema$value ??= z.object({ ok: BOOL, format: z.enum(['json', 'csv']).readonly(), filename: STR, mimeType: STR, rowCount: NUM, sha256: STR, content: STR, error: STR.optional() }).readonly())`,
+  `let _mediaLibrary_opsStatus$schema$value\nconst _mediaLibrary_opsStatus$schema = () => (_mediaLibrary_opsStatus$schema$value ??= z.object({ localDataDir: STR, localDatabasePath: STR, backupDir: STR, nasBackupDir: STR.nullable(), dailyRetentionCount: NUM, preMigrateRetentionCount: NUM, autoDailyBackup: BOOL, lastAutoBackupAt: STR.nullable(), lastBackupSha256: STR.nullable(), degradedState: z.object({ degraded: BOOL, reason: STR.nullable(), schemaVersion: NUM, supportedMaxVersion: NUM, healthOk: BOOL, checkedAt: STR }).readonly(), backups: z.array(z.object({ filename: STR, path: STR, kind: z.enum(['daily', 'pre-migrate']).readonly(), size: NUM, mtimeIso: STR }).readonly()).readonly() }).readonly())`,
 ].join('\n\n');
 
 interface MutationMethodSpec {
@@ -141,6 +146,8 @@ const MUTATION_METHODS: MutationMethodSpec[] = [
   { name: 'mergeTags', description: 'Merge tag B (source) into tag A (target) atomically; B is archived, never deleted.', inputKey: 'mergeTagsInput', inputType: 'MergeTagsInput', resultKey: 'mergeTagsResult', resultType: 'MergeTagsResult', paramDescription: 'Target and source tag ids with the previewed revisions.', line: 160 },
   { name: 'archiveTag', description: 'Archive a tag non-destructively (existing associations and search stay readable).', inputKey: 'tagRevisionInput', inputType: 'TagRevisionInput', resultKey: 'tagMutationResult', resultType: 'TagMutationResult', paramDescription: 'Tag id and expected revision.', line: 168 },
   { name: 'restoreTag', description: 'Restore an archived tag.', inputKey: 'tagRevisionInput', inputType: 'TagRevisionInput', resultKey: 'tagMutationResult', resultType: 'TagMutationResult', paramDescription: 'Tag id and expected revision.', line: 176 },
+  { name: 'createBackup', description: 'Create a verified online SQLite backup and prune excess old plugin backups.', inputKey: 'createBackupInput', inputType: 'CreateBackupInput', resultKey: 'createBackupResult', resultType: 'CreateBackupResult', paramDescription: 'Optional backup reason.', line: 205 },
+  { name: 'exportMappingReport', description: 'Export a portable JSON or CSV mapping report for recovery and audit.', inputKey: 'exportMappingReportInput', inputType: 'ExportMappingReportInput', resultKey: 'exportMappingReportResult', resultType: 'ExportMappingReportResult', paramDescription: 'Report format (json or csv).', line: 213 },
 ];
 
 function mutationMethodEntry(m: MutationMethodSpec): string {
@@ -439,6 +446,18 @@ const REMOTE_INFO_BODY = `{
       },
       sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 54, column: 3 },
     },
+    'mediaLibrary/getOpsStatus': {
+      service: 'mediaLibrary',
+      description: 'Read backup retention, degraded-mode status, and managed backup inventory.',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-experimental-media-library/types#OpsStatus',
+        create: _mediaLibrary_opsStatus$schema,
+      },
+      sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 197, column: 3 },
+    },
     'mediaLibrary/getMedia': {
       service: 'mediaLibrary',
       description: 'Get full details for a single media item by its mediaId.',
@@ -681,6 +700,7 @@ import type {
   SearchMediaInput,
   SearchMediaResult,
   SpikeStatus,
+  OpsStatus,
 ${MUTATION_DTS_IMPORTS.map(n => `  ${n},`).join('\n')}
 } from '../src/types.ts'
 
@@ -688,6 +708,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$mediaLibrary {
     getLibraryOverview: () => Promise<RemoteResult<LibraryOverview>>
     getMedia: (input: GetMediaInput) => Promise<RemoteResult<MediaDetailItem | null>>
+    getOpsStatus: () => Promise<RemoteResult<OpsStatus>>
     importTagStudioCopy: (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     listTags: (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
     openMedia: (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
@@ -699,6 +720,7 @@ ${MUTATION_DTS_NAMESPACE}
   interface TypertRemoteMap {
     'mediaLibrary/getLibraryOverview': () => Promise<RemoteResult<LibraryOverview>>
     'mediaLibrary/getMedia': (input: GetMediaInput) => Promise<RemoteResult<MediaDetailItem | null>>
+    'mediaLibrary/getOpsStatus': () => Promise<RemoteResult<OpsStatus>>
     'mediaLibrary/importTagStudioCopy': (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     'mediaLibrary/listTags': (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
     'mediaLibrary/openMedia': (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
@@ -715,6 +737,7 @@ ${MUTATION_DTS_MAP}
 export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'mediaLibrary/getLibraryOverview': TypertRemoteMethod<{}, LibraryOverview>
   readonly 'mediaLibrary/getMedia': TypertRemoteMethod<{ readonly input: GetMediaInput }, MediaDetailItem | null>
+  readonly 'mediaLibrary/getOpsStatus': TypertRemoteMethod<{}, OpsStatus>
   readonly 'mediaLibrary/importTagStudioCopy': TypertRemoteMethod<{ readonly input?: ImportTagStudioInput }, ImportTagStudioResult>
   readonly 'mediaLibrary/listTags': TypertRemoteMethod<{ readonly input?: ListTagsInput }, ListTagsResult>
   readonly 'mediaLibrary/openMedia': TypertRemoteMethod<{ readonly mediaId: string }, MediaActionResult>

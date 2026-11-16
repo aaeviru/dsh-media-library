@@ -10,12 +10,15 @@ import {
 import type {
   AmbiguousAliasWarning,
   CatalogMatchMode,
+  CreateBackupResult,
   ImportTagStudioResult,
   LibraryOverview,
+  MappingReportFormat,
   MediaActionErrorCode,
   MediaActionResult,
   MediaFileStatus,
   MediaSearchItem,
+  OpsStatus,
   SearchMediaInput,
   SpikeStatus,
   TagSummary,
@@ -60,8 +63,14 @@ export function MediaLibraryPanel({
 }) {
   const [status, setStatus] = useState<SpikeStatus | null>(null);
   const [overview, setOverview] = useState<LibraryOverview | null>(null);
+  const [opsStatus, setOpsStatus] = useState<OpsStatus | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [showTagMgmt, setShowTagMgmt] = useState(false);
+  const [showOpsPanel, setShowOpsPanel] = useState(false);
+  const [backingUp, setBackingUp] = useState(false);
+  const [backupResult, setBackupResult] = useState<CreateBackupResult | null>(null);
+  const [exportingFormat, setExportingFormat] = useState<MappingReportFormat | null>(null);
+  const [exportInfo, setExportInfo] = useState<string | null>(null);
   const [selectedMediaIds, setSelectedMediaIds] = useState<ReadonlySet<string>>(new Set());
 
   // Search filter state
@@ -201,15 +210,19 @@ export function MediaLibraryPanel({
     setSearching(true);
     setLoadError(null);
     try {
-      const [statusRes, overviewRes] = await Promise.all([
+      const [statusRes, overviewRes, opsRes] = await Promise.all([
         mediaLibrary.spikeStatus(),
         mediaLibrary.getLibraryOverview(),
+        mediaLibrary.getOpsStatus(),
       ]);
 
       if (statusRes.ok) {
         setStatus(statusRes.value);
       } else {
         setLoadError(statusRes.error.message || t('rpcError'));
+      }
+      if (opsRes.ok) {
+        setOpsStatus(opsRes.value);
       }
 
       if (overviewRes.ok) {
@@ -293,6 +306,57 @@ export function MediaLibraryPanel({
       window.removeEventListener('keydown', handleGlobalKeyDown);
     };
   }, [contextMenu]);
+
+  const handleCreateBackup = useCallback(async () => {
+    setBackingUp(true);
+    setBackupResult(null);
+    try {
+      const res = await mediaLibrary.createBackup({ reason: 'manual' });
+      if (res.ok) {
+        setBackupResult(res.value);
+        const opsRes = await mediaLibrary.getOpsStatus();
+        if (opsRes.ok) setOpsStatus(opsRes.value);
+      } else {
+        setBackupResult({ ok: false, error: res.error.message || t('rpcError') });
+      }
+    } catch (err) {
+      setBackupResult({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBackingUp(false);
+    }
+  }, [mediaLibrary, t]);
+
+  const handleExportReport = useCallback(
+    async (format: MappingReportFormat) => {
+      setExportingFormat(format);
+      setExportInfo(null);
+      try {
+        const res = await mediaLibrary.exportMappingReport({ format });
+        if (!res.ok) {
+          setExportInfo(res.error.message || t('rpcError'));
+          return;
+        }
+        const val = res.value;
+        if (!val.ok) {
+          setExportInfo(val.error ?? 'Export failed');
+          return;
+        }
+        const blob = new Blob([val.content], { type: val.mimeType });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = val.filename;
+        anchor.click();
+        URL.revokeObjectURL(url);
+        setExportInfo(`${val.filename} (${val.rowCount} rows · sha256:${val.sha256.slice(0, 12)})`);
+      } catch (err) {
+        setExportInfo(err instanceof Error ? err.message : String(err));
+      } finally {
+        setExportingFormat(null);
+      }
+    },
+    [mediaLibrary, t],
+  );
 
   const handleAction = useCallback(
     async (action: 'open' | 'reveal', mediaId: string) => {
@@ -530,6 +594,23 @@ export function MediaLibraryPanel({
           </button>
           <button
             type="button"
+            data-testid="toggle-ops-panel-btn"
+            aria-pressed={showOpsPanel}
+            onClick={() => setShowOpsPanel((prev) => !prev)}
+            style={{
+              padding: '6px 12px',
+              borderRadius: '6px',
+              border: '1px solid rgba(128,128,128,0.35)',
+              background: showOpsPanel ? 'rgba(128,128,128,0.16)' : 'transparent',
+              color: 'inherit',
+              cursor: 'pointer',
+              fontSize: '12px',
+            }}
+          >
+            {t('toggleOpsPanel')}
+          </button>
+          <button
+            type="button"
             onClick={() => void refreshAll()}
             disabled={searching}
             style={{
@@ -546,6 +627,24 @@ export function MediaLibraryPanel({
           </button>
         </div>
       </div>
+
+      {/* Read-Only Degraded Mode Alert Banner (Issue #6 B4) */}
+      {opsStatus?.degradedState.degraded ? (
+        <div
+          role="alert"
+          data-testid="degraded-mode-banner"
+          style={{
+            padding: '10px 14px',
+            borderRadius: '8px',
+            border: '1px solid rgba(239,68,68,0.6)',
+            background: 'rgba(239,68,68,0.14)',
+            fontSize: '12px',
+          }}
+        >
+          <strong>{t('opsDegradedBanner')}</strong>{' '}
+          {opsStatus.degradedState.reason ? <span>({opsStatus.degradedState.reason})</span> : null}
+        </div>
+      ) : null}
 
       {/* Overview Summary Strip */}
       {overview ? (
@@ -802,6 +901,120 @@ export function MediaLibraryPanel({
               </div>
             </div>
           ) : null}
+        </section>
+      ) : null}
+
+      {/* Issue #6 Backup, Restore & Cold-Fallback Ops Panel */}
+      {showOpsPanel && opsStatus ? (
+        <section
+          data-testid="ops-panel"
+          style={{
+            padding: '14px 16px',
+            borderRadius: '8px',
+            border: '1px solid rgba(128,128,128,0.28)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '10px',
+            fontSize: '12px',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+            <strong style={{ fontSize: '14px' }}>{t('opsHeading')}</strong>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                data-testid="create-backup-btn"
+                disabled={backingUp}
+                onClick={() => void handleCreateBackup()}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid rgba(128,128,128,0.35)',
+                  background: 'transparent',
+                  color: 'inherit',
+                  cursor: backingUp ? 'wait' : 'pointer',
+                  fontSize: '12px',
+                }}
+              >
+                {backingUp ? t('opsCreatingBackup') : t('opsCreateBackupBtn')}
+              </button>
+              <button
+                type="button"
+                data-testid="export-json-btn"
+                disabled={exportingFormat !== null}
+                onClick={() => void handleExportReport('json')}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid rgba(128,128,128,0.35)',
+                  background: 'transparent',
+                  color: 'inherit',
+                  cursor: exportingFormat ? 'wait' : 'pointer',
+                  fontSize: '12px',
+                }}
+              >
+                {exportingFormat === 'json' ? t('opsExporting') : t('opsExportJsonBtn')}
+              </button>
+              <button
+                type="button"
+                data-testid="export-csv-btn"
+                disabled={exportingFormat !== null}
+                onClick={() => void handleExportReport('csv')}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid rgba(128,128,128,0.35)',
+                  background: 'transparent',
+                  color: 'inherit',
+                  cursor: exportingFormat ? 'wait' : 'pointer',
+                  fontSize: '12px',
+                }}
+              >
+                {exportingFormat === 'csv' ? t('opsExporting') : t('opsExportCsvBtn')}
+              </button>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 20px', opacity: 0.85 }}>
+            <span>
+              <strong>{t('opsRetentionLabel')}</strong> {opsStatus.dailyRetentionCount} / {opsStatus.preMigrateRetentionCount}
+            </span>
+            <span>
+              <strong>{t('opsNasDirLabel')}</strong> <code>{opsStatus.nasBackupDir ?? '—'}</code>
+            </span>
+            <span>
+              <strong>Backup Dir:</strong> <code>{opsStatus.backupDir}</code>
+            </span>
+          </div>
+
+          {backupResult ? (
+            <div role="status" data-testid="backup-result-banner" style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.3)' }}>
+              {backupResult.ok
+                ? `Backup OK: ${backupResult.backupPath} (sha256:${backupResult.sha256?.slice(0, 12)}, pruned:${backupResult.prunedCount ?? 0})${backupResult.nasCopyWarning ? ` · ${backupResult.nasCopyWarning}` : ''}`
+                : `Backup failed: ${backupResult.error}`}
+            </div>
+          ) : null}
+
+          {exportInfo ? (
+            <div role="status" data-testid="export-result-banner" style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.3)' }}>
+              {exportInfo}
+            </div>
+          ) : null}
+
+          <div>
+            <strong>{t('opsBackupsHeading')} ({opsStatus.backups.length}):</strong>
+            {opsStatus.backups.length === 0 ? (
+              <div style={{ opacity: 0.72, marginTop: '4px' }}>{t('opsNoBackups')}</div>
+            ) : (
+              <ul data-testid="ops-backup-list" style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                {opsStatus.backups.slice(0, 10).map((b) => (
+                  <li key={b.path}>
+                    <code>{b.filename}</code> ({b.kind}, {Math.round(b.size / 1024)} KB)
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </section>
       ) : null}
 

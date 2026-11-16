@@ -18,6 +18,7 @@ const ERROR_KEYS: Partial<Record<MutationErrorCode, MediaLibraryKey>> = {
   TAG_IN_USE: 'errTagInUse',
   MERGE_WOULD_CREATE_CYCLE: 'errMergeCycle',
   TAG_ARCHIVED: 'errTagArchived',
+  READ_ONLY_DEGRADED: 'errReadOnlyDegraded',
 };
 
 /** Shared by the tag panel and the batch bar. All values are rendered as React text (never HTML). */

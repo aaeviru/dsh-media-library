@@ -112,6 +112,19 @@ export const en = {
   batchAssignedTags: 'On selected (click × to remove):',
   batchCreateAndAdd: 'Create & add',
   batchNoMatch: 'No matching tags',
+  errReadOnlyDegraded: 'Database is in read-only degraded mode; writes are disabled until repaired or restored.',
+  toggleOpsPanel: 'Backup & Ops',
+  opsHeading: 'Backup, Restore & Cold-Fallback Ops',
+  opsDegradedBanner: 'READ-ONLY DEGRADED MODE: writes are blocked to protect your data. Search and export remain available.',
+  opsCreateBackupBtn: 'Backup Now',
+  opsCreatingBackup: 'Backing up...',
+  opsExportJsonBtn: 'Export JSON Report',
+  opsExportCsvBtn: 'Export CSV Report',
+  opsExporting: 'Exporting...',
+  opsRetentionLabel: 'Retention (daily / pre-migrate):',
+  opsNasDirLabel: 'NAS Archive Dir:',
+  opsBackupsHeading: 'Managed Backups',
+  opsNoBackups: 'No managed backups yet.',
 } as const;
 
 export type MediaLibraryKey = keyof typeof en;
@@ -228,6 +241,19 @@ export const zh: Record<keyof typeof en, string> = {
   batchAssignedTags: '已选项目标签（点击 × 移除）:',
   batchCreateAndAdd: '创建并添加',
   batchNoMatch: '无匹配标签',
+  errReadOnlyDegraded: '数据库处于只读降级模式，修复或恢复备份前已禁止写入。',
+  toggleOpsPanel: '备份与运维',
+  opsHeading: '备份、恢复与冷备运维',
+  opsDegradedBanner: '只读降级模式：为保护数据已禁止写入，只读检索、诊断与映射导出仍可用。',
+  opsCreateBackupBtn: '立即备份',
+  opsCreatingBackup: '正在备份...',
+  opsExportJsonBtn: '导出 JSON 报告',
+  opsExportCsvBtn: '导出 CSV 报告',
+  opsExporting: '正在导出...',
+  opsRetentionLabel: '保留策略（日常 / 迁移前）:',
+  opsNasDirLabel: 'NAS 归档目录:',
+  opsBackupsHeading: '托管备份清单',
+  opsNoBackups: '暂无托管备份。',
 };
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

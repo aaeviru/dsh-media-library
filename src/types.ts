@@ -207,6 +207,7 @@ export type MutationErrorCode =
   | 'MERGE_WOULD_CREATE_CYCLE'
   | 'TAG_ARCHIVED'
   | 'TAG_NOT_ARCHIVED'
+  | 'READ_ONLY_DEGRADED'
   | 'INTERNAL_ERROR';
 
 /** One failing item of a rejected batch (all-or-nothing, so nothing was written). */
@@ -324,3 +325,72 @@ export interface MergeTagsSuccess {
 }
 
 export type MergeTagsResult = MergeTagsSuccess | MutationError;
+
+// ---------------------------------------------------------------------------
+// Issue #6 M3: Backup, Restore, Degraded Mode & Portable Mapping Export
+// ---------------------------------------------------------------------------
+
+export type BackupKind = 'daily' | 'pre-migrate';
+
+export interface ManagedBackupEntry {
+  readonly filename: string;
+  readonly path: string;
+  readonly kind: BackupKind;
+  readonly size: number;
+  readonly mtimeIso: string;
+}
+
+export interface DegradedModeState {
+  readonly degraded: boolean;
+  readonly reason: string | null;
+  readonly schemaVersion: number;
+  readonly supportedMaxVersion: number;
+  readonly healthOk: boolean;
+  readonly checkedAt: string;
+}
+
+export interface OpsStatus {
+  readonly localDataDir: string;
+  readonly localDatabasePath: string;
+  readonly backupDir: string;
+  readonly nasBackupDir: string | null;
+  readonly dailyRetentionCount: number;
+  readonly preMigrateRetentionCount: number;
+  readonly autoDailyBackup: boolean;
+  readonly lastAutoBackupAt: string | null;
+  readonly lastBackupSha256: string | null;
+  readonly degradedState: DegradedModeState;
+  readonly backups: readonly ManagedBackupEntry[];
+}
+
+export interface CreateBackupInput {
+  readonly reason?: 'manual' | 'daily' | undefined;
+}
+
+export interface CreateBackupResult {
+  readonly ok: boolean;
+  readonly backupPath?: string | undefined;
+  readonly sha256?: string | undefined;
+  readonly size?: number | undefined;
+  readonly prunedCount?: number | undefined;
+  readonly nasCopyPath?: string | null | undefined;
+  readonly nasCopyWarning?: string | null | undefined;
+  readonly error?: string | undefined;
+}
+
+export type MappingReportFormat = 'json' | 'csv';
+
+export interface ExportMappingReportInput {
+  readonly format: MappingReportFormat;
+}
+
+export interface ExportMappingReportResult {
+  readonly ok: boolean;
+  readonly format: MappingReportFormat;
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly rowCount: number;
+  readonly sha256: string;
+  readonly content: string;
+  readonly error?: string | undefined;
+}

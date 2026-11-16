@@ -9,9 +9,20 @@ import {
 } from '@deepseek-ai/dsh-native-command';
 import { collectDatabaseTableCounts } from './db/backup.ts';
 import {
+  createOperationalBackup,
+  DEFAULT_DAILY_BACKUP_RETENTION,
+  DEFAULT_PRE_MIGRATE_BACKUP_RETENTION,
+  exportPortableMappingReport,
+  listManagedBackups,
+  maybeRunDailyAutoBackup,
+  readAutoBackupState,
+} from './db/ops.ts';
+import {
+  CURRENT_SCHEMA_VERSION,
   getCurrentSchemaVersion,
   migrateDatabase,
   openMediaLibraryDatabase,
+  runDatabaseHealthChecks,
 } from './db/schema.ts';
 import { importTagStudioDatabase, type TagStudioImportReport } from './import/tagstudio-importer.ts';
 import {
@@ -32,7 +43,12 @@ import {
 } from './search/search-repository.ts';
 import type {
   AliasInput,
+  CreateBackupInput,
+  CreateBackupResult,
   CreateTagInput,
+  DegradedModeState,
+  ExportMappingReportInput,
+  ExportMappingReportResult,
   GetMediaInput,
   ImportTagStudioInput,
   ImportTagStudioResult,
@@ -48,6 +64,8 @@ import type {
   MergePreviewResult,
   MergeTagsInput,
   MergeTagsResult,
+  MutationError,
+  OpsStatus,
   PreviewMergeInput,
   RenameTagInput,
   SearchMediaInput,
@@ -146,6 +164,12 @@ export interface SpikeServiceOptions {
   readonly dbPath?: string | undefined;
   readonly configuredUncRoot?: string | (() => string) | undefined;
   readonly configuredTagStudioCopyPath?: string | (() => string) | undefined;
+  readonly configuredNasBackupDir?: string | (() => string) | undefined;
+  readonly backupRetentionCount?: number | undefined;
+  readonly preMigrateRetentionCount?: number | undefined;
+  readonly autoDailyBackup?: boolean | undefined;
+  readonly supportedMaxVersion?: number | undefined;
+  readonly now?: (() => Date) | undefined;
   readonly probeTimeoutMs?: number | undefined;
   readonly roots?: readonly MediaRootConfig[] | undefined;
   readonly items?: readonly M1TestMediaItem[] | undefined;
@@ -282,24 +306,46 @@ export function classifyFsError(
 export class MediaLibrarySpikeService {
   private readonly localDataDir: string;
   private readonly localDatabasePath: string;
+  private readonly backupDir: string;
   private readonly spikeOverridePath: string;
   private configuredUncRoot: string | (() => string);
   private configuredTagStudioCopyPath: string | (() => string);
+  private configuredNasBackupDir: string | (() => string);
+  private readonly backupRetentionCount: number;
+  private readonly preMigrateRetentionCount: number;
+  private readonly autoDailyBackup: boolean;
+  private readonly supportedMaxVersion: number;
+  private readonly now: () => Date;
   private readonly probeTimeoutMs: number;
   private readonly explicitRoots: readonly MediaRootConfig[] | undefined;
   private readonly explicitItems: readonly M1TestMediaItem[] | undefined;
   private readonly opener: NativeOpener;
   private readonly fileProbe: FileProbeFn;
   private initialization: Promise<void> | undefined;
+  private degradedState: DegradedModeState = {
+    degraded: false,
+    reason: null,
+    schemaVersion: 0,
+    supportedMaxVersion: CURRENT_SCHEMA_VERSION,
+    healthOk: true,
+    checkedAt: new Date(0).toISOString(),
+  };
 
   constructor(options: SpikeServiceOptions = {}) {
     this.localDataDir = resolveLocalDataDir(options.baseDir, options.dataDirName ?? 'media-library');
     this.localDatabasePath = options.dbPath
       ? path.resolve(options.dbPath)
       : path.join(this.localDataDir, 'library.sqlite3');
+    this.backupDir = path.join(path.dirname(this.localDatabasePath), 'backups');
     this.spikeOverridePath = path.join(this.localDataDir, 'm1-spike.json');
     this.configuredUncRoot = options.configuredUncRoot ?? '\\\\NAS\\MediaTest';
     this.configuredTagStudioCopyPath = options.configuredTagStudioCopyPath ?? '';
+    this.configuredNasBackupDir = options.configuredNasBackupDir ?? '';
+    this.backupRetentionCount = Math.max(1, options.backupRetentionCount ?? DEFAULT_DAILY_BACKUP_RETENTION);
+    this.preMigrateRetentionCount = Math.max(1, options.preMigrateRetentionCount ?? DEFAULT_PRE_MIGRATE_BACKUP_RETENTION);
+    this.autoDailyBackup = options.autoDailyBackup ?? true;
+    this.supportedMaxVersion = options.supportedMaxVersion ?? CURRENT_SCHEMA_VERSION;
+    this.now = options.now ?? (() => new Date());
     this.probeTimeoutMs = options.probeTimeoutMs ?? 5000;
     this.explicitRoots = options.roots;
     this.explicitItems = options.items;
@@ -319,6 +365,12 @@ export class MediaLibrarySpikeService {
       : this.configuredTagStudioCopyPath;
   }
 
+  private readConfiguredNasBackupDir(): string {
+    return typeof this.configuredNasBackupDir === 'function'
+      ? this.configuredNasBackupDir()
+      : this.configuredNasBackupDir;
+  }
+
   private readLocalOverrideFile(): SpikeOverrideFileSchema | null {
     try {
       if (!fs.existsSync(this.spikeOverridePath)) {
@@ -332,25 +384,112 @@ export class MediaLibrarySpikeService {
     }
   }
 
+  private makeDegradedMutationError(): MutationError {
+    return {
+      ok: false,
+      code: 'READ_ONLY_DEGRADED',
+      message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      failures: [],
+    };
+  }
+
   initialize(): Promise<void> {
     // Share startup work across concurrent overview/tag/search RPCs. Do not keep
     // a live connection: the importer and backup/restore own separate lifetimes.
     this.initialization ??= (async () => {
+      const checkedAt = this.now().toISOString();
       const { db, dbPath } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
       try {
-        await migrateDatabase(db, { dbPath });
+        const existingVersion = getCurrentSchemaVersion(db);
+        if (existingVersion > this.supportedMaxVersion) {
+          this.degradedState = {
+            degraded: true,
+            reason: `Database schema v${existingVersion} is newer than supported v${this.supportedMaxVersion}. Entering read-only degraded mode; restore a matching backup or upgrade the plugin.`,
+            schemaVersion: existingVersion,
+            supportedMaxVersion: this.supportedMaxVersion,
+            healthOk: true,
+            checkedAt,
+          };
+          return;
+        }
+
+        const mig = await migrateDatabase(db, {
+          dbPath,
+          backupDir: this.backupDir,
+          appVersion: '0.4.0',
+          now: this.now,
+        });
+        if (!mig.health.ok) {
+          this.degradedState = {
+            degraded: true,
+            reason: `Database integrity check failed (${JSON.stringify(mig.health.integrityCheck)}). Entering read-only degraded mode.`,
+            schemaVersion: mig.currentVersion,
+            supportedMaxVersion: this.supportedMaxVersion,
+            healthOk: false,
+            checkedAt,
+          };
+          return;
+        }
+
+        this.degradedState = {
+          degraded: false,
+          reason: null,
+          schemaVersion: mig.currentVersion,
+          supportedMaxVersion: this.supportedMaxVersion,
+          healthOk: true,
+          checkedAt,
+        };
+
+        if (this.autoDailyBackup) {
+          await maybeRunDailyAutoBackup({
+            db,
+            dbPath,
+            backupDir: this.backupDir,
+            nasBackupDir: this.readConfiguredNasBackupDir(),
+            dailyRetention: this.backupRetentionCount,
+            preMigrateRetention: this.preMigrateRetentionCount,
+            now: this.now,
+          });
+        }
+      } catch (err) {
+        let schemaVersion = 0;
+        let healthOk = false;
+        try {
+          schemaVersion = getCurrentSchemaVersion(db);
+          healthOk = runDatabaseHealthChecks(db).ok;
+        } catch {
+          // Ignore follow-up probe failure.
+        }
+        this.degradedState = {
+          degraded: true,
+          reason: `Migration or startup check failed (${err instanceof Error ? err.message : String(err)}). Entering read-only degraded mode.`,
+          schemaVersion,
+          supportedMaxVersion: this.supportedMaxVersion,
+          healthOk,
+          checkedAt,
+        };
       } finally {
         db.close();
       }
-    })().catch((error) => {
-      this.initialization = undefined;
-      throw error;
-    });
+    })();
     return this.initialization;
   }
 
   private async withInitializedDatabase<T>(fn: (db: DatabaseSync) => T): Promise<T> {
     await this.initialize();
+    const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+    try {
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  }
+
+  private async withWritableDatabase<T>(fn: (db: DatabaseSync) => T): Promise<T | MutationError> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return this.makeDegradedMutationError();
+    }
     const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
     try {
       return fn(db);
@@ -499,23 +638,23 @@ export class MediaLibrarySpikeService {
   // revision checks, mutation_log audit). Inputs are ids and controlled strings only.
 
   async createTag(input: CreateTagInput): Promise<TagMutationResult> {
-    return this.withInitializedDatabase((db) => createTag(db, input));
+    return this.withWritableDatabase((db) => createTag(db, input));
   }
 
   async renameTag(input: RenameTagInput): Promise<TagMutationResult> {
-    return this.withInitializedDatabase((db) => renameTag(db, input));
+    return this.withWritableDatabase((db) => renameTag(db, input));
   }
 
   async addAlias(input: AliasInput): Promise<TagMutationResult> {
-    return this.withInitializedDatabase((db) => addAlias(db, input));
+    return this.withWritableDatabase((db) => addAlias(db, input));
   }
 
   async removeAlias(input: AliasInput): Promise<TagMutationResult> {
-    return this.withInitializedDatabase((db) => removeAlias(db, input));
+    return this.withWritableDatabase((db) => removeAlias(db, input));
   }
 
   async setMediaTags(input: SetMediaTagsInput): Promise<SetMediaTagsResult> {
-    return this.withInitializedDatabase((db) => setMediaTags(db, input));
+    return this.withWritableDatabase((db) => setMediaTags(db, input));
   }
 
   async previewMerge(input: PreviewMergeInput): Promise<MergePreviewResult> {
@@ -523,15 +662,69 @@ export class MediaLibrarySpikeService {
   }
 
   async mergeTags(input: MergeTagsInput): Promise<MergeTagsResult> {
-    return this.withInitializedDatabase((db) => mergeTags(db, input));
+    return this.withWritableDatabase((db) => mergeTags(db, input));
   }
 
   async archiveTag(input: TagRevisionInput): Promise<TagMutationResult> {
-    return this.withInitializedDatabase((db) => archiveTag(db, input));
+    return this.withWritableDatabase((db) => archiveTag(db, input));
   }
 
   async restoreTag(input: TagRevisionInput): Promise<TagMutationResult> {
-    return this.withInitializedDatabase((db) => restoreTag(db, input));
+    return this.withWritableDatabase((db) => restoreTag(db, input));
+  }
+
+  async getOpsStatus(): Promise<OpsStatus> {
+    await this.initialize();
+    const state = readAutoBackupState(this.backupDir);
+    const nasBackupDir = this.readConfiguredNasBackupDir().trim() || null;
+    return {
+      localDataDir: this.localDataDir,
+      localDatabasePath: this.localDatabasePath,
+      backupDir: this.backupDir,
+      nasBackupDir,
+      dailyRetentionCount: this.backupRetentionCount,
+      preMigrateRetentionCount: this.preMigrateRetentionCount,
+      autoDailyBackup: this.autoDailyBackup,
+      lastAutoBackupAt: state?.lastBackupAt ?? null,
+      lastBackupSha256: state?.lastSha256 ?? null,
+      degradedState: this.degradedState,
+      backups: listManagedBackups(this.backupDir),
+    };
+  }
+
+  async createBackup(_input?: CreateBackupInput): Promise<CreateBackupResult> {
+    await this.initialize();
+    return createOperationalBackup({
+      dbPath: this.localDatabasePath,
+      backupDir: this.backupDir,
+      nasBackupDir: this.readConfiguredNasBackupDir(),
+      dailyRetention: this.backupRetentionCount,
+      preMigrateRetention: this.preMigrateRetentionCount,
+      now: this.now,
+    });
+  }
+
+  async exportMappingReport(input: ExportMappingReportInput): Promise<ExportMappingReportResult> {
+    try {
+      return await this.withInitializedDatabase((db) =>
+        exportPortableMappingReport(db, {
+          format: input.format,
+          appVersion: '0.4.0',
+          now: this.now,
+        }),
+      );
+    } catch (err) {
+      return {
+        ok: false,
+        format: input.format,
+        filename: '',
+        mimeType: 'text/plain',
+        rowCount: 0,
+        sha256: '',
+        content: '',
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   async importTagStudioCopy(input?: ImportTagStudioInput): Promise<ImportTagStudioResult> {
@@ -553,6 +746,18 @@ export class MediaLibrarySpikeService {
     const uncRoot = input?.uncRoot?.trim() || activeUncRoot;
     try {
       await this.initialize();
+      if (this.degradedState.degraded) {
+        return {
+          ok: false,
+          status: 'failed',
+          message: `READ_ONLY_DEGRADED: ${this.degradedState.reason ?? 'Database is in read-only degraded mode.'}`,
+          importedEntries: 0,
+          skippedSidecarEntries: 0,
+          importedTags: 0,
+          importedMediaTags: 0,
+          sourceSha256: '',
+        };
+      }
       const report = await importTagStudioDatabase({
         sourceDbPath,
         targetDbPath: this.localDatabasePath,
@@ -702,7 +907,7 @@ export class MediaLibrarySpikeService {
     numericDbId: number | null,
     status: MediaFileStatus,
   ): void {
-    if (numericDbId === null || !fs.existsSync(this.localDatabasePath)) {
+    if (numericDbId === null || this.degradedState.degraded || !fs.existsSync(this.localDatabasePath)) {
       return;
     }
     try {

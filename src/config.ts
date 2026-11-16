@@ -6,6 +6,10 @@ export interface Config {
   tagstudioCopyPath: Volatile<string>;
   dataDir: string;
   probeTimeoutMs: number;
+  nasBackupDir: Volatile<string>;
+  backupRetentionCount: number;
+  preMigrateRetentionCount: number;
+  autoDailyBackup: boolean;
 }
 
 export const Config = Schema.object({
@@ -24,4 +28,21 @@ export const Config = Schema.object({
     .min(100)
     .default(5000)
     .description('Maximum milliseconds to wait when probing NAS file reachability before launching native opener.'),
+  nasBackupDir: Schema.string()
+    .default('')
+    .description('Optional NAS/archive directory where verified local SQLite backups are copied for cold retention.')
+    .volatile(),
+  backupRetentionCount: Schema.number()
+    .min(1)
+    .max(100)
+    .default(14)
+    .description('Number of recent daily/manual library-backup-*.sqlite3 files to retain.'),
+  preMigrateRetentionCount: Schema.number()
+    .min(1)
+    .max(50)
+    .default(5)
+    .description('Number of recent pre-migrate-*.sqlite3 backups to retain.'),
+  autoDailyBackup: Schema.boolean()
+    .default(true)
+    .description('Automatically create at most one verified backup per 24h when new writes/imports occurred.'),
 });
