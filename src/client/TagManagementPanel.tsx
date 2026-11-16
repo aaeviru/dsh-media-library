@@ -466,11 +466,13 @@ export function TagManagementPanel({
                     setMergeSourceId(e.target.value ? Number(e.target.value) : null);
                     setPreview(null);
                   }}
-                  style={{ ...controlStyle, flex: '1 1 220px' }}
+                  style={{ ...controlStyle, flex: '1 1 220px', colorScheme: 'light dark' }}
                 >
-                  <option value="">{t('tagMgmtMergePickSource')}</option>
+                  <option value="" style={{ color: '#111827', backgroundColor: '#ffffff' }}>
+                    {t('tagMgmtMergePickSource')}
+                  </option>
                   {mergeCandidates.map((tag) => (
-                    <option key={tag.id} value={tag.id}>
+                    <option key={tag.id} value={tag.id} style={{ color: '#111827', backgroundColor: '#ffffff' }}>
                       {tag.name} (#{tag.id})
                     </option>
                   ))}

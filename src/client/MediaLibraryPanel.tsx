@@ -1221,11 +1221,18 @@ export function MediaLibraryPanel({
                       key={item.mediaId}
                       tabIndex={0}
                       data-testid={`media-row-${item.mediaId}`}
+                      onClick={(ev) => {
+                        const target = ev.target as HTMLElement | null;
+                        if (target?.closest('button, input, a, select, textarea')) return;
+                        if (window.getSelection()?.toString()) return;
+                        toggleMediaSelected(item.mediaId);
+                      }}
                       onContextMenu={(ev) => handleRowContextMenu(ev, item)}
                       onKeyDown={(ev) => handleRowKeyDown(ev, item)}
                       style={{
                         borderBottom: '1px solid rgba(128,128,128,0.15)',
-                        cursor: 'context-menu',
+                        background: selectedMediaIds.has(item.mediaId) ? 'rgba(59,130,246,0.1)' : undefined,
+                        cursor: 'pointer',
                       }}
                     >
                       <td style={{ padding: '8px 8px 8px 12px', verticalAlign: 'top' }}>

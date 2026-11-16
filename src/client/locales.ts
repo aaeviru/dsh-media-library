@@ -108,6 +108,10 @@ export const en = {
   batchClear: 'Clear Selection',
   batchBusy: 'Applying...',
   batchDone: 'Batch applied (added / removed / unchanged)',
+  batchQuickTags: 'Quick add (click to apply):',
+  batchAssignedTags: 'On selected (click × to remove):',
+  batchCreateAndAdd: 'Create & add',
+  batchNoMatch: 'No matching tags',
 } as const;
 
 export type MediaLibraryKey = keyof typeof en;
@@ -220,6 +224,10 @@ export const zh: Record<keyof typeof en, string> = {
   batchClear: '清除选择',
   batchBusy: '正在应用...',
   batchDone: '批量操作完成（新增 / 移除 / 无变化）',
+  batchQuickTags: '常用标签（点击直接追加）:',
+  batchAssignedTags: '已选项目标签（点击 × 移除）:',
+  batchCreateAndAdd: '创建并添加',
+  batchNoMatch: '无匹配标签',
 };
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

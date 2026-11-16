@@ -234,6 +234,7 @@ try {
     const text = document.querySelector("[data-testid=\"last-action-banner\"]")?.textContent;
     return text?.includes("open(") && text.includes("FILE_NOT_FOUND");
   });
+  await filteredRows.first().scrollIntoViewIfNeeded();
   await filteredRows.first().click({ button: "right" });
   await page.locator("[data-testid=\"media-row-context-menu\"]").waitFor();
   await page.keyboard.press("Escape");
@@ -384,15 +385,22 @@ try {
   await firstTwoCheckboxes.nth(0).check();
   await firstTwoCheckboxes.nth(1).check();
   await page.waitForSelector("[data-testid=\"batch-tag-bar\"]");
+  await page.click("[data-testid=\"batch-tag-input\"]");
   await page.fill("[data-testid=\"batch-tag-input\"]", "M3_Source_B");
-  await page.waitForTimeout(300);
-  const sourceOptionVal = await page.locator("[data-testid=\"batch-tag-select\"] option").evaluateAll(opts => {
-    const match = opts.find(o => o.textContent?.includes("M3_Source_B"));
-    return match ? match.value : "";
-  });
-  assert.ok(sourceOptionVal, "Expected M3_Source_B in batch tag select");
-  await page.selectOption("[data-testid=\"batch-tag-select\"]", sourceOptionVal);
-  await page.click("[data-testid=\"batch-add-btn\"]");
+  await page.waitForSelector("[data-testid=\"batch-tag-dropdown\"]");
+  await page.locator("button[data-testid^=\"batch-tag-option-\"]", { hasText: "M3_Source_B" }).first().click();
+  await page.waitForSelector("[data-testid=\"batch-result-banner\"]");
+
+  // Verify no-exact-match shows "Create & add" as first dropdown option, then one-click remove via assigned chip
+  await firstTwoCheckboxes.nth(0).check();
+  await page.click("[data-testid=\"batch-tag-input\"]");
+  await page.fill("[data-testid=\"batch-tag-input\"]", "M3_Inline_New");
+  const firstOptionTestId = await page.locator("[data-testid=\"batch-tag-dropdown\"] button").first().getAttribute("data-testid");
+  assert.equal(firstOptionTestId, "batch-create-tag-option", "Expected Create & add as first option when no exact match");
+  await page.click("[data-testid=\"batch-create-tag-option\"]");
+  await page.waitForSelector("[data-testid=\"batch-result-banner\"]");
+  await firstTwoCheckboxes.nth(0).check();
+  await page.locator("button[data-testid^=\"batch-assigned-tag-\"]", { hasText: "M3_Inline_New" }).first().click();
   await page.waitForSelector("[data-testid=\"batch-result-banner\"]");
 
   // Merge M3_Source_B into M3_Target_A via preview + confirm
