@@ -1,0 +1,25 @@
+export {
+  cleanMetadataText,
+  MetadataFetcher,
+  parseCmadbHtml,
+  parseFc2Code,
+  parsePpvdbHtml,
+  type FetchLike,
+  type MetadataFetcherOptions,
+  type ParsedFc2Code,
+  type ProviderLookupResult,
+  type ProviderMetadata,
+} from './metadata-fetcher.ts';
+export {
+  commitIngestionManifest,
+  defaultIngestionFileOps,
+  fetchMetadataForManifest,
+  getIngestionManifestById,
+  listIngestionManifests,
+  normalizeTargetSubdir,
+  previewStagingPlan,
+  reconcileIngestionManifests,
+  reviewIngestionManifest,
+  scanAndPlanStagingFiles,
+  type IngestionFileOps,
+} from './ingestion-service.ts';

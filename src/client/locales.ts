@@ -125,6 +125,18 @@ export const en = {
   opsNasDirLabel: 'NAS Archive Dir:',
   opsBackupsHeading: 'Managed Backups',
   opsNoBackups: 'No managed backups yet.',
+  toggleIngestionPanel: 'Pending Ingestion',
+  ingestionHeading: 'Staging Queue & Human Review (temp -> Target)',
+  ingestionScanBtn: 'Scan temp Folder',
+  ingestionReconcileBtn: 'Reconcile Interrupted',
+  ingestionEmpty: 'No staged manifests yet. Click Scan temp Folder.',
+  ingestionFetchBtn: 'Fetch Metadata',
+  ingestionApproveBtn: 'Approve Review',
+  ingestionRejectBtn: 'Keep in temp',
+  ingestionCommitBtn: 'Move & Index',
+  ingestionTitleLabel: 'Title',
+  ingestionTagsLabel: 'Tags (comma-separated)',
+  ingestionTargetLabel: 'Target Path',
 } as const;
 
 export type MediaLibraryKey = keyof typeof en;
@@ -254,6 +266,18 @@ export const zh: Record<keyof typeof en, string> = {
   opsNasDirLabel: 'NAS 归档目录:',
   opsBackupsHeading: '托管备份清单',
   opsNoBackups: '暂无托管备份。',
+  toggleIngestionPanel: '待入库审核',
+  ingestionHeading: '临时目录扫描与人工审核入库（temp → 目标目录）',
+  ingestionScanBtn: '扫描 temp 文件夹',
+  ingestionReconcileBtn: '对账恢复断点',
+  ingestionEmpty: '暂无待入库文件，点击“扫描 temp 文件夹”开始。',
+  ingestionFetchBtn: '抓取源站标签',
+  ingestionApproveBtn: '审核通过',
+  ingestionRejectBtn: '暂留 temp',
+  ingestionCommitBtn: '移动并入库',
+  ingestionTitleLabel: '标题',
+  ingestionTagsLabel: '标签（逗号分隔，可自由增删）',
+  ingestionTargetLabel: '固定目标路径',
 };
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

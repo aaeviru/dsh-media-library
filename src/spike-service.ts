@@ -26,6 +26,18 @@ import {
 } from './db/schema.ts';
 import { importTagStudioDatabase, type TagStudioImportReport } from './import/tagstudio-importer.ts';
 import {
+  commitIngestionManifest,
+  defaultIngestionFileOps,
+  fetchMetadataForManifest,
+  type IngestionFileOps,
+  listIngestionManifests,
+  MetadataFetcher,
+  normalizeTargetSubdir,
+  reconcileIngestionManifests,
+  reviewIngestionManifest,
+  scanAndPlanStagingFiles,
+} from './ingestion/index.ts';
+import {
   addAlias,
   archiveTag,
   createTag,
@@ -43,15 +55,20 @@ import {
 } from './search/search-repository.ts';
 import type {
   AliasInput,
+  CommitIngestionInput,
+  CommitIngestionResult,
   CreateBackupInput,
   CreateBackupResult,
   CreateTagInput,
   DegradedModeState,
   ExportMappingReportInput,
   ExportMappingReportResult,
+  FetchedMetadataCandidate,
+  FetchIngestionMetadataInput,
   GetMediaInput,
   ImportTagStudioInput,
   ImportTagStudioResult,
+  IngestionManifest,
   LibraryOverview,
   ListTagsInput,
   ListTagsResult,
@@ -67,7 +84,11 @@ import type {
   MutationError,
   OpsStatus,
   PreviewMergeInput,
+  ReconcileIngestionResult,
   RenameTagInput,
+  ReviewIngestionInput,
+  ReviewIngestionResult,
+  ScanStagingResult,
   SearchMediaInput,
   SearchMediaResult,
   SetMediaTagsInput,
@@ -165,6 +186,14 @@ export interface SpikeServiceOptions {
   readonly configuredUncRoot?: string | (() => string) | undefined;
   readonly configuredTagStudioCopyPath?: string | (() => string) | undefined;
   readonly configuredNasBackupDir?: string | (() => string) | undefined;
+  readonly configuredStagingDir?: string | (() => string) | undefined;
+  readonly configuredTargetSubdir?: string | (() => string) | undefined;
+  readonly cmadbBaseUrl?: string | undefined;
+  readonly ppvdbBaseUrl?: string | undefined;
+  readonly configuredCmadbCookie?: string | (() => string) | undefined;
+  readonly configuredPpvdbCookie?: string | (() => string) | undefined;
+  readonly metadataFetcher?: MetadataFetcher | undefined;
+  readonly ingestionFileOps?: IngestionFileOps | undefined;
   readonly backupRetentionCount?: number | undefined;
   readonly preMigrateRetentionCount?: number | undefined;
   readonly autoDailyBackup?: boolean | undefined;
@@ -311,6 +340,14 @@ export class MediaLibrarySpikeService {
   private configuredUncRoot: string | (() => string);
   private configuredTagStudioCopyPath: string | (() => string);
   private configuredNasBackupDir: string | (() => string);
+  private configuredStagingDir: string | (() => string);
+  private configuredTargetSubdir: string | (() => string);
+  private readonly cmadbBaseUrl: string;
+  private readonly ppvdbBaseUrl: string;
+  private configuredCmadbCookie: string | (() => string);
+  private configuredPpvdbCookie: string | (() => string);
+  private readonly explicitFetcher: MetadataFetcher | undefined;
+  private readonly ingestionFileOps: IngestionFileOps;
   private readonly backupRetentionCount: number;
   private readonly preMigrateRetentionCount: number;
   private readonly autoDailyBackup: boolean;
@@ -341,6 +378,14 @@ export class MediaLibrarySpikeService {
     this.configuredUncRoot = options.configuredUncRoot ?? '\\\\NAS\\MediaTest';
     this.configuredTagStudioCopyPath = options.configuredTagStudioCopyPath ?? '';
     this.configuredNasBackupDir = options.configuredNasBackupDir ?? '';
+    this.configuredStagingDir = options.configuredStagingDir ?? '';
+    this.configuredTargetSubdir = options.configuredTargetSubdir ?? 'ingested';
+    this.cmadbBaseUrl = options.cmadbBaseUrl ?? 'https://fc2cmadb.com';
+    this.ppvdbBaseUrl = options.ppvdbBaseUrl ?? 'https://fc2ppvdb.com';
+    this.configuredCmadbCookie = options.configuredCmadbCookie ?? '';
+    this.configuredPpvdbCookie = options.configuredPpvdbCookie ?? '';
+    this.explicitFetcher = options.metadataFetcher;
+    this.ingestionFileOps = options.ingestionFileOps ?? defaultIngestionFileOps;
     this.backupRetentionCount = Math.max(1, options.backupRetentionCount ?? DEFAULT_DAILY_BACKUP_RETENTION);
     this.preMigrateRetentionCount = Math.max(1, options.preMigrateRetentionCount ?? DEFAULT_PRE_MIGRATE_BACKUP_RETENTION);
     this.autoDailyBackup = options.autoDailyBackup ?? true;
@@ -369,6 +414,20 @@ export class MediaLibrarySpikeService {
     return typeof this.configuredNasBackupDir === 'function'
       ? this.configuredNasBackupDir()
       : this.configuredNasBackupDir;
+  }
+
+  private readStringSetting(value: string | (() => string)): string {
+    return typeof value === 'function' ? value() : value;
+  }
+
+  private createMetadataFetcher(): MetadataFetcher {
+    if (this.explicitFetcher) return this.explicitFetcher;
+    return new MetadataFetcher({
+      cmadbBaseUrl: this.cmadbBaseUrl,
+      ppvdbBaseUrl: this.ppvdbBaseUrl,
+      cmadbCookie: this.readStringSetting(this.configuredCmadbCookie),
+      ppvdbCookie: this.readStringSetting(this.configuredPpvdbCookie),
+    });
   }
 
   private readLocalOverrideFile(): SpikeOverrideFileSchema | null {
@@ -416,7 +475,7 @@ export class MediaLibrarySpikeService {
         const mig = await migrateDatabase(db, {
           dbPath,
           backupDir: this.backupDir,
-          appVersion: '0.4.0',
+          appVersion: '0.5.0',
           now: this.now,
         });
         if (!mig.health.ok) {
@@ -709,7 +768,7 @@ export class MediaLibrarySpikeService {
       return await this.withInitializedDatabase((db) =>
         exportPortableMappingReport(db, {
           format: input.format,
-          appVersion: '0.4.0',
+          appVersion: '0.5.0',
           now: this.now,
         }),
       );
@@ -725,6 +784,128 @@ export class MediaLibrarySpikeService {
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  // --- Issue #7 M4: Recoverable Media Ingestion & Metadata Lookup ---
+
+  async scanStagingFiles(): Promise<ScanStagingResult> {
+    await this.initialize();
+    const { roots } = this.getEffectiveRootsAndItems();
+    const configuredStaging = this.readStringSetting(this.configuredStagingDir).trim();
+    const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
+    const effectiveStagingDir =
+      configuredStaging ||
+      (() => {
+        const defaultRoot = roots.find((r) => r.rootId === DEFAULT_M1_ROOT_ID && r.enabled);
+        return defaultRoot ? path.join(defaultRoot.canonicalUncRoot, 'temp') : '';
+      })();
+
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        stagingDir: effectiveStagingDir,
+        targetRootId: DEFAULT_M1_ROOT_ID,
+        targetSubdir,
+        files: [],
+        manifests: await this.listIngestionManifests(),
+        error: `READ_ONLY_DEGRADED: ${this.degradedState.reason ?? 'Database is in read-only degraded mode.'}`,
+      };
+    }
+
+    return this.withInitializedDatabase((db) =>
+      scanAndPlanStagingFiles(db, {
+        stagingDir: effectiveStagingDir,
+        targetRootId: DEFAULT_M1_ROOT_ID,
+        targetSubdir,
+        roots,
+        fileOps: this.ingestionFileOps,
+        now: this.now,
+      }),
+    );
+  }
+
+  async listIngestionManifests(): Promise<IngestionManifest[]> {
+    return this.withInitializedDatabase((db) => listIngestionManifests(db));
+  }
+
+  async fetchIngestionMetadata(input: FetchIngestionMetadataInput): Promise<FetchedMetadataCandidate> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        provider: null,
+        category: 'client_error',
+        reason: `READ_ONLY_DEGRADED: ${this.degradedState.reason ?? 'Database is in read-only degraded mode.'}`,
+        sourceUrl: '',
+        title: null,
+        writer: null,
+        candidateTags: [],
+        manifest: null,
+      };
+    }
+    const fetcher = this.createMetadataFetcher();
+    await this.initialize();
+    const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+    try {
+      return await fetchMetadataForManifest(db, input.manifestId, fetcher, this.now);
+    } finally {
+      db.close();
+    }
+  }
+
+  async reviewIngestion(input: ReviewIngestionInput): Promise<ReviewIngestionResult> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        code: 'READ_ONLY_DEGRADED',
+        message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+    return this.withInitializedDatabase((db) => reviewIngestionManifest(db, input, this.now));
+  }
+
+  async commitIngestion(input: CommitIngestionInput): Promise<CommitIngestionResult> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        code: 'READ_ONLY_DEGRADED',
+        message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+    const { roots } = this.getEffectiveRootsAndItems();
+    return this.withInitializedDatabase((db) =>
+      commitIngestionManifest(db, {
+        manifestId: input.manifestId,
+        roots,
+        fileOps: this.ingestionFileOps,
+        now: this.now,
+      }),
+    );
+  }
+
+  async reconcileIngestion(): Promise<ReconcileIngestionResult> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        reconciledCount: 0,
+        copiedNotDeletedFixed: 0,
+        movedNotIndexedFixed: 0,
+        indexedButMissingMarked: 0,
+        errors: [`READ_ONLY_DEGRADED: ${this.degradedState.reason ?? 'Database is in read-only degraded mode.'}`],
+        manifests: await this.listIngestionManifests(),
+      };
+    }
+    const { roots } = this.getEffectiveRootsAndItems();
+    return this.withInitializedDatabase((db) =>
+      reconcileIngestionManifests(db, {
+        roots,
+        fileOps: this.ingestionFileOps,
+        now: this.now,
+      }),
+    );
   }
 
   async importTagStudioCopy(input?: ImportTagStudioInput): Promise<ImportTagStudioResult> {

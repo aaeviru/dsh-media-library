@@ -444,6 +444,15 @@ try {
   await page.click("[data-testid=\"toggle-ops-panel-btn\"]");
   console.log("Issue #6 M3 Ops E2E (verified backup, retention list, JSON/CSV export): PASS");
 
+  // Issue #7 M4 Ingestion E2E: open Pending Ingestion panel, verify empty state & scan button
+  await page.click("[data-testid=\"toggle-ingestion-panel-btn\"]");
+  await page.waitForSelector("[data-testid=\"ingestion-panel\"]");
+  await page.waitForSelector("[data-testid=\"ingestion-empty\"]");
+  await page.click("[data-testid=\"ingestion-scan-btn\"]");
+  await page.waitForSelector("[data-testid=\"ingestion-error\"]");
+  await page.click("[data-testid=\"toggle-ingestion-panel-btn\"]");
+  console.log("Issue #7 M4 Ingestion UI E2E (panel, scan & controlled error surface): PASS");
+
   // Measure actual 100k result rendering separately from the six-row import.
   // This is a warm Host/UI search; cold Host initialization is measured in B5.
   const benchDb = new DatabaseSync(path.join(process.env.DSH_HOME, "media-library/library.sqlite3"));

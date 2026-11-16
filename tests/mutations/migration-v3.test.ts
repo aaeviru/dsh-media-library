@@ -49,9 +49,9 @@ describe('Schema v3 migration (Issue #5 B6)', () => {
       assert.equal(getCurrentSchemaVersion(db), 2)
       const before = collectDatabaseTableCounts(db)
       const tagsBefore = db.prepare('SELECT id, name, normalized_name, revision FROM tags ORDER BY id').all()
-      const res = await migrateDatabase(db, { dbPath })
+      const res = await migrateDatabase(db, { dbPath, migrations: DEFAULT_MIGRATIONS.slice(0, 3) })
       assert.equal(res.previousVersion, 2)
-      assert.equal(res.currentVersion, CURRENT_SCHEMA_VERSION)
+      assert.equal(res.currentVersion, 3)
       assert.deepEqual(res.appliedVersions, [3])
       assert.ok(res.health.ok)
       assert.ok(res.preUpgradeBackupPath && existsSync(res.preUpgradeBackupPath))
@@ -68,7 +68,7 @@ describe('Schema v3 migration (Issue #5 B6)', () => {
       assert.equal(Number((db.prepare('SELECT COUNT(*) AS c FROM mutation_log').get() as { c: number }).c), 0)
       assert.equal(
         (db.prepare('SELECT app_version FROM schema_versions WHERE version = 3').get() as { app_version: string }).app_version,
-        '0.4.0',
+        '0.5.0',
       )
       assert.equal(runDatabaseHealthChecks(db).ok, true)
 
@@ -112,11 +112,11 @@ describe('Schema v3 migration (Issue #5 B6)', () => {
     }
   })
 
-  it('DEFAULT_MIGRATIONS ends at version 3 and a fresh database reaches it directly', async () => {
-    assert.equal(DEFAULT_MIGRATIONS.at(-1)?.version, 3)
+  it('DEFAULT_MIGRATIONS ends at CURRENT_SCHEMA_VERSION and a fresh database reaches it directly', async () => {
+    assert.equal(DEFAULT_MIGRATIONS.at(-1)?.version, CURRENT_SCHEMA_VERSION)
     const { db } = openMediaLibraryDatabase({ dbPath: ':memory:' })
     const res = await migrateDatabase(db)
-    assert.equal(res.currentVersion, 3)
+    assert.equal(res.currentVersion, CURRENT_SCHEMA_VERSION)
     assert.equal(res.preUpgradeBackupPath, null)
     db.close()
   })

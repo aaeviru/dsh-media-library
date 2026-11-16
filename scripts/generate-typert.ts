@@ -124,6 +124,17 @@ const MUTATION_SCHEMAS = [
   `let _mediaLibrary_exportMappingReportInput$schema$value\nconst _mediaLibrary_exportMappingReportInput$schema = () => (_mediaLibrary_exportMappingReportInput$schema$value ??= z.object({ format: z.enum(['json', 'csv']).readonly() }).readonly())`,
   `let _mediaLibrary_exportMappingReportResult$schema$value\nconst _mediaLibrary_exportMappingReportResult$schema = () => (_mediaLibrary_exportMappingReportResult$schema$value ??= z.object({ ok: BOOL, format: z.enum(['json', 'csv']).readonly(), filename: STR, mimeType: STR, rowCount: NUM, sha256: STR, content: STR, error: STR.optional() }).readonly())`,
   `let _mediaLibrary_opsStatus$schema$value\nconst _mediaLibrary_opsStatus$schema = () => (_mediaLibrary_opsStatus$schema$value ??= z.object({ localDataDir: STR, localDatabasePath: STR, backupDir: STR, nasBackupDir: STR.nullable(), dailyRetentionCount: NUM, preMigrateRetentionCount: NUM, autoDailyBackup: BOOL, lastAutoBackupAt: STR.nullable(), lastBackupSha256: STR.nullable(), degradedState: z.object({ degraded: BOOL, reason: STR.nullable(), schemaVersion: NUM, supportedMaxVersion: NUM, healthOk: BOOL, checkedAt: STR }).readonly(), backups: z.array(z.object({ filename: STR, path: STR, kind: z.enum(['daily', 'pre-migrate']).readonly(), size: NUM, mtimeIso: STR }).readonly()).readonly() }).readonly())`,
+  `let _mediaLibrary_ingestionTag$schema$value\nconst _mediaLibrary_ingestionTag$schema = () => (_mediaLibrary_ingestionTag$schema$value ??= z.object({ tagId: NUM.optional(), name: STR }).readonly())`,
+  `let _mediaLibrary_ingestionManifest$schema$value\nconst _mediaLibrary_ingestionManifest$schema = () => (_mediaLibrary_ingestionManifest$schema$value ??= z.object({ id: NUM, sourceId: STR, tempPath: STR, targetRootId: STR, targetRelativePath: STR, filename: STR, title: STR.nullable(), catalogNumber: STR.nullable(), mediaDate: STR.nullable(), tags: z.array(_mediaLibrary_ingestionTag$schema()).readonly(), metadataSource: STR.nullable(), checksumSha256: STR, fileSize: NUM, state: z.enum(['planned', 'reviewed', 'moving', 'indexed', 'failed']).readonly(), reviewDecision: z.enum(['pending', 'approved', 'rejected']).readonly(), lastError: STR.nullable(), indexedMediaId: NUM.nullable(), createdAt: STR, updatedAt: STR }).readonly())`,
+  `let _mediaLibrary_ingestionManifestList$schema$value\nconst _mediaLibrary_ingestionManifestList$schema = () => (_mediaLibrary_ingestionManifestList$schema$value ??= z.array(_mediaLibrary_ingestionManifest$schema()).readonly())`,
+  `let _mediaLibrary_scanStagingResult$schema$value\nconst _mediaLibrary_scanStagingResult$schema = () => (_mediaLibrary_scanStagingResult$schema$value ??= z.object({ ok: BOOL, stagingDir: STR, targetRootId: STR, targetSubdir: STR, files: z.array(z.object({ filename: STR, relativePath: STR, tempPath: STR, fileSize: NUM, checksumSha256: STR, catalogNumber: STR.nullable() }).readonly()).readonly(), manifests: _mediaLibrary_ingestionManifestList$schema(), error: STR.optional() }).readonly())`,
+  `let _mediaLibrary_fetchIngestionMetadataInput$schema$value\nconst _mediaLibrary_fetchIngestionMetadataInput$schema = () => (_mediaLibrary_fetchIngestionMetadataInput$schema$value ??= z.object({ manifestId: NUM }).readonly())`,
+  `let _mediaLibrary_fetchedMetadataCandidate$schema$value\nconst _mediaLibrary_fetchedMetadataCandidate$schema = () => (_mediaLibrary_fetchedMetadataCandidate$schema$value ??= z.object({ ok: BOOL, provider: STR.nullable(), category: STR, reason: STR, sourceUrl: STR, title: STR.nullable(), writer: STR.nullable(), candidateTags: z.array(STR).readonly(), manifest: _mediaLibrary_ingestionManifest$schema().nullable() }).readonly())`,
+  `let _mediaLibrary_reviewIngestionInput$schema$value\nconst _mediaLibrary_reviewIngestionInput$schema = () => (_mediaLibrary_reviewIngestionInput$schema$value ??= z.object({ manifestId: NUM, decision: z.enum(['approved', 'rejected']).readonly(), title: STR.optional(), catalogNumber: STR.optional(), mediaDate: STR.optional(), tagIds: z.array(NUM).readonly().optional(), newTagNames: z.array(STR).readonly().optional() }).readonly())`,
+  `let _mediaLibrary_reviewIngestionResult$schema$value\nconst _mediaLibrary_reviewIngestionResult$schema = () => (_mediaLibrary_reviewIngestionResult$schema$value ??= z.object({ ok: BOOL, code: STR.optional(), message: STR.optional(), manifest: _mediaLibrary_ingestionManifest$schema().nullable().optional() }).readonly())`,
+  `let _mediaLibrary_commitIngestionInput$schema$value\nconst _mediaLibrary_commitIngestionInput$schema = () => (_mediaLibrary_commitIngestionInput$schema$value ??= z.object({ manifestId: NUM }).readonly())`,
+  `let _mediaLibrary_commitIngestionResult$schema$value\nconst _mediaLibrary_commitIngestionResult$schema = () => (_mediaLibrary_commitIngestionResult$schema$value ??= z.object({ ok: BOOL, code: STR.optional(), message: STR, idempotentReplay: BOOL.optional(), mediaId: NUM.nullable().optional(), warning: STR.nullable().optional(), manifest: _mediaLibrary_ingestionManifest$schema().nullable().optional() }).readonly())`,
+  `let _mediaLibrary_reconcileIngestionResult$schema$value\nconst _mediaLibrary_reconcileIngestionResult$schema = () => (_mediaLibrary_reconcileIngestionResult$schema$value ??= z.object({ ok: BOOL, reconciledCount: NUM, copiedNotDeletedFixed: NUM, movedNotIndexedFixed: NUM, indexedButMissingMarked: NUM, errors: z.array(STR).readonly(), manifests: _mediaLibrary_ingestionManifestList$schema() }).readonly())`,
 ].join('\n\n');
 
 interface MutationMethodSpec {
@@ -148,6 +159,9 @@ const MUTATION_METHODS: MutationMethodSpec[] = [
   { name: 'restoreTag', description: 'Restore an archived tag.', inputKey: 'tagRevisionInput', inputType: 'TagRevisionInput', resultKey: 'tagMutationResult', resultType: 'TagMutationResult', paramDescription: 'Tag id and expected revision.', line: 176 },
   { name: 'createBackup', description: 'Create a verified online SQLite backup and prune excess old plugin backups.', inputKey: 'createBackupInput', inputType: 'CreateBackupInput', resultKey: 'createBackupResult', resultType: 'CreateBackupResult', paramDescription: 'Optional backup reason.', line: 205 },
   { name: 'exportMappingReport', description: 'Export a portable JSON or CSV mapping report for recovery and audit.', inputKey: 'exportMappingReportInput', inputType: 'ExportMappingReportInput', resultKey: 'exportMappingReportResult', resultType: 'ExportMappingReportResult', paramDescription: 'Report format (json or csv).', line: 213 },
+  { name: 'fetchIngestionMetadata', description: 'Fetch candidate metadata and tags from FC2CMADB/FC2PPVDB for a staged manifest.', inputKey: 'fetchIngestionMetadataInput', inputType: 'FetchIngestionMetadataInput', resultKey: 'fetchedMetadataCandidate', resultType: 'FetchedMetadataCandidate', paramDescription: 'Manifest id.', line: 250 },
+  { name: 'reviewIngestion', description: 'Record human review approval/rejection and confirmed tags for a manifest.', inputKey: 'reviewIngestionInput', inputType: 'ReviewIngestionInput', resultKey: 'reviewIngestionResult', resultType: 'ReviewIngestionResult', paramDescription: 'Review decision, metadata and tags.', line: 258 },
+  { name: 'commitIngestion', description: 'Execute a reviewed ingestion manifest (move + verify + index + conservative cleanup).', inputKey: 'commitIngestionInput', inputType: 'CommitIngestionInput', resultKey: 'commitIngestionResult', resultType: 'CommitIngestionResult', paramDescription: 'Manifest id.', line: 266 },
 ];
 
 function mutationMethodEntry(m: MutationMethodSpec): string {
@@ -458,6 +472,42 @@ const REMOTE_INFO_BODY = `{
       },
       sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 197, column: 3 },
     },
+    'mediaLibrary/scanStagingFiles': {
+      service: 'mediaLibrary',
+      description: 'Scan the configured staging temp directory and plan recoverable manifests.',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-experimental-media-library/types#ScanStagingResult',
+        create: _mediaLibrary_scanStagingResult$schema,
+      },
+      sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 234, column: 3 },
+    },
+    'mediaLibrary/listIngestionManifests': {
+      service: 'mediaLibrary',
+      description: 'List staged/reviewed/moving/indexed/failed ingestion manifests.',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-experimental-media-library/types#IngestionManifest[]',
+        create: _mediaLibrary_ingestionManifestList$schema,
+      },
+      sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 242, column: 3 },
+    },
+    'mediaLibrary/reconcileIngestion': {
+      service: 'mediaLibrary',
+      description: 'Reconcile interrupted manifests (copied-not-deleted, moved-not-indexed, indexed-but-missing).',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-experimental-media-library/types#ReconcileIngestionResult',
+        create: _mediaLibrary_reconcileIngestionResult$schema,
+      },
+      sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 274, column: 3 },
+    },
     'mediaLibrary/getMedia': {
       service: 'mediaLibrary',
       description: 'Get full details for a single media item by its mediaId.',
@@ -701,6 +751,9 @@ import type {
   SearchMediaResult,
   SpikeStatus,
   OpsStatus,
+  ScanStagingResult,
+  IngestionManifest,
+  ReconcileIngestionResult,
 ${MUTATION_DTS_IMPORTS.map(n => `  ${n},`).join('\n')}
 } from '../src/types.ts'
 
@@ -709,6 +762,9 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     getLibraryOverview: () => Promise<RemoteResult<LibraryOverview>>
     getMedia: (input: GetMediaInput) => Promise<RemoteResult<MediaDetailItem | null>>
     getOpsStatus: () => Promise<RemoteResult<OpsStatus>>
+    scanStagingFiles: () => Promise<RemoteResult<ScanStagingResult>>
+    listIngestionManifests: () => Promise<RemoteResult<IngestionManifest[]>>
+    reconcileIngestion: () => Promise<RemoteResult<ReconcileIngestionResult>>
     importTagStudioCopy: (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     listTags: (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
     openMedia: (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
@@ -721,6 +777,9 @@ ${MUTATION_DTS_NAMESPACE}
     'mediaLibrary/getLibraryOverview': () => Promise<RemoteResult<LibraryOverview>>
     'mediaLibrary/getMedia': (input: GetMediaInput) => Promise<RemoteResult<MediaDetailItem | null>>
     'mediaLibrary/getOpsStatus': () => Promise<RemoteResult<OpsStatus>>
+    'mediaLibrary/scanStagingFiles': () => Promise<RemoteResult<ScanStagingResult>>
+    'mediaLibrary/listIngestionManifests': () => Promise<RemoteResult<IngestionManifest[]>>
+    'mediaLibrary/reconcileIngestion': () => Promise<RemoteResult<ReconcileIngestionResult>>
     'mediaLibrary/importTagStudioCopy': (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     'mediaLibrary/listTags': (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
     'mediaLibrary/openMedia': (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
@@ -738,6 +797,9 @@ export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'mediaLibrary/getLibraryOverview': TypertRemoteMethod<{}, LibraryOverview>
   readonly 'mediaLibrary/getMedia': TypertRemoteMethod<{ readonly input: GetMediaInput }, MediaDetailItem | null>
   readonly 'mediaLibrary/getOpsStatus': TypertRemoteMethod<{}, OpsStatus>
+  readonly 'mediaLibrary/scanStagingFiles': TypertRemoteMethod<{}, ScanStagingResult>
+  readonly 'mediaLibrary/listIngestionManifests': TypertRemoteMethod<{}, IngestionManifest[]>
+  readonly 'mediaLibrary/reconcileIngestion': TypertRemoteMethod<{}, ReconcileIngestionResult>
   readonly 'mediaLibrary/importTagStudioCopy': TypertRemoteMethod<{ readonly input?: ImportTagStudioInput }, ImportTagStudioResult>
   readonly 'mediaLibrary/listTags': TypertRemoteMethod<{ readonly input?: ListTagsInput }, ListTagsResult>
   readonly 'mediaLibrary/openMedia': TypertRemoteMethod<{ readonly mediaId: string }, MediaActionResult>

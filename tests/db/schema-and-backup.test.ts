@@ -78,7 +78,7 @@ describe('Local SQLite Schema, Migration Runner & Backup/Restore (Issue #3 B1, B
       const res1 = await migrateDatabase(db, { dbPath })
       assert.equal(res1.previousVersion, 0)
       assert.equal(res1.currentVersion, CURRENT_SCHEMA_VERSION)
-      assert.deepEqual(res1.appliedVersions, [1, 2, 3])
+      assert.deepEqual(res1.appliedVersions, [1, 2, 3, 4])
       assert.equal(res1.preUpgradeBackupPath, null)
       assert.equal(res1.health.ok, true)
 
