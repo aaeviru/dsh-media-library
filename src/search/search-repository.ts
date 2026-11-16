@@ -112,6 +112,8 @@ export function listTagsInDatabase(
   const limit = Math.min(Math.max(Number(input?.limit ?? 100), 1), 500)
   const rawQuery = input?.query?.trim() ?? ''
   const normQuery = normalizeLookupKey(rawQuery)
+  // Archived tags stay readable (existing associations, search) but are not offered by default (B5).
+  const archivedFilter = input?.includeArchived ? '' : 't.archived_at IS NULL'
 
   let tagRows: Array<{
     id: number
@@ -120,6 +122,9 @@ export function listTagsInDatabase(
     shorthand: string | null
     media_count: number
     exact_match: number
+    revision: number
+    archived_at: string | null
+    merged_into_id: number | null
   }>
 
   if (!normQuery) {
@@ -131,8 +136,12 @@ export function listTagsInDatabase(
            t.normalized_name,
            t.shorthand,
            (SELECT COUNT(*) FROM media_tags mt WHERE mt.tag_id = t.id) AS media_count,
-           0 AS exact_match
+           0 AS exact_match,
+           t.revision,
+           t.archived_at,
+           t.merged_into_id
          FROM tags t
+         ${archivedFilter ? `WHERE ${archivedFilter}` : ''}
          ORDER BY media_count DESC, t.normalized_name ASC, t.id ASC
          LIMIT ?`,
       )
@@ -155,14 +164,18 @@ export function listTagsInDatabase(
                WHERE ta.tag_id = t.id AND ta.normalized_alias = ?
              ) THEN 2
              ELSE 1
-           END AS exact_match
+           END AS exact_match,
+           t.revision,
+           t.archived_at,
+           t.merged_into_id
          FROM tags t
-         WHERE t.normalized_name LIKE ? ESCAPE '\\'
+         WHERE (t.normalized_name LIKE ? ESCAPE '\\'
             OR LOWER(COALESCE(t.shorthand, '')) LIKE ? ESCAPE '\\'
             OR EXISTS (
               SELECT 1 FROM tag_aliases ta
               WHERE ta.tag_id = t.id AND ta.normalized_alias LIKE ? ESCAPE '\\'
-            )
+            ))
+            ${archivedFilter ? `AND ${archivedFilter}` : ''}
          ORDER BY exact_match DESC, media_count DESC, t.normalized_name ASC, t.id ASC
          LIMIT ?`,
       )
@@ -228,6 +241,9 @@ export function listTagsInDatabase(
     shorthand: r.shorthand ? String(r.shorthand) : null,
     aliases: aliasesByTagId.get(Number(r.id)) ?? [],
     mediaCount: Number(r.media_count),
+    revision: Number(r.revision),
+    archived: r.archived_at !== null,
+    mergedIntoId: r.merged_into_id !== null ? Number(r.merged_into_id) : null,
   }))
 
   return {

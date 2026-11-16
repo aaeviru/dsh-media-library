@@ -22,6 +22,8 @@ import type {
 } from '../types.ts';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
+import { BatchTagBar } from './BatchTagBar.tsx';
+import { TagManagementPanel } from './TagManagementPanel.tsx';
 
 type Translate = (key: MediaLibraryKey) => string;
 
@@ -59,6 +61,8 @@ export function MediaLibraryPanel({
   const [status, setStatus] = useState<SpikeStatus | null>(null);
   const [overview, setOverview] = useState<LibraryOverview | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showTagMgmt, setShowTagMgmt] = useState(false);
+  const [selectedMediaIds, setSelectedMediaIds] = useState<ReadonlySet<string>>(new Set());
 
   // Search filter state
   const [keyword, setKeyword] = useState('');
@@ -233,6 +237,30 @@ export function MediaLibraryPanel({
   useEffect(() => {
     void loadTags(tagSearchInput);
   }, [tagSearchInput, loadTags]);
+
+  // Selection only ever refers to rows currently displayed.
+  useEffect(() => {
+    setSelectedMediaIds((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(items.map((item) => item.mediaId));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [items]);
+
+  const toggleMediaSelected = useCallback((mediaId: string) => {
+    setSelectedMediaIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(mediaId)) next.delete(mediaId);
+      else next.add(mediaId);
+      return next;
+    });
+  }, []);
+
+  const handleTagsChanged = useCallback(() => {
+    void loadTags(tagSearchInput);
+    void executeSearch();
+  }, [loadTags, tagSearchInput, executeSearch]);
 
   useLayoutEffect(() => {
     const menu = contextMenuRef.current;
@@ -482,6 +510,23 @@ export function MediaLibraryPanel({
             }}
           >
             {t('toggleDiagnostics')}
+          </button>
+          <button
+            type="button"
+            data-testid="toggle-tag-mgmt-btn"
+            aria-pressed={showTagMgmt}
+            onClick={() => setShowTagMgmt((prev) => !prev)}
+            style={{
+              padding: '6px 12px',
+              borderRadius: '6px',
+              border: '1px solid rgba(128,128,128,0.35)',
+              background: showTagMgmt ? 'rgba(128,128,128,0.16)' : 'transparent',
+              color: 'inherit',
+              cursor: 'pointer',
+              fontSize: '12px',
+            }}
+          >
+            {t('toggleTagMgmt')}
           </button>
           <button
             type="button"
@@ -758,6 +803,11 @@ export function MediaLibraryPanel({
             </div>
           ) : null}
         </section>
+      ) : null}
+
+      {/* Issue #5 tag & alias management */}
+      {showTagMgmt ? (
+        <TagManagementPanel t={t} mediaLibrary={mediaLibrary} onChanged={handleTagsChanged} />
       ) : null}
 
       {/* M2 Search & Filter Panel */}
@@ -1088,6 +1138,16 @@ export function MediaLibraryPanel({
           </h3>
         </div>
 
+        {items.length > 0 && (
+          <BatchTagBar
+            t={t}
+            mediaLibrary={mediaLibrary}
+            selectedItems={items.filter((item) => selectedMediaIds.has(item.mediaId))}
+            onClearSelection={() => setSelectedMediaIds(new Set())}
+            onApplied={handleTagsChanged}
+          />
+        )}
+
         {items.length === 0 && !searching ? (
           <div
             data-testid="empty-results-state"
@@ -1128,6 +1188,21 @@ export function MediaLibraryPanel({
                     background: 'rgba(128,128,128,0.06)',
                   }}
                 >
+                  <th style={{ padding: '8px 8px 8px 12px', width: '28px' }}>
+                    <input
+                      type="checkbox"
+                      aria-label="Select all visible rows"
+                      data-testid="select-all-media-checkbox"
+                      checked={items.length > 0 && items.every((item) => selectedMediaIds.has(item.mediaId))}
+                      onChange={(ev) => {
+                        if (ev.target.checked) {
+                          setSelectedMediaIds(new Set(items.map((item) => item.mediaId)));
+                        } else {
+                          setSelectedMediaIds(new Set());
+                        }
+                      }}
+                    />
+                  </th>
                   <th style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>
                     {t('colCatalogDate')}
                   </th>
@@ -1153,6 +1228,16 @@ export function MediaLibraryPanel({
                         cursor: 'context-menu',
                       }}
                     >
+                      <td style={{ padding: '8px 8px 8px 12px', verticalAlign: 'top' }}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${item.filename}`}
+                          data-testid={`select-media-checkbox-${item.mediaId}`}
+                          checked={selectedMediaIds.has(item.mediaId)}
+                          onChange={() => toggleMediaSelected(item.mediaId)}
+                          onClick={(ev) => ev.stopPropagation()}
+                        />
+                      </td>
                       <td style={{ padding: '8px 12px', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
                         <div style={{ fontWeight: 600 }}>
                           {item.catalogNumber ? <code>{item.catalogNumber}</code> : '—'}

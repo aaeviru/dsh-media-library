@@ -71,6 +71,9 @@ export interface TagSummary {
   readonly shorthand: string | null;
   readonly aliases: readonly string[];
   readonly mediaCount: number;
+  readonly revision: number;
+  readonly archived: boolean;
+  readonly mergedIntoId: number | null;
 }
 
 export interface AmbiguousAliasWarning {
@@ -84,6 +87,8 @@ export interface AmbiguousAliasWarning {
 export interface ListTagsInput {
   readonly query?: string | undefined;
   readonly limit?: number | undefined;
+  /** Archived tags are hidden unless explicitly requested (`B5`). */
+  readonly includeArchived?: boolean | undefined;
 }
 
 export interface ListTagsResult {
@@ -188,3 +193,134 @@ export interface ImportTagStudioResult {
   readonly importedMediaTags: number;
   readonly sourceSha256: string;
 }
+
+export type MutationErrorCode =
+  | 'INVALID_INPUT'
+  | 'TAG_NOT_FOUND'
+  | 'MEDIA_NOT_FOUND'
+  | 'REVISION_CONFLICT'
+  | 'TAG_NAME_CONFLICT'
+  | 'ALIAS_CONFLICT'
+  | 'ALIAS_NOT_FOUND'
+  | 'BATCH_TOO_LARGE'
+  | 'TAG_IN_USE'
+  | 'MERGE_WOULD_CREATE_CYCLE'
+  | 'TAG_ARCHIVED'
+  | 'TAG_NOT_ARCHIVED'
+  | 'INTERNAL_ERROR';
+
+/** One failing item of a rejected batch (all-or-nothing, so nothing was written). */
+export interface MutationItemFailure {
+  readonly mediaId: string | null;
+  readonly tagId: number | null;
+  readonly code: MutationErrorCode;
+  readonly message: string;
+}
+
+export interface MutationError {
+  readonly ok: false;
+  readonly code: MutationErrorCode;
+  readonly message: string;
+  readonly failures: readonly MutationItemFailure[];
+}
+
+export interface CreateTagInput {
+  readonly name: string;
+}
+
+export interface RenameTagInput {
+  readonly tagId: number;
+  readonly name: string;
+  readonly expectedRevision: number;
+}
+
+export interface AliasInput {
+  readonly tagId: number;
+  readonly alias: string;
+  readonly expectedRevision: number;
+}
+
+export interface TagRevisionInput {
+  readonly tagId: number;
+  readonly expectedRevision: number;
+}
+
+export interface TagMutationSuccess {
+  readonly ok: true;
+  readonly tagId: number;
+  readonly revision: number;
+  readonly mutationId: number;
+}
+
+export type TagMutationResult = TagMutationSuccess | MutationError;
+
+export interface MediaRevisionExpectation {
+  readonly mediaId: string;
+  readonly revision: number;
+}
+
+export interface SetMediaTagsInput {
+  readonly mediaIds: readonly string[];
+  readonly addTagIds?: readonly number[] | undefined;
+  readonly removeTagIds?: readonly number[] | undefined;
+  /** Optional optimistic check against the revision shown in search results. */
+  readonly expectedMediaRevisions?: readonly MediaRevisionExpectation[] | undefined;
+}
+
+export interface SetMediaTagsSuccess {
+  readonly ok: true;
+  readonly mutationId: number;
+  readonly mediaCount: number;
+  readonly added: number;
+  readonly removed: number;
+  readonly unchanged: number;
+}
+
+export type SetMediaTagsResult = SetMediaTagsSuccess | MutationError;
+
+export interface PreviewMergeInput {
+  /** Tag A: survives the merge. */
+  readonly targetTagId: number;
+  /** Tag B: archived with `merged_into_id = A`. */
+  readonly sourceTagId: number;
+}
+
+export interface MergeTagsInput extends PreviewMergeInput {
+  readonly expectedTargetRevision: number;
+  readonly expectedSourceRevision: number;
+}
+
+export interface MergePreviewSuccess {
+  readonly ok: true;
+  readonly targetTagId: number;
+  readonly sourceTagId: number;
+  readonly targetRevision: number;
+  readonly sourceRevision: number;
+  /** Media items carrying tag B (affected by the merge). */
+  readonly affectedMedia: number;
+  /** Media items carrying both A and B (deduplicated). */
+  readonly dedupedMedia: number;
+  readonly aliasesMigrated: number;
+  readonly aliasesConflicting: number;
+  readonly parentEdgesMigrated: number;
+  readonly parentEdgesDeduped: number;
+  readonly wouldCreateCycle: boolean;
+}
+
+export type MergePreviewResult = MergePreviewSuccess | MutationError;
+
+export interface MergeTagsSuccess {
+  readonly ok: true;
+  readonly mutationId: number;
+  readonly targetTagId: number;
+  readonly targetRevision: number;
+  readonly sourceTagId: number;
+  readonly sourceRevision: number;
+  readonly migratedMediaTags: number;
+  readonly dedupedMediaTags: number;
+  readonly aliasesMigrated: number;
+  readonly aliasesDropped: number;
+  readonly parentEdgesMigrated: number;
+}
+
+export type MergeTagsResult = MergeTagsSuccess | MutationError;

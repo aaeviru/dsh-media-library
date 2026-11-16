@@ -6,6 +6,185 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 const LIB_DIR = path.join(REPO_ROOT, 'lib');
 
+
+// ---- Issue #5 tag / alias management metadata (generated from compact tables) ----
+const MUTATION_ERROR_CODES = [
+  'INVALID_INPUT',
+  'TAG_NOT_FOUND',
+  'MEDIA_NOT_FOUND',
+  'REVISION_CONFLICT',
+  'TAG_NAME_CONFLICT',
+  'ALIAS_CONFLICT',
+  'ALIAS_NOT_FOUND',
+  'BATCH_TOO_LARGE',
+  'TAG_IN_USE',
+  'MERGE_WOULD_CREATE_CYCLE',
+  'TAG_ARCHIVED',
+  'TAG_NOT_ARCHIVED',
+  'INTERNAL_ERROR',
+];
+const codeUnion = `z.union([${MUTATION_ERROR_CODES.map(c => `z.literal('${c}')`).join(', ')}]).readonly()`;
+
+function zObject(fields: Record<string, string>): string {
+  return `z.object({ ${Object.entries(fields).map(([k, v]) => `${k}: ${v}`).join(', ')} })`;
+}
+
+const NUM = 'z.number().readonly()';
+const STR = 'z.string().readonly()';
+const BOOL = 'z.boolean().readonly()';
+
+const MUTATION_ERROR_SCHEMA = zObject({
+  ok: 'z.literal(false).readonly()',
+  code: codeUnion,
+  message: STR,
+  failures: `z.array(${zObject({
+    mediaId: 'z.string().nullable().readonly()',
+    tagId: 'z.number().nullable().readonly()',
+    code: codeUnion,
+    message: STR,
+  })}).readonly()`,
+});
+
+interface MutationSchemaSpec {
+  readonly key: string; // schema name suffix
+  readonly fields: Record<string, string>;
+}
+const MUTATION_INPUTS: MutationSchemaSpec[] = [
+  { key: 'createTagInput', fields: { name: STR } },
+  { key: 'renameTagInput', fields: { tagId: NUM, name: STR, expectedRevision: NUM } },
+  { key: 'aliasInput', fields: { tagId: NUM, alias: STR, expectedRevision: NUM } },
+  { key: 'tagRevisionInput', fields: { tagId: NUM, expectedRevision: NUM } },
+  {
+    key: 'setMediaTagsInput',
+    fields: {
+      mediaIds: 'z.array(z.string()).readonly()',
+      addTagIds: 'z.array(z.number()).optional().readonly()',
+      removeTagIds: 'z.array(z.number()).optional().readonly()',
+      expectedMediaRevisions: `z.array(${zObject({ mediaId: STR, revision: NUM })}).optional().readonly()`,
+    },
+  },
+  { key: 'previewMergeInput', fields: { targetTagId: NUM, sourceTagId: NUM } },
+  {
+    key: 'mergeTagsInput',
+    fields: { targetTagId: NUM, sourceTagId: NUM, expectedTargetRevision: NUM, expectedSourceRevision: NUM },
+  },
+];
+const MUTATION_RESULTS: MutationSchemaSpec[] = [
+  { key: 'tagMutationResult', fields: { ok: 'z.literal(true).readonly()', tagId: NUM, revision: NUM, mutationId: NUM } },
+  {
+    key: 'setMediaTagsResult',
+    fields: { ok: 'z.literal(true).readonly()', mutationId: NUM, mediaCount: NUM, added: NUM, removed: NUM, unchanged: NUM },
+  },
+  {
+    key: 'mergePreviewResult',
+    fields: {
+      ok: 'z.literal(true).readonly()',
+      targetTagId: NUM,
+      sourceTagId: NUM,
+      targetRevision: NUM,
+      sourceRevision: NUM,
+      affectedMedia: NUM,
+      dedupedMedia: NUM,
+      aliasesMigrated: NUM,
+      aliasesConflicting: NUM,
+      parentEdgesMigrated: NUM,
+      parentEdgesDeduped: NUM,
+      wouldCreateCycle: BOOL,
+    },
+  },
+  {
+    key: 'mergeTagsResult',
+    fields: {
+      ok: 'z.literal(true).readonly()',
+      mutationId: NUM,
+      targetTagId: NUM,
+      targetRevision: NUM,
+      sourceTagId: NUM,
+      sourceRevision: NUM,
+      migratedMediaTags: NUM,
+      dedupedMediaTags: NUM,
+      aliasesMigrated: NUM,
+      aliasesDropped: NUM,
+      parentEdgesMigrated: NUM,
+    },
+  },
+];
+
+const MUTATION_SCHEMAS = [
+  `const _mediaLibrary_mutationError = () => ${MUTATION_ERROR_SCHEMA}`,
+  ...MUTATION_INPUTS.map(
+    i => `let _mediaLibrary_${i.key}$schema$value\nconst _mediaLibrary_${i.key}$schema = () => (_mediaLibrary_${i.key}$schema$value ??= ${zObject(i.fields)})`,
+  ),
+  ...MUTATION_RESULTS.map(
+    r =>
+      `let _mediaLibrary_${r.key}$schema$value\nconst _mediaLibrary_${r.key}$schema = () => (_mediaLibrary_${r.key}$schema$value ??= z.union([${zObject(r.fields)}, _mediaLibrary_mutationError()]))`,
+  ),
+].join('\n\n');
+
+interface MutationMethodSpec {
+  readonly name: string;
+  readonly description: string;
+  readonly inputKey: string;
+  readonly inputType: string;
+  readonly resultKey: string;
+  readonly resultType: string;
+  readonly paramDescription: string;
+  readonly line: number;
+}
+const MUTATION_METHODS: MutationMethodSpec[] = [
+  { name: 'createTag', description: 'Create a custom tag (name is trimmed; normalized-name collisions return TAG_NAME_CONFLICT).', inputKey: 'createTagInput', inputType: 'CreateTagInput', resultKey: 'tagMutationResult', resultType: 'TagMutationResult', paramDescription: 'New tag name.', line: 112 },
+  { name: 'renameTag', description: 'Rename a tag using optimistic revision checking.', inputKey: 'renameTagInput', inputType: 'RenameTagInput', resultKey: 'tagMutationResult', resultType: 'TagMutationResult', paramDescription: 'Tag id, new name and expected revision.', line: 120 },
+  { name: 'addAlias', description: "Add an alias to a tag; clashes with other tags' names or aliases return ALIAS_CONFLICT.", inputKey: 'aliasInput', inputType: 'AliasInput', resultKey: 'tagMutationResult', resultType: 'TagMutationResult', paramDescription: 'Tag id, alias text and expected revision.', line: 128 },
+  { name: 'removeAlias', description: 'Remove an alias from a tag using optimistic revision checking.', inputKey: 'aliasInput', inputType: 'AliasInput', resultKey: 'tagMutationResult', resultType: 'TagMutationResult', paramDescription: 'Tag id, alias text and expected revision.', line: 136 },
+  { name: 'setMediaTags', description: 'Atomically add and/or remove tags on up to 200 media items by mediaId and tagId.', inputKey: 'setMediaTagsInput', inputType: 'SetMediaTagsInput', resultKey: 'setMediaTagsResult', resultType: 'SetMediaTagsResult', paramDescription: 'Media ids, tag ids to add and remove.', line: 144 },
+  { name: 'previewMerge', description: 'Read-only impact preview of merging tag B (source) into tag A (target).', inputKey: 'previewMergeInput', inputType: 'PreviewMergeInput', resultKey: 'mergePreviewResult', resultType: 'MergePreviewResult', paramDescription: 'Target (A) and source (B) tag ids.', line: 152 },
+  { name: 'mergeTags', description: 'Merge tag B (source) into tag A (target) atomically; B is archived, never deleted.', inputKey: 'mergeTagsInput', inputType: 'MergeTagsInput', resultKey: 'mergeTagsResult', resultType: 'MergeTagsResult', paramDescription: 'Target and source tag ids with the previewed revisions.', line: 160 },
+  { name: 'archiveTag', description: 'Archive a tag non-destructively (existing associations and search stay readable).', inputKey: 'tagRevisionInput', inputType: 'TagRevisionInput', resultKey: 'tagMutationResult', resultType: 'TagMutationResult', paramDescription: 'Tag id and expected revision.', line: 168 },
+  { name: 'restoreTag', description: 'Restore an archived tag.', inputKey: 'tagRevisionInput', inputType: 'TagRevisionInput', resultKey: 'tagMutationResult', resultType: 'TagMutationResult', paramDescription: 'Tag id and expected revision.', line: 176 },
+];
+
+function mutationMethodEntry(m: MutationMethodSpec): string {
+  const typeSymbol = `'@deepseek-ai/dsh-experimental-media-library#mediaLibrary/${m.name}:input'`;
+  const codec = (indent: string): string => `{
+${indent}  mode: 'strict',
+${indent}  typeSymbol: ${typeSymbol},
+${indent}  create: _mediaLibrary_${m.inputKey}$schema,
+${indent}  jsonSchema: { type: 'object' },
+${indent}}`;
+  return `    'mediaLibrary/${m.name}': {
+      service: 'mediaLibrary',
+      description: ${JSON.stringify(m.description)},
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'input',
+          description: ${JSON.stringify(m.paramDescription)},
+          source: 'json',
+          codec: ${codec('          ')},
+          strictCodec: ${codec('          ')},
+        },
+      ],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-experimental-media-library/types#${m.resultType}',
+        create: _mediaLibrary_${m.resultKey}$schema,
+      },
+      sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: ${m.line}, column: 3 },
+    },
+`;
+}
+const MUTATION_METHOD_ENTRIES = MUTATION_METHODS.map(mutationMethodEntry).join('');
+const MUTATION_DTS_NAMESPACE = MUTATION_METHODS.map(
+  m => `    ${m.name}: (input: ${m.inputType}) => Promise<RemoteResult<${m.resultType}>>`,
+).join('\n');
+const MUTATION_DTS_MAP = MUTATION_METHODS.map(
+  m => `    'mediaLibrary/${m.name}': (input: ${m.inputType}) => Promise<RemoteResult<${m.resultType}>>`,
+).join('\n');
+const MUTATION_DTS_INFO = MUTATION_METHODS.map(
+  m => `  readonly 'mediaLibrary/${m.name}': TypertRemoteMethod<{ readonly input: ${m.inputType} }, ${m.resultType}>`,
+).join('\n');
+const MUTATION_DTS_IMPORTS = [...new Set(MUTATION_METHODS.flatMap(m => [m.inputType, m.resultType]))].sort();
+
 const SHARED_SCHEMAS = `import { z } from 'zod'
 
 import { createTypertRemoteInfo } from '@deepseek-ai/dsh-typert-protocol/remote-info'
@@ -103,6 +282,7 @@ let _mediaLibrary_listTagsInput$schema$value
 const _mediaLibrary_listTagsInput$schema = () => (_mediaLibrary_listTagsInput$schema$value ??= z.object({
   query: z.string().optional().readonly(),
   limit: z.number().optional().readonly(),
+  includeArchived: z.boolean().optional().readonly(),
 }).optional())
 
 let _mediaLibrary_listTagsResult$schema$value
@@ -114,6 +294,9 @@ const _mediaLibrary_listTagsResult$schema = () => (_mediaLibrary_listTagsResult$
     shorthand: z.string().nullable().readonly(),
     aliases: z.array(z.string()).readonly(),
     mediaCount: z.number().readonly(),
+    revision: z.number().readonly(),
+    archived: z.boolean().readonly(),
+    mergedIntoId: z.number().nullable().readonly(),
   })).readonly(),
   ambiguousAliases: z.array(z.object({
     normalizedAlias: z.string().readonly(),
@@ -237,6 +420,8 @@ const _mediaLibrary_importResult$schema = () => (_mediaLibrary_importResult$sche
   importedMediaTags: z.number().readonly(),
   sourceSha256: z.string().readonly(),
 }))
+
+${MUTATION_SCHEMAS}
 `;
 
 const REMOTE_INFO_BODY = `{
@@ -446,7 +631,7 @@ const REMOTE_INFO_BODY = `{
       },
       sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 46, column: 3 },
     },
-  },
+${MUTATION_METHOD_ENTRIES}  },
 }`;
 
 const HOST_JS = `/* Generated by @deepseek-ai/dsh-typert-generator from FaceModel — do not edit. */
@@ -496,6 +681,7 @@ import type {
   SearchMediaInput,
   SearchMediaResult,
   SpikeStatus,
+${MUTATION_DTS_IMPORTS.map(n => `  ${n},`).join('\n')}
 } from '../src/types.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -508,6 +694,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     revealMedia: (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
     searchMedia: (input?: SearchMediaInput) => Promise<RemoteResult<SearchMediaResult>>
     spikeStatus: () => Promise<RemoteResult<SpikeStatus>>
+${MUTATION_DTS_NAMESPACE}
   }
   interface TypertRemoteMap {
     'mediaLibrary/getLibraryOverview': () => Promise<RemoteResult<LibraryOverview>>
@@ -518,6 +705,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'mediaLibrary/revealMedia': (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
     'mediaLibrary/searchMedia': (input?: SearchMediaInput) => Promise<RemoteResult<SearchMediaResult>>
     'mediaLibrary/spikeStatus': () => Promise<RemoteResult<SpikeStatus>>
+${MUTATION_DTS_MAP}
   }
   interface TypertRemoteNamespaceMap {
     mediaLibrary: TypertRemoteNamespace$mediaLibrary
@@ -533,6 +721,7 @@ export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'mediaLibrary/revealMedia': TypertRemoteMethod<{ readonly mediaId: string }, MediaActionResult>
   readonly 'mediaLibrary/searchMedia': TypertRemoteMethod<{ readonly input?: SearchMediaInput }, SearchMediaResult>
   readonly 'mediaLibrary/spikeStatus': TypertRemoteMethod<{}, SpikeStatus>
+${MUTATION_DTS_INFO}
 }>
 export default TYPERT_REMOTE
 `;

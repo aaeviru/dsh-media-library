@@ -328,6 +328,95 @@ try {
   await page.click("[data-testid=\"context-menu-reveal-btn\"]");
   await page.locator("[data-testid=\"media-row-context-menu\"]").waitFor({ state: "detached" });
   await page.setViewportSize({ width: 1440, height: 900 });
+
+  // Issue #5 M3 E2E: Tag management (XSS-as-data, create/alias/rename/archive/restore, batch tag, merge preview & confirm)
+  await page.click("[data-testid=\"toggle-tag-mgmt-btn\"]");
+  await page.waitForSelector("[data-testid=\"tag-management-panel\"]");
+
+  const xssName = "<img src=x onerror=window.__dshXss=1>";
+  await page.fill("[data-testid=\"tagmgmt-create-input\"]", xssName);
+  await page.click("[data-testid=\"tagmgmt-create-btn\"]");
+  await page.waitForSelector("[data-testid=\"tagmgmt-message\"]");
+  const xssFired = await page.evaluate(() => Boolean(window.__dshXss));
+  assert.equal(xssFired, false, "XSS payload must render as data, never execute");
+
+  // Select the newly created tag in the list, add alias, rename, archive, restore
+  await page.fill("[data-testid=\"tagmgmt-filter-input\"]", "onerror=window.__dshXss");
+  await page.waitForTimeout(300);
+  await page.locator("button[data-testid^=\"tagmgmt-row-\"]").first().click();
+  await page.waitForSelector("[data-testid=\"tagmgmt-detail\"]");
+  assert.equal(await page.locator("[data-testid=\"tagmgmt-selected-name\"]").innerText(), xssName);
+
+  await page.fill("[data-testid=\"tagmgmt-alias-input\"]", "xss_safe_alias");
+  await page.click("[data-testid=\"tagmgmt-alias-add-btn\"]");
+  await page.waitForSelector("[data-testid=\"tagmgmt-alias-0\"]");
+
+  await page.fill("[data-testid=\"tagmgmt-rename-input\"]", "M3_Target_A");
+  await page.click("[data-testid=\"tagmgmt-rename-btn\"]");
+  await page.locator("[data-testid=\"tagmgmt-busy\"]").waitFor({ state: "detached" });
+  await page.waitForSelector("[data-testid=\"tagmgmt-message\"]");
+  await page.fill("[data-testid=\"tagmgmt-filter-input\"]", "M3_Target_A");
+  await page.locator("button[data-testid^=\"tagmgmt-row-\"]").first().waitFor();
+  await page.locator("button[data-testid^=\"tagmgmt-row-\"]").first().click();
+  assert.equal(await page.locator("[data-testid=\"tagmgmt-selected-name\"]").innerText(), "M3_Target_A");
+
+  await page.click("[data-testid=\"tagmgmt-archive-btn\"]");
+  await page.locator("[data-testid=\"tagmgmt-busy\"]").waitFor({ state: "detached" });
+  await page.waitForSelector("[data-testid=\"tagmgmt-message\"]");
+  await page.check("[data-testid=\"tagmgmt-show-archived\"]");
+  await page.locator("button[data-testid^=\"tagmgmt-row-\"]").first().waitFor();
+  await page.locator("button[data-testid^=\"tagmgmt-row-\"]").first().click();
+  await page.click("[data-testid=\"tagmgmt-restore-btn\"]");
+  await page.locator("[data-testid=\"tagmgmt-busy\"]").waitFor({ state: "detached" });
+  await page.waitForSelector("[data-testid=\"tagmgmt-message\"]");
+  await page.uncheck("[data-testid=\"tagmgmt-show-archived\"]");
+  await page.fill("[data-testid=\"tagmgmt-filter-input\"]", "");
+
+  // Create M3_Source_B, batch-tag two rows with M3_Source_B, then merge M3_Source_B -> M3_Target_A
+  await page.fill("[data-testid=\"tagmgmt-create-input\"]", "M3_Source_B");
+  await page.click("[data-testid=\"tagmgmt-create-btn\"]");
+  await page.waitForFunction(() => document.querySelector("[data-testid=\"tagmgmt-selected-name\"]")?.textContent === "M3_Source_B");
+
+  await page.click("[data-testid=\"search-reset-btn\"]");
+  await page.waitForFunction(() => document.querySelectorAll("input[data-testid^=\"select-media-checkbox-\"]").length >= 2);
+
+  const firstTwoCheckboxes = page.locator("input[data-testid^=\"select-media-checkbox-\"]");
+  await firstTwoCheckboxes.nth(0).check();
+  await firstTwoCheckboxes.nth(1).check();
+  await page.waitForSelector("[data-testid=\"batch-tag-bar\"]");
+  await page.fill("[data-testid=\"batch-tag-input\"]", "M3_Source_B");
+  await page.waitForTimeout(300);
+  const sourceOptionVal = await page.locator("[data-testid=\"batch-tag-select\"] option").evaluateAll(opts => {
+    const match = opts.find(o => o.textContent?.includes("M3_Source_B"));
+    return match ? match.value : "";
+  });
+  assert.ok(sourceOptionVal, "Expected M3_Source_B in batch tag select");
+  await page.selectOption("[data-testid=\"batch-tag-select\"]", sourceOptionVal);
+  await page.click("[data-testid=\"batch-add-btn\"]");
+  await page.waitForSelector("[data-testid=\"batch-result-banner\"]");
+
+  // Merge M3_Source_B into M3_Target_A via preview + confirm
+  await page.fill("[data-testid=\"tagmgmt-filter-input\"]", "M3_");
+  await page.waitForFunction(() => {
+    const opts = Array.from(document.querySelectorAll("[data-testid=\"tagmgmt-row-\"]"));
+    return document.querySelectorAll("button[data-testid^=\"tagmgmt-row-\"]").length >= 2 || true;
+  });
+  await page.waitForTimeout(300);
+  await page.locator("button[data-testid^=\"tagmgmt-row-\"]", { hasText: "M3_Target_A" }).first().click();
+  const mergeOptVal = await page.locator("[data-testid=\"tagmgmt-merge-source-select\"] option").evaluateAll(opts => {
+    const match = opts.find(o => o.textContent?.includes("M3_Source_B"));
+    return match ? match.value : "";
+  });
+  assert.ok(mergeOptVal, "Expected M3_Source_B in merge source select");
+  await page.selectOption("[data-testid=\"tagmgmt-merge-source-select\"]", mergeOptVal);
+  await page.click("[data-testid=\"tagmgmt-merge-preview-btn\"]");
+  await page.waitForSelector("[data-testid=\"tagmgmt-merge-preview\"]");
+  assert.equal(await page.locator("[data-testid=\"preview-affected\"]").innerText(), "2");
+  await page.click("[data-testid=\"tagmgmt-merge-confirm-btn\"]");
+  await page.waitForSelector("[data-testid=\"tagmgmt-message\"]");
+  await page.click("[data-testid=\"toggle-tag-mgmt-btn\"]");
+  console.log("Issue #5 M3 UI E2E (XSS-as-data, create/alias/rename/archive/restore, batch tag, merge preview+confirm): PASS");
+
   // Measure actual 100k result rendering separately from the six-row import.
   // This is a warm Host/UI search; cold Host initialization is measured in B5.
   const benchDb = new DatabaseSync(path.join(process.env.DSH_HOME, "media-library/library.sqlite3"));
