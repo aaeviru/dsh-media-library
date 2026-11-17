@@ -126,6 +126,18 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
     assert.equal(okCmadb.metadata?.mediaDate, '2026-11-13');
     assert.deepEqual(okCmadb.metadata?.candidateTags, ['ここあ', 'CreatorA', 'ハメ撮り', '中出し', 'Amateur', '1080p']);
 
+    const inertiaOnlyHtml = `
+      <html><body>
+        <script data-page="app" type="application/json">
+          {"props":{"actresses":[{"id":12502,"name":"ここあ"}],"article":{"video_id":"5006891","title":"Inertia Only","release_date":"2026-11-13","writer":{"name":"CreatorB"},"actress":{"name":"みなみ"},"tags":[{"name":"巨乳"}]}}}
+        </script>
+      </body></html>
+    `;
+    const okInertia = parseCmadbHtml(inertiaOnlyHtml, '5006891', 'https://fc2cmadb.com/articles/5006891');
+    assert.equal(okInertia.category, 'ok');
+    assert.deepEqual(okInertia.metadata?.actresses, ['みなみ', 'ここあ']);
+    assert.deepEqual(okInertia.metadata?.candidateTags, ['みなみ', 'ここあ', 'CreatorB', '巨乳']);
+
     const loginHtml = '<html><body><form action="/login">メールアドレス</form></body></html>';
     assert.equal(parseCmadbHtml(loginHtml, '4545625', 'https://fc2cmadb.com/articles/4545625').category, 'auth_or_blocked');
     assert.equal(parsePpvdbHtml(loginHtml, '4545625', 'https://fc2ppvdb.com/articles/4545625').category, 'auth_or_blocked');

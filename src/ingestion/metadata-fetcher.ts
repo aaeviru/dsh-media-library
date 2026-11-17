@@ -66,6 +66,45 @@ function extractIsoDateFromText(raw: unknown): string | null {
   return match ? `${match[1]}-${match[2]}-${match[3]}` : null;
 }
 
+function extractEntityNames(raw: unknown, depth = 0): string[] {
+  if (depth > 3 || raw === null || raw === undefined) return [];
+  if (typeof raw === 'string') {
+    const cleaned = cleanMetadataText(raw);
+    return cleaned ? [cleaned] : [];
+  }
+  if (Array.isArray(raw)) {
+    const out: string[] = [];
+    for (const item of raw) {
+      out.push(...extractEntityNames(item, depth + 1));
+    }
+    return out;
+  }
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    const out: string[] = [];
+    for (const key of ['name', 'actress_name', 'label', 'title'] as const) {
+      if (typeof obj[key] === 'string') {
+        const cleaned = cleanMetadataText(obj[key]);
+        if (cleaned) out.push(cleaned);
+      }
+    }
+    if (obj.actress && typeof obj.actress === 'object') {
+      out.push(...extractEntityNames(obj.actress, depth + 1));
+    }
+    return out;
+  }
+  return [];
+}
+
+function extractActressAnchorsFromHtml(html: string): string[] {
+  const out: string[] = [];
+  for (const m of html.matchAll(/<a\b[^>]*href=["'][^"']*\/actress(?:es)?\/[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+    const cleaned = cleanMetadataText(m[1]!.replace(/<[^>]+>/g, ''));
+    if (cleaned) out.push(cleaned);
+  }
+  return out;
+}
+
 function extractAnchorOrTextValues(cellHtml: string): string[] {
   const anchors = [...cellHtml.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)]
     .map((m) => cleanMetadataText(m[1]!.replace(/<[^>]+>/g, '')))
@@ -142,11 +181,14 @@ export function parseCmadbHtml(html: string, videoId: string, sourceUrl: string)
     };
   }
 
+  let props: Record<string, unknown> | undefined;
   let article: Record<string, unknown> | undefined;
   try {
     const rawJson = decodeHtmlEntities(scriptMatch[1]!);
-    const payload = JSON.parse(rawJson) as { props?: { article?: Record<string, unknown> } };
-    article = payload?.props?.article;
+    const payload = JSON.parse(rawJson) as { props?: Record<string, unknown> };
+    props = payload?.props;
+    const rawArticle = props?.article;
+    article = rawArticle && typeof rawArticle === 'object' ? (rawArticle as Record<string, unknown>) : undefined;
   } catch (err) {
     return {
       metadata: null,
@@ -180,18 +222,28 @@ export function parseCmadbHtml(html: string, videoId: string, sourceUrl: string)
       : '') || tableInfo.writer;
   if (writer.toLowerCase() === 'fc2cmadb') writer = '';
 
-  const actressSet = new Set<string>(tableInfo.actresses);
-  for (const field of ['actresses', 'actors', 'performers', 'casts'] as const) {
-    const list = article[field];
-    if (Array.isArray(list)) {
-      for (const entry of list) {
-        if (typeof entry === 'string') {
-          const cleaned = cleanMetadataText(entry);
-          if (cleaned) actressSet.add(cleaned);
-        } else if (entry && typeof entry === 'object' && typeof (entry as { name?: unknown }).name === 'string') {
-          const cleaned = cleanMetadataText((entry as { name: string }).name);
-          if (cleaned) actressSet.add(cleaned);
-        }
+  const actressSet = new Set<string>([...tableInfo.actresses, ...extractActressAnchorsFromHtml(html)]);
+  const actressKeys = [
+    'actress',
+    'actresses',
+    'actor',
+    'actors',
+    'performer',
+    'performers',
+    'cast',
+    'casts',
+    'girl',
+    'girls',
+    'model',
+    'models',
+    'av_actress',
+    'av_actresses',
+  ] as const;
+  for (const container of [article, props]) {
+    if (!container) continue;
+    for (const field of actressKeys) {
+      for (const name of extractEntityNames(container[field])) {
+        actressSet.add(name);
       }
     }
   }
