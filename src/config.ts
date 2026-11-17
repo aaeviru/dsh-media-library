@@ -10,6 +10,12 @@ export interface Config {
   backupRetentionCount: number;
   preMigrateRetentionCount: number;
   autoDailyBackup: boolean;
+  stagingDir: Volatile<string>;
+  ingestionTargetSubdir: Volatile<string>;
+  cmadbBaseUrl: string;
+  ppvdbBaseUrl: string;
+  cmadbCookie: Volatile<string>;
+  ppvdbCookie: Volatile<string>;
 }
 
 export const Config = Schema.object({
@@ -45,4 +51,26 @@ export const Config = Schema.object({
   autoDailyBackup: Schema.boolean()
     .default(true)
     .description('Automatically create at most one verified backup per 24h when new writes/imports occurred.'),
+  stagingDir: Schema.string()
+    .default('')
+    .description('Staging temp folder holding video files awaiting metadata lookup, review, and ingestion.')
+    .volatile(),
+  ingestionTargetSubdir: Schema.string()
+    .default('ingested')
+    .description('Fixed target subdirectory under uncRoot where reviewed files are moved (keeping original filename).')
+    .volatile(),
+  cmadbBaseUrl: Schema.string()
+    .default('https://fc2cmadb.com')
+    .description('Primary metadata provider base URL.'),
+  ppvdbBaseUrl: Schema.string()
+    .default('https://fc2ppvdb.com')
+    .description('Fallback metadata provider base URL.'),
+  cmadbCookie: Schema.string()
+    .default('')
+    .description('Optional Cookie header for primary metadata provider.')
+    .volatile(),
+  ppvdbCookie: Schema.string()
+    .default('')
+    .description('Optional Cookie header for fallback metadata provider.')
+    .volatile(),
 });

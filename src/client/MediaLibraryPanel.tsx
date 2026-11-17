@@ -26,9 +26,12 @@ import type {
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
 import { BatchTagBar } from './BatchTagBar.tsx';
+import { IngestionPanel } from './IngestionPanel.tsx';
 import { TagManagementPanel } from './TagManagementPanel.tsx';
 
 type Translate = (key: MediaLibraryKey) => string;
+
+let persistedShowIngestionPanel = false;
 
 interface ContextMenuState {
   readonly mediaId: string;
@@ -67,6 +70,7 @@ export function MediaLibraryPanel({
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [showTagMgmt, setShowTagMgmt] = useState(false);
   const [showOpsPanel, setShowOpsPanel] = useState(false);
+  const [showIngestionPanel, setShowIngestionPanel] = useState(() => persistedShowIngestionPanel);
   const [backingUp, setBackingUp] = useState(false);
   const [backupResult, setBackupResult] = useState<CreateBackupResult | null>(null);
   const [exportingFormat, setExportingFormat] = useState<MappingReportFormat | null>(null);
@@ -611,6 +615,29 @@ export function MediaLibraryPanel({
           </button>
           <button
             type="button"
+            data-testid="toggle-ingestion-panel-btn"
+            aria-pressed={showIngestionPanel}
+            onClick={() =>
+              setShowIngestionPanel((prev) => {
+                const next = !prev;
+                persistedShowIngestionPanel = next;
+                return next;
+              })
+            }
+            style={{
+              padding: '6px 12px',
+              borderRadius: '6px',
+              border: '1px solid rgba(128,128,128,0.35)',
+              background: showIngestionPanel ? 'rgba(128,128,128,0.16)' : 'transparent',
+              color: 'inherit',
+              cursor: 'pointer',
+              fontSize: '12px',
+            }}
+          >
+            {t('toggleIngestionPanel')}
+          </button>
+          <button
+            type="button"
             onClick={() => void refreshAll()}
             disabled={searching}
             style={{
@@ -1016,6 +1043,16 @@ export function MediaLibraryPanel({
             )}
           </div>
         </section>
+      ) : null}
+
+      {/* Issue #7 Staging & Recoverable Ingestion */}
+      {showIngestionPanel ? (
+        <IngestionPanel
+          t={t}
+          mediaLibrary={mediaLibrary}
+          degraded={Boolean(opsStatus?.degradedState.degraded)}
+          onCommitted={handleTagsChanged}
+        />
       ) : null}
 
       {/* Issue #5 tag & alias management */}

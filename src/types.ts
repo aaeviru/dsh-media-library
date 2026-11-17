@@ -394,3 +394,135 @@ export interface ExportMappingReportResult {
   readonly content: string;
   readonly error?: string | undefined;
 }
+
+// ---------------------------------------------------------------------------
+// Issue #7 M4: Recoverable Media Ingestion & Metadata Lookup
+// ---------------------------------------------------------------------------
+
+export type IngestionState = 'planned' | 'reviewed' | 'moving' | 'indexed' | 'failed';
+export type IngestionReviewDecision = 'pending' | 'approved' | 'rejected';
+
+export interface StagingFileItem {
+  readonly filename: string;
+  readonly relativePath: string;
+  readonly tempPath: string;
+  readonly targetRelativePath: string;
+  readonly fileSize: number;
+  readonly mtimeIso: string;
+  readonly catalogNumber: string | null;
+  readonly manifestId: number | null;
+  readonly state: IngestionState | null;
+  readonly reviewDecision: IngestionReviewDecision | null;
+}
+
+export interface IngestionManifestTag {
+  readonly tagId?: number | undefined;
+  readonly name: string;
+}
+
+export interface IngestionManifest {
+  readonly id: number;
+  readonly sourceId: string;
+  readonly tempPath: string;
+  readonly targetRootId: string;
+  readonly targetRelativePath: string;
+  readonly filename: string;
+  readonly title: string | null;
+  readonly catalogNumber: string | null;
+  readonly mediaDate: string | null;
+  readonly tags: readonly IngestionManifestTag[];
+  readonly metadataSource: string | null;
+  readonly checksumSha256: string;
+  readonly fileSize: number;
+  readonly state: IngestionState;
+  readonly reviewDecision: IngestionReviewDecision;
+  readonly lastError: string | null;
+  readonly indexedMediaId: number | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ScanStagingResult {
+  readonly ok: boolean;
+  readonly stagingDir: string;
+  readonly targetRootId: string;
+  readonly targetSubdir: string;
+  readonly elapsedMs: number;
+  readonly files: readonly StagingFileItem[];
+  readonly manifests: readonly IngestionManifest[];
+  readonly error?: string | undefined;
+}
+
+export interface FetchIngestionMetadataInput {
+  readonly manifestId?: number | undefined;
+  readonly tempPath?: string | undefined;
+}
+
+export interface FetchedMetadataCandidate {
+  readonly ok: boolean;
+  readonly provider: string | null;
+  readonly category: 'ok' | 'not_found' | 'auth_or_blocked' | 'rate_limited' | 'transient_http' | 'transient_network' | 'parse_error' | 'client_error' | 'no_code';
+  readonly reason: string;
+  readonly sourceUrl: string;
+  readonly title: string | null;
+  readonly writer: string | null;
+  readonly actresses: readonly string[];
+  readonly mediaDate: string | null;
+  readonly candidateTags: readonly string[];
+  readonly manifest: IngestionManifest | null;
+}
+
+export interface ReviewIngestionInput {
+  readonly manifestId?: number | undefined;
+  readonly tempPath?: string | undefined;
+  readonly decision: 'approved' | 'rejected';
+  readonly title?: string | undefined;
+  readonly catalogNumber?: string | undefined;
+  readonly mediaDate?: string | undefined;
+  readonly tagIds?: readonly number[] | undefined;
+  readonly newTagNames?: readonly string[] | undefined;
+}
+
+export interface ReviewIngestionResult {
+  readonly ok: boolean;
+  readonly code?: MutationErrorCode | 'MANIFEST_NOT_FOUND' | undefined;
+  readonly message?: string | undefined;
+  readonly manifest?: IngestionManifest | null | undefined;
+}
+
+export interface CommitIngestionInput {
+  readonly manifestId: number;
+}
+
+export interface CommitIngestionResult {
+  readonly ok: boolean;
+  readonly code?: 'REVIEW_REQUIRED' | 'READ_ONLY_DEGRADED' | 'MANIFEST_NOT_FOUND' | 'MOVE_FAILED' | 'INDEX_FAILED' | 'CHECKSUM_MISMATCH' | 'IN_PROGRESS' | MediaActionErrorCode | undefined;
+  readonly message: string;
+  readonly idempotentReplay?: boolean | undefined;
+  readonly mediaId?: number | null | undefined;
+  readonly warning?: string | null | undefined;
+  readonly manifest?: IngestionManifest | null | undefined;
+}
+
+export type IngestionTaskOp = 'fetch' | 'commit' | 'reconcile';
+export type IngestionTaskStatus = 'running' | 'succeeded' | 'failed' | 'interrupted';
+
+export interface IngestionTask {
+  readonly id: number;
+  readonly targetKey: string;
+  readonly op: IngestionTaskOp;
+  readonly status: IngestionTaskStatus;
+  readonly message: string;
+  readonly startedAt: string;
+  readonly finishedAt: string | null;
+}
+
+export interface ReconcileIngestionResult {
+  readonly ok: boolean;
+  readonly reconciledCount: number;
+  readonly copiedNotDeletedFixed: number;
+  readonly movedNotIndexedFixed: number;
+  readonly indexedButMissingMarked: number;
+  readonly errors: readonly string[];
+  readonly manifests: readonly IngestionManifest[];
+}

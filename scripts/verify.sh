@@ -17,7 +17,8 @@ node --experimental-strip-types --test \
   tests/db/*.test.ts \
   tests/import/tagstudio-importer.test.ts \
   tests/search/*.test.ts \
-  tests/mutations/*.test.ts
+  tests/mutations/*.test.ts \
+  tests/ingestion/*.test.ts
 
 echo "==> [4/5] Verifying .tgz package creation (portable relative default ./dist)..."
 PACKED_TGZ="$(./scripts/pack.sh ./dist | tail -n 1)"

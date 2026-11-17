@@ -100,6 +100,7 @@
 2. **Typecheck**：Host、Client 及测试类型检查。
 3. **Build**：编译、Typert 生成、Host/Client bundle，并校验外部 import 仅包含 `@deepseek-ai/cordis` 与 `node:*`。
 4. **Packaging（`./scripts/pack.sh`）**：默认输出到仓库内相对路径 `./dist/dsh-media-library-<version>-<short-sha>.tgz`（也支持传入任意相对路径参数，如 `./scripts/pack.sh ../dsh-media-library-local-data/artifacts` 供 Windows 桌面端冷安装追溯）。
+   - **每次打包必须先递增版本号**：每次向用户交付新的 `.tgz` 安装包前，必须先递增版本号（同步更新 `package.json`、`bundle/package.json` 及 `appVersion` 默认值），确保 Windows DSH Desktop 冷安装时可通过文件名与插件版本明确区分不同构建。
 5. **WSL DSH Web 三层运行态验证（`./scripts/verify-web.sh`）**：在交付 Windows DSH Desktop 人工验收前，必须在隔离 `DSH_HOME` 的 `web` profile 中完成 `.tgz` 冷安装（拒绝 `link:` 依赖）、启动 `dsh web` 校验 `boot.html` 与 `/plugins/??...` HTTP 200，并通过 Playwright 无头 Chromium 真点测侧栏入口、面板渲染及 Host RPC 往返。
 
 ### 3.2 Seam Check（接缝检查）与证据分级

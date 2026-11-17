@@ -285,6 +285,13 @@ describe('MediaLibrarySpikeService Open, Reveal & Error Semantics (B2, B3, B4, B
     );
     assert.equal(validated.package, '@deepseek-ai/dsh-experimental-media-library');
     assert.equal(validated.face, 'host');
-    assert.equal(validated.invocations.length, 20);
+    assert.equal(validated.invocations.length, 27);
+    for (const inv of TYPERT.invocations) {
+      for (const param of inv.parameters ?? []) {
+        if (param?.codec?.create) assert.ok(param.codec.create());
+        if (param?.strictCodec?.create) assert.ok(param.strictCodec.create());
+      }
+      if (inv.result?.create) assert.ok(inv.result.create());
+    }
   });
 });

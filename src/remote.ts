@@ -4,14 +4,20 @@ import { Config } from './config.ts';
 import { MediaLibrarySpikeService } from './spike-service.ts';
 import type {
   AliasInput,
+  CommitIngestionInput,
+  CommitIngestionResult,
   CreateBackupInput,
   CreateBackupResult,
   CreateTagInput,
   ExportMappingReportInput,
   ExportMappingReportResult,
+  FetchedMetadataCandidate,
+  FetchIngestionMetadataInput,
   GetMediaInput,
   ImportTagStudioInput,
   ImportTagStudioResult,
+  IngestionManifest,
+  IngestionTask,
   LibraryOverview,
   ListTagsInput,
   ListTagsResult,
@@ -22,7 +28,11 @@ import type {
   MergeTagsResult,
   OpsStatus,
   PreviewMergeInput,
+  ReconcileIngestionResult,
   RenameTagInput,
+  ReviewIngestionInput,
+  ReviewIngestionResult,
+  ScanStagingResult,
   SearchMediaInput,
   SearchMediaResult,
   SetMediaTagsInput,
@@ -54,6 +64,12 @@ export class MediaLibraryRemote extends TypertRemoteService {
       configuredUncRoot: () => config.uncRoot.get(),
       configuredTagStudioCopyPath: () => config.tagstudioCopyPath.get(),
       configuredNasBackupDir: () => config.nasBackupDir.get(),
+      configuredStagingDir: () => config.stagingDir.get(),
+      configuredTargetSubdir: () => config.ingestionTargetSubdir.get(),
+      cmadbBaseUrl: config.cmadbBaseUrl,
+      ppvdbBaseUrl: config.ppvdbBaseUrl,
+      configuredCmadbCookie: () => config.cmadbCookie.get(),
+      configuredPpvdbCookie: () => config.ppvdbCookie.get(),
       backupRetentionCount: config.backupRetentionCount,
       preMigrateRetentionCount: config.preMigrateRetentionCount,
       autoDailyBackup: config.autoDailyBackup,
@@ -221,5 +237,61 @@ export class MediaLibraryRemote extends TypertRemoteService {
   @Remote('exportMappingReport')
   async exportMappingReport(input: ExportMappingReportInput): Promise<ExportMappingReportResult> {
     return this.spikeService.exportMappingReport(input);
+  }
+
+  /**
+   * Scan the configured staging temp directory and plan recoverable manifests.
+   */
+  @Remote('scanStagingFiles')
+  async scanStagingFiles(): Promise<ScanStagingResult> {
+    return this.spikeService.scanStagingFiles();
+  }
+
+  /**
+   * List staged/reviewed/moving/indexed/failed ingestion manifests.
+   */
+  @Remote('listIngestionManifests')
+  async listIngestionManifests(): Promise<IngestionManifest[]> {
+    return this.spikeService.listIngestionManifests();
+  }
+
+  /**
+   * List durable ingestion task progress records (running/succeeded/failed/interrupted).
+   */
+  @Remote('listIngestionTasks')
+  async listIngestionTasks(): Promise<IngestionTask[]> {
+    return this.spikeService.listIngestionTasks();
+  }
+
+  /**
+   * Fetch candidate metadata and tags from FC2CMADB/FC2PPVDB for a staged manifest.
+   */
+  @Remote('fetchIngestionMetadata')
+  async fetchIngestionMetadata(input: FetchIngestionMetadataInput): Promise<FetchedMetadataCandidate> {
+    return this.spikeService.fetchIngestionMetadata(input);
+  }
+
+  /**
+   * Record human review approval/rejection and confirmed tags for a manifest.
+   */
+  @Remote('reviewIngestion')
+  async reviewIngestion(input: ReviewIngestionInput): Promise<ReviewIngestionResult> {
+    return this.spikeService.reviewIngestion(input);
+  }
+
+  /**
+   * Execute a reviewed ingestion manifest (move + verify + index + conservative cleanup).
+   */
+  @Remote('commitIngestion')
+  async commitIngestion(input: CommitIngestionInput): Promise<CommitIngestionResult> {
+    return this.spikeService.commitIngestion(input);
+  }
+
+  /**
+   * Reconcile interrupted manifests (copied-not-deleted, moved-not-indexed, indexed-but-missing).
+   */
+  @Remote('reconcileIngestion')
+  async reconcileIngestion(): Promise<ReconcileIngestionResult> {
+    return this.spikeService.reconcileIngestion();
   }
 }

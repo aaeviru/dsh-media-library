@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
 
-export const CURRENT_SCHEMA_VERSION = 3
+export const CURRENT_SCHEMA_VERSION = 5
 
 export interface SchemaMigration {
   readonly version: number
@@ -303,10 +303,64 @@ export const V3_TAG_MANAGEMENT_MIGRATION: SchemaMigration = {
   },
 }
 
+export const V4_INGESTION_MANIFESTS_MIGRATION: SchemaMigration = {
+  version: 4,
+  description: 'Recoverable M4 ingestion manifests state machine',
+  up(db): void {
+    db.exec(`
+      CREATE TABLE ingestion_manifests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_id TEXT NOT NULL UNIQUE,
+        temp_path TEXT NOT NULL,
+        target_root_id TEXT NOT NULL REFERENCES media_roots(id) ON DELETE RESTRICT,
+        target_relative_path TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        title TEXT,
+        catalog_number TEXT,
+        media_date TEXT,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        metadata_source TEXT,
+        checksum_sha256 TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('planned', 'reviewed', 'moving', 'indexed', 'failed')),
+        review_decision TEXT NOT NULL DEFAULT 'pending' CHECK (review_decision IN ('pending', 'approved', 'rejected')),
+        last_error TEXT,
+        indexed_media_id INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_ingestion_manifests_checksum ON ingestion_manifests(checksum_sha256);
+      CREATE INDEX idx_ingestion_manifests_state ON ingestion_manifests(state, updated_at DESC);
+    `)
+  },
+}
+
+export const V5_INGESTION_TASKS_MIGRATION: SchemaMigration = {
+  version: 5,
+  description: 'Add ingestion_tasks table for Host concurrency lock and cross-tab progress tracking',
+  up(db): void {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ingestion_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_key TEXT NOT NULL,
+        op TEXT NOT NULL CHECK (op IN ('fetch', 'commit', 'reconcile')),
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'interrupted')),
+        message TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_ingestion_tasks_target_status ON ingestion_tasks(target_key, status);
+      CREATE INDEX IF NOT EXISTS idx_ingestion_tasks_started ON ingestion_tasks(started_at DESC, id DESC);
+    `)
+  },
+}
+
 export const DEFAULT_MIGRATIONS: readonly SchemaMigration[] = [
   V1_SCHEMA_MIGRATION,
   V2_MEDIA_STATUS_MIGRATION,
   V3_TAG_MANAGEMENT_MIGRATION,
+  V4_INGESTION_MANIFESTS_MIGRATION,
+  V5_INGESTION_TASKS_MIGRATION,
 ]
 
 function ensureSchemaVersionsTable(db: DatabaseSync): void {
@@ -352,7 +406,7 @@ export async function migrateDatabase(
   ensureSchemaVersionsTable(db)
 
   const migrations = [...(options?.migrations ?? DEFAULT_MIGRATIONS)].sort((a, b) => a.version - b.version)
-  const appVersion = options?.appVersion ?? '0.4.0'
+  const appVersion = options?.appVersion ?? '0.5.4'
   const nowFn = options?.now ?? (() => new Date())
 
   const previousVersion = getCurrentSchemaVersion(db)

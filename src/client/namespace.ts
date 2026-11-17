@@ -1,14 +1,20 @@
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type {
   AliasInput,
+  CommitIngestionInput,
+  CommitIngestionResult,
   CreateBackupInput,
   CreateBackupResult,
   CreateTagInput,
   ExportMappingReportInput,
   ExportMappingReportResult,
+  FetchedMetadataCandidate,
+  FetchIngestionMetadataInput,
   GetMediaInput,
   ImportTagStudioInput,
   ImportTagStudioResult,
+  IngestionManifest,
+  IngestionTask,
   LibraryOverview,
   ListTagsInput,
   ListTagsResult,
@@ -19,7 +25,11 @@ import type {
   MergeTagsResult,
   OpsStatus,
   PreviewMergeInput,
+  ReconcileIngestionResult,
   RenameTagInput,
+  ReviewIngestionInput,
+  ReviewIngestionResult,
+  ScanStagingResult,
   SearchMediaInput,
   SearchMediaResult,
   SetMediaTagsInput,
@@ -50,4 +60,11 @@ export interface MediaLibraryNamespace {
   getOpsStatus: () => Promise<RemoteResult<OpsStatus>>;
   createBackup: (input: CreateBackupInput) => Promise<RemoteResult<CreateBackupResult>>;
   exportMappingReport: (input: ExportMappingReportInput) => Promise<RemoteResult<ExportMappingReportResult>>;
+  scanStagingFiles: () => Promise<RemoteResult<ScanStagingResult>>;
+  listIngestionManifests: () => Promise<RemoteResult<IngestionManifest[]>>;
+  listIngestionTasks: () => Promise<RemoteResult<IngestionTask[]>>;
+  fetchIngestionMetadata: (input: FetchIngestionMetadataInput) => Promise<RemoteResult<FetchedMetadataCandidate>>;
+  reviewIngestion: (input: ReviewIngestionInput) => Promise<RemoteResult<ReviewIngestionResult>>;
+  commitIngestion: (input: CommitIngestionInput) => Promise<RemoteResult<CommitIngestionResult>>;
+  reconcileIngestion: () => Promise<RemoteResult<ReconcileIngestionResult>>;
 }
