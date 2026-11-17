@@ -28,6 +28,7 @@ import { importTagStudioDatabase, type TagStudioImportReport } from './import/ta
 import {
   commitIngestionManifest,
   defaultIngestionFileOps,
+  ensureManifestForStagingFile,
   fetchMetadataForManifest,
   type IngestionFileOps,
   listIngestionManifests,
@@ -35,7 +36,7 @@ import {
   normalizeTargetSubdir,
   reconcileIngestionManifests,
   reviewIngestionManifest,
-  scanAndPlanStagingFiles,
+  scanStagingDirectory,
 } from './ingestion/index.ts';
 import {
   addAlias,
@@ -793,12 +794,24 @@ export class MediaLibrarySpikeService {
     const { roots } = this.getEffectiveRootsAndItems();
     const configuredStaging = this.readStringSetting(this.configuredStagingDir).trim();
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
+    const defaultRoot = roots.find((r) => r.rootId === DEFAULT_M1_ROOT_ID && r.enabled);
+    const isPlaceholderUnc = !configuredStaging && defaultRoot?.canonicalUncRoot.toLowerCase() === '\\\\nas\\mediatest';
     const effectiveStagingDir =
       configuredStaging ||
-      (() => {
-        const defaultRoot = roots.find((r) => r.rootId === DEFAULT_M1_ROOT_ID && r.enabled);
-        return defaultRoot ? path.join(defaultRoot.canonicalUncRoot, 'temp') : '';
-      })();
+      (defaultRoot ? path.join(defaultRoot.canonicalUncRoot, 'temp') : '');
+
+    if (isPlaceholderUnc) {
+      return {
+        ok: false,
+        stagingDir: effectiveStagingDir,
+        targetRootId: DEFAULT_M1_ROOT_ID,
+        targetSubdir,
+        elapsedMs: 0,
+        files: [],
+        manifests: await this.listIngestionManifests(),
+        error: 'Please configure your real NAS uncRoot or stagingDir before scanning temp.',
+      };
+    }
 
     if (this.degradedState.degraded) {
       return {
@@ -806,22 +819,25 @@ export class MediaLibrarySpikeService {
         stagingDir: effectiveStagingDir,
         targetRootId: DEFAULT_M1_ROOT_ID,
         targetSubdir,
+        elapsedMs: 0,
         files: [],
         manifests: await this.listIngestionManifests(),
         error: `READ_ONLY_DEGRADED: ${this.degradedState.reason ?? 'Database is in read-only degraded mode.'}`,
       };
     }
 
-    return this.withInitializedDatabase((db) =>
-      scanAndPlanStagingFiles(db, {
+    const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+    try {
+      return await scanStagingDirectory(db, {
         stagingDir: effectiveStagingDir,
         targetRootId: DEFAULT_M1_ROOT_ID,
         targetSubdir,
         roots,
-        fileOps: this.ingestionFileOps,
-        now: this.now,
-      }),
-    );
+        timeoutMs: this.probeTimeoutMs,
+      });
+    } finally {
+      db.close();
+    }
   }
 
   async listIngestionManifests(): Promise<IngestionManifest[]> {
@@ -844,10 +860,36 @@ export class MediaLibrarySpikeService {
       };
     }
     const fetcher = this.createMetadataFetcher();
-    await this.initialize();
+    const { roots } = this.getEffectiveRootsAndItems();
+    const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
     const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
     try {
-      return await fetchMetadataForManifest(db, input.manifestId, fetcher, this.now);
+      let manifestId = input.manifestId;
+      if (!manifestId && input.tempPath) {
+        const created = ensureManifestForStagingFile(db, {
+          tempPath: input.tempPath,
+          targetRootId: DEFAULT_M1_ROOT_ID,
+          targetSubdir,
+          roots,
+          fileOps: this.ingestionFileOps,
+          now: this.now,
+        });
+        manifestId = created.id;
+      }
+      if (!manifestId) {
+        return {
+          ok: false,
+          provider: null,
+          category: 'client_error',
+          reason: 'Either manifestId or tempPath is required.',
+          sourceUrl: '',
+          title: null,
+          writer: null,
+          candidateTags: [],
+          manifest: null,
+        };
+      }
+      return await fetchMetadataForManifest(db, manifestId, fetcher, this.now);
     } finally {
       db.close();
     }
@@ -862,7 +904,26 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
-    return this.withInitializedDatabase((db) => reviewIngestionManifest(db, input, this.now));
+    const { roots } = this.getEffectiveRootsAndItems();
+    const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
+    return this.withInitializedDatabase((db) => {
+      let manifestId = input.manifestId;
+      if (!manifestId && input.tempPath) {
+        const created = ensureManifestForStagingFile(db, {
+          tempPath: input.tempPath,
+          targetRootId: DEFAULT_M1_ROOT_ID,
+          targetSubdir,
+          roots,
+          fileOps: this.ingestionFileOps,
+          now: this.now,
+        });
+        manifestId = created.id;
+      }
+      if (!manifestId) {
+        return { ok: false, code: 'INVALID_INPUT', message: 'Either manifestId or tempPath is required.' };
+      }
+      return reviewIngestionManifest(db, { ...input, manifestId }, this.now);
+    });
   }
 
   async commitIngestion(input: CommitIngestionInput): Promise<CommitIngestionResult> {

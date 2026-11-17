@@ -13,6 +13,7 @@ export {
 export {
   commitIngestionManifest,
   defaultIngestionFileOps,
+  ensureManifestForStagingFile,
   fetchMetadataForManifest,
   getIngestionManifestById,
   listIngestionManifests,
@@ -20,6 +21,6 @@ export {
   previewStagingPlan,
   reconcileIngestionManifests,
   reviewIngestionManifest,
-  scanAndPlanStagingFiles,
+  scanStagingDirectory,
   type IngestionFileOps,
 } from './ingestion-service.ts';

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { extractCatalogNumber, extractIsoDate } from '../inventory/tagstudio-inventory.ts';
@@ -28,6 +29,7 @@ export interface IngestionFileOps {
   statSize(filePath: string): number;
   sha256(filePath: string): string;
   ensureDir(dirPath: string): void;
+  rename(srcPath: string, destPath: string): void;
   copyFile(srcPath: string, destPath: string): void;
   removeFile(filePath: string): void;
 }
@@ -50,6 +52,7 @@ export const defaultIngestionFileOps: IngestionFileOps = {
     }
   },
   ensureDir: (d) => fs.mkdirSync(d, { recursive: true }),
+  rename: (src, dest) => fs.renameSync(src, dest),
   copyFile: (src, dest) => fs.copyFileSync(src, dest),
   removeFile: (p) => fs.rmSync(p, { force: true }),
 };
@@ -125,31 +128,57 @@ export function normalizeTargetSubdir(raw: string): string {
     .join('/');
 }
 
-function walkStagingVideos(
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (timeoutMs <= 0) return promise;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`STAGING_UNREACHABLE_OR_TIMEOUT: ${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function walkStagingVideosAsync(
   dir: string,
   baseDir: string,
-  fileOps: IngestionFileOps,
-  acc: StagingFileItem[],
-): void {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  targetSubdir: string,
+  acc: Array<{
+    filename: string;
+    relativePath: string;
+    tempPath: string;
+    targetRelativePath: string;
+    fileSize: number;
+    mtimeIso: string;
+    catalogNumber: string | null;
+  }>,
+): Promise<void> {
+  const entries = await fsp.readdir(dir, { withFileTypes: true });
   entries.sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue;
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      walkStagingVideos(fullPath, baseDir, fileOps, acc);
+      await walkStagingVideosAsync(fullPath, baseDir, targetSubdir, acc);
     } else if (entry.isFile()) {
       const ext = path.extname(entry.name).toLowerCase();
       if (!VIDEO_EXTENSIONS.has(ext)) continue;
+      const stat = await fsp.stat(fullPath);
       const rel = path.relative(baseDir, fullPath).replace(/\\/g, '/');
+      const targetRel = targetSubdir ? `${targetSubdir}/${entry.name}` : entry.name;
       const fc2 = parseFc2Code(path.basename(entry.name, ext));
       const cat = fc2?.code ?? extractCatalogNumber(entry.name);
       acc.push({
         filename: entry.name,
         relativePath: rel,
         tempPath: fullPath,
-        fileSize: fileOps.statSize(fullPath),
-        checksumSha256: fileOps.sha256(fullPath),
+        targetRelativePath: targetRel,
+        fileSize: stat.size,
+        mtimeIso: stat.mtime.toISOString(),
         catalogNumber: cat,
       });
     }
@@ -157,81 +186,157 @@ function walkStagingVideos(
 }
 
 /**
- * Dry-run scanner (`B2`): inspects `stagingDir` without touching any file or writing to SQLite.
+ * Pure async dry-run directory scan: reads ONLY directory entries and file `stat` (`size`/`mtime`),
+ * never reads video file bytes and never writes to SQLite.
  */
-export function previewStagingPlan(options: {
+export async function previewStagingPlan(options: {
   readonly stagingDir: string;
   readonly targetRootId: string;
   readonly targetSubdir: string;
   readonly roots: readonly MediaRootConfig[];
-  readonly fileOps?: IngestionFileOps | undefined;
-}): {
+  readonly timeoutMs?: number | undefined;
+}): Promise<{
   readonly ok: boolean;
   readonly files: readonly StagingFileItem[];
   readonly targetRelativePaths: readonly string[];
   readonly error?: string | undefined;
-} {
-  const fileOps = options.fileOps ?? defaultIngestionFileOps;
-  if (!options.stagingDir.trim() || !fs.existsSync(options.stagingDir)) {
+}> {
+  const stagingDir = options.stagingDir.trim();
+  if (!stagingDir) {
+    return { ok: false, files: [], targetRelativePaths: [], error: 'Staging directory is not configured.' };
+  }
+
+  const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
+  const timeoutMs = options.timeoutMs ?? 5000;
+
+  try {
+    const stat = await withTimeout(fsp.stat(stagingDir), timeoutMs, `stat(${stagingDir})`);
+    if (!stat.isDirectory()) {
+      return { ok: false, files: [], targetRelativePaths: [], error: `Staging path is not a directory: ${stagingDir}` };
+    }
+
+    const rawFiles: Array<{
+      filename: string;
+      relativePath: string;
+      tempPath: string;
+      targetRelativePath: string;
+      fileSize: number;
+      mtimeIso: string;
+      catalogNumber: string | null;
+    }> = [];
+    await withTimeout(walkStagingVideosAsync(stagingDir, stagingDir, cleanSubdir, rawFiles), timeoutMs, `readdir(${stagingDir})`);
+
+    const targetRelativePaths: string[] = [];
+    for (const f of rawFiles) {
+      const check = resolveAllowlistedUncPath(options.roots, options.targetRootId, f.targetRelativePath);
+      if (!check.ok) {
+        return { ok: false, files: [], targetRelativePaths: [], error: check.message };
+      }
+      targetRelativePaths.push(f.targetRelativePath);
+    }
+
+    const files: StagingFileItem[] = rawFiles.map((f) => ({
+      ...f,
+      manifestId: null,
+      state: null,
+      reviewDecision: null,
+    }));
+    return { ok: true, files, targetRelativePaths };
+  } catch (err) {
     return {
       ok: false,
       files: [],
       targetRelativePaths: [],
-      error: `Staging directory not found: ${options.stagingDir || '(empty)'}`,
+      error: err instanceof Error ? err.message : String(err),
     };
   }
-  const files: StagingFileItem[] = [];
-  walkStagingVideos(options.stagingDir, options.stagingDir, fileOps, files);
-
-  const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
-  const targetRelativePaths: string[] = [];
-  for (const f of files) {
-    const relTarget = cleanSubdir ? `${cleanSubdir}/${f.filename}` : f.filename;
-    const check = resolveAllowlistedUncPath(options.roots, options.targetRootId, relTarget);
-    if (!check.ok) {
-      return {
-        ok: false,
-        files,
-        targetRelativePaths: [],
-        error: check.message,
-      };
-    }
-    targetRelativePaths.push(relTarget);
-  }
-
-  return { ok: true, files, targetRelativePaths };
 }
 
 /**
- * Scan `stagingDir` and upsert `planned` manifests in SQLite (idempotent on `source_id = sha256:size`).
+ * Scan `stagingDir` asynchronously without reading file content or writing `planned` rows to SQLite.
+ * Joins discovered files in-memory against existing persisted manifests.
  */
-export function scanAndPlanStagingFiles(
+export async function scanStagingDirectory(
   db: DatabaseSync,
   options: {
     readonly stagingDir: string;
     readonly targetRootId: string;
     readonly targetSubdir: string;
     readonly roots: readonly MediaRootConfig[];
-    readonly fileOps?: IngestionFileOps | undefined;
-    readonly now?: (() => Date) | undefined;
+    readonly timeoutMs?: number | undefined;
   },
-): ScanStagingResult {
-  const now = (options.now ?? (() => new Date()))().toISOString();
+): Promise<ScanStagingResult> {
+  const started = Date.now();
   const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
-  const preview = previewStagingPlan(options);
+  const manifests = listIngestionManifests(db);
+  const preview = await previewStagingPlan(options);
+
   if (!preview.ok) {
     return {
       ok: false,
       stagingDir: options.stagingDir,
       targetRootId: options.targetRootId,
       targetSubdir: cleanSubdir,
+      elapsedMs: Date.now() - started,
       files: [],
-      manifests: listIngestionManifests(db),
+      manifests,
       error: preview.error,
     };
   }
 
-  // Ensure target root row exists in media_roots so FK on ingestion_manifests is satisfied.
+  const byTempPath = new Map<string, IngestionManifest>();
+  for (const m of manifests) {
+    byTempPath.set(m.tempPath.toLowerCase(), m);
+  }
+
+  const files: StagingFileItem[] = preview.files.map((f) => {
+    const existing = byTempPath.get(f.tempPath.toLowerCase());
+    return {
+      ...f,
+      manifestId: existing?.id ?? null,
+      state: existing?.state ?? null,
+      reviewDecision: existing?.reviewDecision ?? null,
+    };
+  });
+
+  return {
+    ok: true,
+    stagingDir: options.stagingDir,
+    targetRootId: options.targetRootId,
+    targetSubdir: cleanSubdir,
+    elapsedMs: Date.now() - started,
+    files,
+    manifests,
+  };
+}
+
+/**
+ * Lazily persist an `ingestion_manifests` row only when the user actually acts on a staged file
+ * (fetch metadata or review/approve), using lightweight path + size identity.
+ */
+export function ensureManifestForStagingFile(
+  db: DatabaseSync,
+  options: {
+    readonly tempPath: string;
+    readonly targetRootId: string;
+    readonly targetSubdir: string;
+    readonly roots: readonly MediaRootConfig[];
+    readonly fileOps?: IngestionFileOps | undefined;
+    readonly now?: (() => Date) | undefined;
+  },
+): IngestionManifest {
+  const fileOps = options.fileOps ?? defaultIngestionFileOps;
+  const now = (options.now ?? (() => new Date()))().toISOString();
+  const tempPath = options.tempPath;
+  const filename = path.win32.basename(tempPath);
+  const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
+  const targetRel = cleanSubdir ? `${cleanSubdir}/${filename}` : filename;
+
+  const check = resolveAllowlistedUncPath(options.roots, options.targetRootId, targetRel);
+  if (!check.ok) {
+    throw new Error(check.message);
+  }
+
   const activeRoot = options.roots.find((r) => r.rootId === options.targetRootId);
   if (activeRoot) {
     db.prepare(
@@ -240,57 +345,40 @@ export function scanAndPlanStagingFiles(
     ).run(activeRoot.rootId, activeRoot.label, activeRoot.canonicalUncRoot, activeRoot.enabled ? 1 : 0, now);
   }
 
-  for (let i = 0; i < preview.files.length; i++) {
-    const file = preview.files[i]!;
-    const targetRel = preview.targetRelativePaths[i]!;
-    const sourceId = `${file.checksumSha256}:${file.fileSize}`;
-    const existing = db
-      .prepare('SELECT id, state FROM ingestion_manifests WHERE source_id = ?')
-      .get(sourceId) as { id: number; state: string } | undefined;
+  if (!fileOps.exists(tempPath)) {
+    throw new Error(`Staging file not found: ${tempPath}`);
+  }
+  const fileSize = fileOps.statSize(tempPath);
+  const sourceId = `staging:${targetRel.toLowerCase()}:${fileSize}`;
 
-    if (!existing) {
-      const inferredDate = extractIsoDate(file.filename);
-      db.prepare(
-        `INSERT INTO ingestion_manifests (
-          source_id, temp_path, target_root_id, target_relative_path, filename,
-          title, catalog_number, media_date, tags_json, metadata_source,
-          checksum_sha256, file_size, state, review_decision, last_error,
-          indexed_media_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, '[]', NULL, ?, ?, 'planned', 'pending', NULL, NULL, ?, ?)`,
-      ).run(
-        sourceId,
-        file.tempPath,
-        options.targetRootId,
-        targetRel,
-        file.filename,
-        file.catalogNumber,
-        inferredDate,
-        file.checksumSha256,
-        file.fileSize,
-        now,
-        now,
-      );
-    } else if (existing.state === 'planned') {
-      db.prepare(
-        `UPDATE ingestion_manifests
-         SET temp_path = ?, target_root_id = ?, target_relative_path = ?, updated_at = ?
-         WHERE id = ?`,
-      ).run(file.tempPath, options.targetRootId, targetRel, now, existing.id);
-    }
+  const existing = db
+    .prepare('SELECT * FROM ingestion_manifests WHERE source_id = ? OR LOWER(temp_path) = LOWER(?) LIMIT 1')
+    .get(sourceId, tempPath) as Record<string, unknown> | undefined;
+  if (existing) {
+    return mapManifestRow(existing);
   }
 
-  return {
-    ok: true,
-    stagingDir: options.stagingDir,
-    targetRootId: options.targetRootId,
-    targetSubdir: cleanSubdir,
-    files: preview.files,
-    manifests: listIngestionManifests(db),
-  };
+  const ext = path.extname(filename);
+  const fc2 = parseFc2Code(path.basename(filename, ext));
+  const catalogNumber = fc2?.code ?? extractCatalogNumber(filename);
+  const inferredDate = extractIsoDate(filename);
+
+  const info = db
+    .prepare(
+      `INSERT INTO ingestion_manifests (
+        source_id, temp_path, target_root_id, target_relative_path, filename,
+        title, catalog_number, media_date, tags_json, metadata_source,
+        checksum_sha256, file_size, state, review_decision, last_error,
+        indexed_media_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, '[]', NULL, '', ?, 'planned', 'pending', NULL, NULL, ?, ?)`,
+    )
+    .run(sourceId, tempPath, options.targetRootId, targetRel, filename, catalogNumber, inferredDate, fileSize, now, now);
+
+  return getIngestionManifestById(db, Number(info.lastInsertRowid))!;
 }
 
 /**
- * Fetch candidate metadata & tags from `FC2CMADB` / `FC2PPVDB` for a staged manifest (`B3`).
+ * Fetch candidate metadata & tags from `FC2CMADB` / `FC2PPVDB` for a staged file or manifest (`B3`).
  */
 export async function fetchMetadataForManifest(
   db: DatabaseSync,
@@ -388,7 +476,7 @@ export async function fetchMetadataForManifest(
  */
 export function reviewIngestionManifest(
   db: DatabaseSync,
-  input: ReviewIngestionInput,
+  input: ReviewIngestionInput & { readonly manifestId: number },
   now: () => Date = () => new Date(),
 ): ReviewIngestionResult {
   const manifest = getIngestionManifestById(db, input.manifestId);
@@ -470,14 +558,14 @@ function indexManifestIntoDatabase(
     db,
     'ingestion_commit',
     ({ db: conn }) => {
-      // Idempotency check inside the transaction by target path or checksum source_key.
       const existingMedia = conn
         .prepare(
           `SELECT id FROM media_files
-           WHERE (root_id = ? AND relative_path = ?) OR source_key = ?
+           WHERE (root_id = ? AND relative_path = ?)
+              OR (source_key IS NOT NULL AND source_key <> '' AND source_key = ?)
            LIMIT 1`,
         )
-        .get(manifest.targetRootId, manifest.targetRelativePath, manifest.checksumSha256) as
+        .get(manifest.targetRootId, manifest.targetRelativePath, manifest.sourceId) as
         | { id: number }
         | undefined;
 
@@ -507,7 +595,7 @@ function indexManifestIntoDatabase(
             ts,
             manifest.fileSize,
             ts,
-            manifest.checksumSha256,
+            manifest.checksumSha256 || manifest.sourceId,
           );
         mediaId = Number(info.lastInsertRowid);
       }
@@ -562,7 +650,7 @@ function indexManifestIntoDatabase(
 
 /**
  * Execute reviewed ingestion manifest (`B4`, `B5`):
- * `reviewed -> moving -> copy & verify -> SQLite index (source='ingestion') -> indexed -> conservative temp delete`.
+ * `reviewed -> moving -> same-share rename (or EXDEV copy+sha256 fallback) -> SQLite index -> indexed`.
  */
 export function commitIngestionManifest(
   db: DatabaseSync,
@@ -586,7 +674,6 @@ export function commitIngestionManifest(
     };
   }
 
-  // Idempotent replay for already indexed manifests (`B5`).
   if (manifest.state === 'indexed' && manifest.indexedMediaId !== null) {
     return {
       ok: true,
@@ -597,7 +684,6 @@ export function commitIngestionManifest(
     };
   }
 
-  // Human review gate (`B4`).
   if (manifest.reviewDecision !== 'approved') {
     return {
       ok: false,
@@ -607,7 +693,6 @@ export function commitIngestionManifest(
     };
   }
 
-  // Validate target containment.
   const resolution = resolveAllowlistedUncPath(
     options.roots,
     manifest.targetRootId,
@@ -627,10 +712,9 @@ export function commitIngestionManifest(
     };
   }
 
-  // Re-check checksum idempotency in media_files in case a different manifest already indexed the exact file.
   const preExisting = db
-    .prepare('SELECT id FROM media_files WHERE source_key = ? LIMIT 1')
-    .get(manifest.checksumSha256) as { id: number } | undefined;
+    .prepare('SELECT id FROM media_files WHERE (root_id = ? AND relative_path = ?) OR source_key = ? LIMIT 1')
+    .get(manifest.targetRootId, manifest.targetRelativePath, manifest.sourceId) as { id: number } | undefined;
   if (preExisting) {
     const mediaId = Number(preExisting.id);
     db.prepare(
@@ -642,7 +726,7 @@ export function commitIngestionManifest(
       ok: true,
       idempotentReplay: true,
       mediaId,
-      message: `Duplicate checksum already indexed as media #${mediaId}; skipped duplicate move/index.`,
+      message: `Already indexed as media #${mediaId}; skipped duplicate move/index.`,
       manifest: getIngestionManifestById(db, manifest.id),
     };
   }
@@ -650,29 +734,46 @@ export function commitIngestionManifest(
   db.prepare(`UPDATE ingestion_manifests SET state = 'moving', updated_at = ? WHERE id = ?`).run(ts, manifest.id);
 
   const destPath = resolution.resolvedUncPath;
+  let usedCopyFallback = false;
   try {
-    const destAlreadyValid =
-      fileOps.exists(destPath) &&
-      fileOps.statSize(destPath) === manifest.fileSize &&
-      fileOps.sha256(destPath) === manifest.checksumSha256;
-
-    if (!destAlreadyValid) {
+    const destAlreadyPresent = fileOps.exists(destPath) && fileOps.statSize(destPath) === manifest.fileSize;
+    if (!destAlreadyPresent) {
       if (!fileOps.exists(manifest.tempPath)) {
         throw new Error(`Staging file missing: ${manifest.tempPath}`);
       }
       if (fileOps.exists(destPath)) {
-        throw new Error(`Destination exists with different content: ${destPath}`);
+        throw new Error(`Destination exists with different size: ${destPath}`);
       }
       const destDir = destPath.startsWith('\\\\') ? path.win32.dirname(destPath) : path.dirname(destPath);
       fileOps.ensureDir(destDir);
-      fileOps.copyFile(manifest.tempPath, destPath);
-      const copiedSize = fileOps.statSize(destPath);
-      const copiedHash = fileOps.sha256(destPath);
-      if (copiedSize !== manifest.fileSize || copiedHash !== manifest.checksumSha256) {
-        throw new Error(
-          `CHECKSUM_MISMATCH: expected ${manifest.checksumSha256} (${manifest.fileSize}B), got ${copiedHash} (${copiedSize}B)`,
-        );
+
+      try {
+        // Prefer same-NAS server-side rename (instantaneous, zero desktop NIC round-trip).
+        fileOps.rename(manifest.tempPath, destPath);
+      } catch (renameErr) {
+        const errno = (renameErr as NodeJS.ErrnoException)?.code;
+        if (errno !== 'EXDEV') {
+          throw renameErr;
+        }
+        // Cross-volume fallback: compute SHA-256, copy, verify size + SHA-256, then remove source after DB commit.
+        usedCopyFallback = true;
+        const srcHash = manifest.checksumSha256 || fileOps.sha256(manifest.tempPath);
+        fileOps.copyFile(manifest.tempPath, destPath);
+        const copiedSize = fileOps.statSize(destPath);
+        const copiedHash = fileOps.sha256(destPath);
+        if (copiedSize !== manifest.fileSize || copiedHash !== srcHash) {
+          throw new Error(
+            `CHECKSUM_MISMATCH: expected ${srcHash} (${manifest.fileSize}B), got ${copiedHash} (${copiedSize}B)`,
+          );
+        }
+        db.prepare(`UPDATE ingestion_manifests SET checksum_sha256 = ? WHERE id = ?`).run(srcHash, manifest.id);
       }
+
+      if (!fileOps.exists(destPath) || fileOps.statSize(destPath) !== manifest.fileSize) {
+        throw new Error(`Destination verification failed after move: ${destPath}`);
+      }
+    } else if (fileOps.exists(manifest.tempPath)) {
+      usedCopyFallback = true;
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -692,7 +793,8 @@ export function commitIngestionManifest(
 
   let mediaId: number;
   try {
-    mediaId = indexManifestIntoDatabase(db, manifest, nowFn().toISOString());
+    const freshManifest = getIngestionManifestById(db, manifest.id)!;
+    mediaId = indexManifestIntoDatabase(db, freshManifest, nowFn().toISOString());
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     db.prepare(`UPDATE ingestion_manifests SET state = 'failed', last_error = ?, updated_at = ? WHERE id = ?`).run(
@@ -708,9 +810,8 @@ export function commitIngestionManifest(
     };
   }
 
-  // Conservative source cleanup only AFTER DB commit succeeds.
   let warning: string | null = null;
-  if (fileOps.exists(manifest.tempPath)) {
+  if (usedCopyFallback && fileOps.exists(manifest.tempPath)) {
     try {
       fileOps.removeFile(manifest.tempPath);
     } catch (rmErr) {
@@ -769,7 +870,7 @@ export function reconcileIngestionManifests(
     const destValid =
       destExists &&
       fileOps.statSize(destPath) === m.fileSize &&
-      fileOps.sha256(destPath) === m.checksumSha256;
+      (!m.checksumSha256 || fileOps.sha256(destPath) === m.checksumSha256);
 
     if (m.state === 'indexed' && m.indexedMediaId !== null) {
       if (!destExists) {
@@ -795,7 +896,6 @@ export function reconcileIngestionManifests(
       continue;
     }
 
-    // `moving` or `failed`: check if destination already arrived cleanly (`moved-not-indexed`).
     if ((m.state === 'moving' || m.state === 'failed') && m.reviewDecision === 'approved' && destValid) {
       try {
         indexManifestIntoDatabase(db, m, nowFn().toISOString());

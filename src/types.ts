@@ -406,9 +406,13 @@ export interface StagingFileItem {
   readonly filename: string;
   readonly relativePath: string;
   readonly tempPath: string;
+  readonly targetRelativePath: string;
   readonly fileSize: number;
-  readonly checksumSha256: string;
+  readonly mtimeIso: string;
   readonly catalogNumber: string | null;
+  readonly manifestId: number | null;
+  readonly state: IngestionState | null;
+  readonly reviewDecision: IngestionReviewDecision | null;
 }
 
 export interface IngestionManifestTag {
@@ -443,13 +447,15 @@ export interface ScanStagingResult {
   readonly stagingDir: string;
   readonly targetRootId: string;
   readonly targetSubdir: string;
+  readonly elapsedMs: number;
   readonly files: readonly StagingFileItem[];
   readonly manifests: readonly IngestionManifest[];
   readonly error?: string | undefined;
 }
 
 export interface FetchIngestionMetadataInput {
-  readonly manifestId: number;
+  readonly manifestId?: number | undefined;
+  readonly tempPath?: string | undefined;
 }
 
 export interface FetchedMetadataCandidate {
@@ -465,7 +471,8 @@ export interface FetchedMetadataCandidate {
 }
 
 export interface ReviewIngestionInput {
-  readonly manifestId: number;
+  readonly manifestId?: number | undefined;
+  readonly tempPath?: string | undefined;
   readonly decision: 'approved' | 'rejected';
   readonly title?: string | undefined;
   readonly catalogNumber?: string | undefined;
