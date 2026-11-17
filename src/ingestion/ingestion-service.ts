@@ -99,6 +99,30 @@ function mapManifestRow(row: Record<string, unknown>): IngestionManifest {
   };
 }
 
+function resolveExistingTagByNameOrAlias(
+  db: DatabaseSync,
+  normalizedName: string,
+): { id: number; name: string } | undefined {
+  if (!normalizedName) return undefined;
+  const direct = db
+    .prepare('SELECT id, name FROM tags WHERE normalized_name = ? AND archived_at IS NULL LIMIT 1')
+    .get(normalizedName) as { id: number; name: string } | undefined;
+  if (direct) return { id: Number(direct.id), name: String(direct.name) };
+
+  const viaAlias = db
+    .prepare(
+      `SELECT t.id, t.name
+       FROM tag_aliases ta
+       JOIN tags t ON t.id = ta.tag_id
+       WHERE ta.normalized_alias = ?
+         AND t.archived_at IS NULL
+       ORDER BY t.id ASC
+       LIMIT 1`,
+    )
+    .get(normalizedName) as { id: number; name: string } | undefined;
+  return viaAlias ? { id: Number(viaAlias.id), name: String(viaAlias.name) } : undefined;
+}
+
 export function getIngestionManifestById(db: DatabaseSync, manifestId: number): IngestionManifest | null {
   const row = db.prepare('SELECT * FROM ingestion_manifests WHERE id = ?').get(manifestId) as
     | Record<string, unknown>
@@ -448,12 +472,10 @@ export async function fetchMetadataForManifest(
   for (const name of meta.candidateTags) {
     const norm = normalizeLabel(name);
     if (!norm || mergedTagNames.has(norm)) continue;
-    const existingTag = db
-      .prepare('SELECT id, name FROM tags WHERE normalized_name = ? AND archived_at IS NULL')
-      .get(norm) as { id: number; name: string } | undefined;
+    const existingTag = resolveExistingTagByNameOrAlias(db, norm);
     mergedTagNames.set(
       norm,
-      existingTag ? { tagId: Number(existingTag.id), name: String(existingTag.name) } : { name },
+      existingTag ? { tagId: existingTag.id, name: existingTag.name } : { name },
     );
   }
 
@@ -616,19 +638,24 @@ function indexManifestIntoDatabase(
         let resolvedTagId = tagEntry.tagId;
         if (!resolvedTagId) {
           const norm = normalizeLabel(tagEntry.name);
-          const existingTag = conn
-            .prepare('SELECT id FROM tags WHERE normalized_name = ?')
-            .get(norm) as { id: number } | undefined;
-          if (existingTag) {
-            resolvedTagId = Number(existingTag.id);
+          const existing = resolveExistingTagByNameOrAlias(conn, norm);
+          if (existing) {
+            resolvedTagId = existing.id;
           } else {
-            const tagInsert = conn
-              .prepare(
-                `INSERT INTO tags (name, normalized_name, kind, created_at, updated_at, revision)
-                 VALUES (?, ?, 'custom', ?, ?, 1)`,
-              )
-              .run(tagEntry.name.trim(), norm, ts, ts);
-            resolvedTagId = Number(tagInsert.lastInsertRowid);
+            const archived = conn
+              .prepare('SELECT id FROM tags WHERE normalized_name = ? LIMIT 1')
+              .get(norm) as { id: number } | undefined;
+            if (archived) {
+              resolvedTagId = Number(archived.id);
+            } else {
+              const tagInsert = conn
+                .prepare(
+                  `INSERT INTO tags (name, normalized_name, kind, created_at, updated_at, revision)
+                   VALUES (?, ?, 'custom', ?, ?, 1)`,
+                )
+                .run(tagEntry.name.trim(), norm, ts, ts);
+              resolvedTagId = Number(tagInsert.lastInsertRowid);
+            }
           }
         }
         conn

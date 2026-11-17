@@ -96,6 +96,62 @@ function extractEntityNames(raw: unknown, depth = 0): string[] {
   return [];
 }
 
+export function extractCmadbActressUrls(html: string, baseUrl: string): string[] {
+  const cleanBase = baseUrl.replace(/\/+$/, '');
+  const seen = new Set<string>();
+  const addId = (id: string) => {
+    if (!/^\d+$/.test(id)) return;
+    seen.add(`${cleanBase}/actresses/${id}`);
+  };
+
+  const scriptMatch =
+    /<script\b[^>]*data-page=["']app["'][^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/i.exec(html) ??
+    /<script\b[^>]*type=["']application\/json["'][^>]*data-page=["']app["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
+  if (scriptMatch) {
+    try {
+      const payload = JSON.parse(decodeHtmlEntities(scriptMatch[1]!)) as {
+        props?: {
+          article?: { comments?: Array<{ body?: unknown }> };
+          comments?: { data?: Array<{ body?: unknown }> };
+        };
+      };
+      const commentLists = [payload?.props?.article?.comments, payload?.props?.comments?.data];
+      for (const list of commentLists) {
+        if (!Array.isArray(list)) continue;
+        for (const item of list) {
+          if (typeof item?.body !== 'string') continue;
+          for (const m of item.body.matchAll(/\/actresses\/(\d+)/g)) {
+            addId(m[1]!);
+          }
+        }
+      }
+    } catch {
+      // Ignore malformed JSON; HTML scan below still runs.
+    }
+  }
+
+  for (const m of html.matchAll(/\/actresses\/(\d+)/g)) {
+    addId(m[1]!);
+  }
+  return [...seen].slice(0, 5);
+}
+
+export function parseCmadbActressPageHtml(html: string): string | null {
+  const scriptMatch =
+    /<script\b[^>]*data-page=["']app["'][^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/i.exec(html) ??
+    /<script\b[^>]*type=["']application\/json["'][^>]*data-page=["']app["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
+  if (!scriptMatch) return null;
+  try {
+    const payload = JSON.parse(decodeHtmlEntities(scriptMatch[1]!)) as {
+      props?: { actress?: { name?: unknown } };
+    };
+    const rawName = payload?.props?.actress?.name;
+    return typeof rawName === 'string' ? cleanMetadataText(rawName) || null : null;
+  } catch {
+    return null;
+  }
+}
+
 function extractActressAnchorsFromHtml(html: string): string[] {
   const out: string[] = [];
   for (const m of html.matchAll(/<a\b[^>]*href=["'][^"']*\/actress(?:es)?\/[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi)) {
@@ -422,14 +478,74 @@ export class MetadataFetcher {
     this.fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init));
   }
 
+  private async fetchTextWithHeaders(
+    url: string,
+    cookieHeader: string,
+  ): Promise<
+    { ok: true; status: number; body: string } | { ok: false; status: number | null; category: ProviderLookupResult['category']; reason: string }
+  > {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const headers: Record<string, string> = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'ja,en-US;q=0.8,en;q=0.6',
+      };
+      if (cookieHeader) headers.Cookie = cookieHeader;
+
+      const res = await this.fetchImpl(url, {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        return {
+          ok: false,
+          status: res.status,
+          category: classifyHttpStatus(res.status),
+          reason: `HTTP ${res.status}`,
+        };
+      }
+      return { ok: true, status: res.status, body: await res.text() };
+    } catch (err) {
+      return {
+        ok: false,
+        status: null,
+        category: 'transient_network',
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async resolveCmadbCommentActresses(articleHtml: string): Promise<string[]> {
+    if (!this.cmadbCookie) return [];
+    const urls = extractCmadbActressUrls(articleHtml, this.cmadbBaseUrl);
+    if (urls.length === 0) return [];
+    const names: string[] = [];
+    for (const url of urls) {
+      if (this.requestDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, this.requestDelayMs));
+      }
+      const res = await this.fetchTextWithHeaders(url, this.cmadbCookie);
+      if (!res.ok) continue;
+      const name = parseCmadbActressPageHtml(res.body);
+      if (name && !names.includes(name)) names.push(name);
+    }
+    return names;
+  }
+
   private async lookupProvider(
     baseUrl: string,
     cookieHeader: string,
     parser: (html: string, videoId: string, sourceUrl: string) => ProviderLookupResult,
     videoId: string,
-  ): Promise<ProviderLookupResult> {
+  ): Promise<ProviderLookupResult & { rawHtml?: string }> {
     const sourceUrl = `${baseUrl}/articles/${videoId}`;
-    let last: ProviderLookupResult = {
+    let last: ProviderLookupResult & { rawHtml?: string } = {
       metadata: null,
       category: 'transient_network',
       reason: 'No request made.',
@@ -437,40 +553,13 @@ export class MetadataFetcher {
     };
 
     for (let attempt = 1; attempt <= this.retries; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-      let status: number | null = null;
-      try {
-        const headers: Record<string, string> = {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-          Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'ja,en-US;q=0.8,en;q=0.6',
-        };
-        if (cookieHeader) headers.Cookie = cookieHeader;
-
-        const res = await this.fetchImpl(sourceUrl, {
-          method: 'GET',
-          headers,
-          signal: controller.signal,
-        });
-        status = res.status;
-        if (!res.ok) {
-          const category = classifyHttpStatus(status);
-          last = { metadata: null, category, reason: `HTTP ${status}`, sourceUrl };
-        } else {
-          const body = await res.text();
-          last = parser(body, videoId, sourceUrl);
-        }
-      } catch (err) {
-        last = {
-          metadata: null,
-          category: 'transient_network',
-          reason: err instanceof Error ? err.message : String(err),
-          sourceUrl,
-        };
-      } finally {
-        clearTimeout(timer);
+      const res = await this.fetchTextWithHeaders(sourceUrl, cookieHeader);
+      const status = res.status;
+      if (!res.ok) {
+        last = { metadata: null, category: res.category, reason: res.reason, sourceUrl };
+      } else {
+        const parsed = parser(res.body, videoId, sourceUrl);
+        last = parsed.metadata ? { ...parsed, rawHtml: res.body } : parsed;
       }
 
       if (last.metadata) return last;
@@ -494,10 +583,36 @@ export class MetadataFetcher {
 
   async lookup(videoId: string): Promise<ProviderLookupResult> {
     const primary = await this.lookupProvider(this.cmadbBaseUrl, this.cmadbCookie, parseCmadbHtml, videoId);
-    if (primary.metadata) return primary;
+    if (primary.metadata) {
+      let metadata = primary.metadata;
+      if (metadata.actresses.length === 0 && primary.rawHtml) {
+        const linkedActresses = await this.resolveCmadbCommentActresses(primary.rawHtml);
+        if (linkedActresses.length > 0) {
+          const mergedTags = [...new Set([...linkedActresses, ...metadata.candidateTags])];
+          metadata = {
+            ...metadata,
+            actresses: linkedActresses,
+            candidateTags: mergedTags,
+          };
+        }
+      }
+      return {
+        metadata,
+        category: primary.category,
+        reason: primary.reason,
+        sourceUrl: primary.sourceUrl,
+      };
+    }
 
     const fallback = await this.lookupProvider(this.ppvdbBaseUrl, this.ppvdbCookie, parsePpvdbHtml, videoId);
-    if (fallback.metadata) return fallback;
+    if (fallback.metadata) {
+      return {
+        metadata: fallback.metadata,
+        category: fallback.category,
+        reason: fallback.reason,
+        sourceUrl: fallback.sourceUrl,
+      };
+    }
 
     return {
       metadata: null,

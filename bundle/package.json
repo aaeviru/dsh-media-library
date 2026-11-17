@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-experimental-media-library",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": true,
   "type": "module",
   "main": "lib/index.js",

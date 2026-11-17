@@ -166,6 +166,46 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
     const res = await fetcher.lookup('4545625');
     assert.equal(res.metadata?.provider, 'FC2PPVDB');
     assert.equal(res.metadata?.title, 'Fallback Video Title');
+
+    // Follow-up actress resolution from article.comments when cmadbCookie is present.
+    const seenCookies: Array<string | undefined> = [];
+    const cookieFetcher = new MetadataFetcher({
+      cmadbCookie: 'fc2cmadb-session=test-token',
+      retries: 1,
+      requestDelayMs: 0,
+      fetchImpl: async (url, init) => {
+        const hdrs = (init?.headers ?? {}) as Record<string, string>;
+        seenCookies.push(hdrs.Cookie);
+        if (url.endsWith('/articles/5006891')) {
+          return {
+            status: 200,
+            ok: true,
+            text: async () => `
+              <html><body><script data-page="app" type="application/json">
+                {"props":{"article":{"video_id":5006891,"title":"Test 5006891","release_date":"2026-11-13","writer":{"name":"CreatorC"},"tags":[{"name":"巨乳"}],"comments":[{"body":"https://fc2cmadb.com/actresses/12502"}]}}}
+              </script></body></html>
+            `,
+          };
+        }
+        if (url.endsWith('/actresses/12502')) {
+          return {
+            status: 200,
+            ok: true,
+            text: async () => `
+              <html><body><script data-page="app" type="application/json">
+                {"props":{"actress":{"id":12502,"name":"ここあ"}}}
+              </script></body></html>
+            `,
+          };
+        }
+        return { status: 404, ok: false, text: async () => 'Not Found' };
+      },
+    });
+    const cookieRes = await cookieFetcher.lookup('5006891');
+    assert.equal(cookieRes.category, 'ok');
+    assert.deepEqual(cookieRes.metadata?.actresses, ['ここあ']);
+    assert.deepEqual(cookieRes.metadata?.candidateTags, ['ここあ', 'CreatorC', '巨乳']);
+    assert.deepEqual(seenCookies, ['fc2cmadb-session=test-token', 'fc2cmadb-session=test-token']);
   });
 
   it('B4 & B5: lazy manifest on action, same-share rename + EXDEV copy fallback, idempotent replay, and 3 crash-point reconciles', async () => {
@@ -419,6 +459,99 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         assert.equal(listIngestionTasks(db2).length, 2);
       } finally {
         db2.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('matches existing tags via tag_aliases on fetch and commit without creating duplicates (Q1)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ingest-alias-'));
+    try {
+      const { tempDir, dbPath, roots, fileOps } = setupEnv(tmpDir);
+      const sampleFile = path.join(tempDir, 'FC2-PPV-5006891.mp4');
+      fs.writeFileSync(sampleFile, 'video-alias-test');
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        await migrateDatabase(db, { dbPath, appVersion: '0.5.4' });
+        const nowIso = '2026-11-17T00:00:00.000Z';
+        db.prepare(
+          `INSERT INTO media_roots (id, name, canonical_unc_root, enabled, created_at)
+           VALUES ('nas-main', 'NAS', ?, 1, ?)`,
+        ).run(roots[0]!.canonicalUncRoot, nowIso);
+        const tagIns = db
+          .prepare(
+            `INSERT INTO tags (name, normalized_name, kind, created_at, updated_at, revision)
+             VALUES ('中出', '中出', 'custom', ?, ?, 1)`,
+          )
+          .run(nowIso, nowIso);
+        const canonicalTagId = Number(tagIns.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO tag_aliases (tag_id, alias, normalized_alias)
+           VALUES (?, '中出し', '中出し')`,
+        ).run(canonicalTagId);
+
+        const fetcher = new MetadataFetcher({
+          requestDelayMs: 0,
+          fetchImpl: async () => ({
+            status: 200,
+            ok: true,
+            text: async () => `
+              <html><body><script data-page="app" type="application/json">
+                {"props":{"article":{"video_id":5006891,"title":"Alias Merge Test","release_date":"2026-11-13","tags":[{"name":"中出し"},{"name":"ここあ"}]}}}
+              </script></body></html>
+            `,
+          }),
+        });
+
+        const ensured = ensureManifestForStagingFile(db, {
+          tempPath: sampleFile,
+          targetRootId: 'nas-main',
+          targetSubdir: 'ingested',
+          roots,
+          fileOps,
+        });
+        assert.ok(ensured.id);
+
+        const fetched = await fetchMetadataForManifest(db, ensured.id, fetcher);
+        assert.equal(fetched.ok, true);
+        assert.ok(fetched.manifest);
+        const matched = fetched.manifest.tags.find((t) => t.tagId === canonicalTagId);
+        assert.equal(matched?.name, '中出');
+
+        const reviewed = reviewIngestionManifest(db, {
+          manifestId: fetched.manifest.id,
+          decision: 'approved',
+          newTagNames: ['中出し', 'ここあ'],
+        });
+        assert.equal(reviewed.ok, true);
+
+        const committed = commitIngestionManifest(db, {
+          manifestId: fetched.manifest.id,
+          roots,
+          fileOps,
+        });
+        assert.equal(committed.ok, true);
+        assert.ok(committed.mediaId);
+
+        const linkedTags = db
+          .prepare(
+            `SELECT t.id, t.name
+             FROM media_tags mt
+             JOIN tags t ON t.id = mt.tag_id
+             WHERE mt.media_id = ?
+             ORDER BY t.id ASC`,
+          )
+          .all(committed.mediaId) as Array<{ id: number; name: string }>;
+        assert.deepEqual(
+          linkedTags.map((r) => r.name),
+          ['中出', 'ここあ'],
+        );
+        const dupRow = db.prepare(`SELECT id FROM tags WHERE normalized_name = '中出し'`).get();
+        assert.equal(dupRow, undefined);
+      } finally {
+        db.close();
       }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
