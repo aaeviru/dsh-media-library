@@ -17,6 +17,7 @@ import type {
   ImportTagStudioInput,
   ImportTagStudioResult,
   IngestionManifest,
+  IngestionTask,
   LibraryOverview,
   ListTagsInput,
   ListTagsResult,
@@ -252,6 +253,14 @@ export class MediaLibraryRemote extends TypertRemoteService {
   @Remote('listIngestionManifests')
   async listIngestionManifests(): Promise<IngestionManifest[]> {
     return this.spikeService.listIngestionManifests();
+  }
+
+  /**
+   * List durable ingestion task progress records (running/succeeded/failed/interrupted).
+   */
+  @Remote('listIngestionTasks')
+  async listIngestionTasks(): Promise<IngestionTask[]> {
+    return this.spikeService.listIngestionTasks();
   }
 
   /**

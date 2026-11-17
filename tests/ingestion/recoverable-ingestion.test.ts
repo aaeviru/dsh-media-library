@@ -10,6 +10,9 @@ import {
   defaultIngestionFileOps,
   ensureManifestForStagingFile,
   fetchMetadataForManifest,
+  finishIngestionTask,
+  listIngestionTasks,
+  markInterruptedIngestionTasks,
   MetadataFetcher,
   parseCmadbHtml,
   parseFc2Code,
@@ -18,6 +21,7 @@ import {
   reconcileIngestionManifests,
   reviewIngestionManifest,
   scanStagingDirectory,
+  startIngestionTask,
   type IngestionFileOps,
 } from '../../src/ingestion/index.ts';
 import { MediaLibrarySpikeService } from '../../src/spike-service.ts';
@@ -106,12 +110,21 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         <script data-page="app" type="application/json">
           {"props":{"article":{"video_id":"4545625","title":"Sample &amp; Title","writer":{"name":"CreatorA"},"tags":["Amateur",{"name":"1080p"}]}}}
         </script>
+        <table class="table table-md p-1"><tbody>
+          <tr><th>ID：</th><td>4545625</td></tr>
+          <tr><th>販売者：</th><td><a href="https://fc2cmadb.com/writers/x">CreatorA</a></td></tr>
+          <tr><th>女優：</th><td><a href="https://fc2cmadb.com/actresses/12502">ここあ</a></td></tr>
+          <tr><th>販売日：</th><td>2026-11-13</td></tr>
+          <tr><th>タグ：</th><td><a href="https://fc2cmadb.com/tags/a">ハメ撮り</a><a href="https://fc2cmadb.com/tags/b">中出し</a></td></tr>
+        </tbody></table>
       </body></html>
     `;
     const okCmadb = parseCmadbHtml(cmadbHtml, '4545625', 'https://fc2cmadb.com/articles/4545625');
     assert.equal(okCmadb.category, 'ok');
     assert.equal(okCmadb.metadata?.title, 'Sample & Title');
-    assert.deepEqual(okCmadb.metadata?.candidateTags, ['CreatorA', 'Amateur', '1080p']);
+    assert.deepEqual(okCmadb.metadata?.actresses, ['ここあ']);
+    assert.equal(okCmadb.metadata?.mediaDate, '2026-11-13');
+    assert.deepEqual(okCmadb.metadata?.candidateTags, ['ここあ', 'CreatorA', 'ハメ撮り', '中出し', 'Amateur', '1080p']);
 
     const loginHtml = '<html><body><form action="/login">メールアドレス</form></body></html>';
     assert.equal(parseCmadbHtml(loginHtml, '4545625', 'https://fc2cmadb.com/articles/4545625').category, 'auth_or_blocked');
@@ -300,6 +313,52 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
       const commit = await service.commitIngestion({ manifestId: 1 });
       assert.equal(commit.ok, false);
       assert.equal(commit.code, 'READ_ONLY_DEGRADED');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('ingestion_tasks enforces per-item concurrency locks and marks interrupted tasks on startup', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ingest-tasks-'));
+    try {
+      const { dbPath, roots } = setupEnv(tmpDir);
+      const db = new DatabaseSync(dbPath);
+      try {
+        await migrateDatabase(db, { dbPath, appVersion: '0.5.0' });
+        const lock1 = startIngestionTask(db, 'manifest:42', 'commit', 'Moving...');
+        assert.equal(lock1.acquired, true);
+        const lock2 = startIngestionTask(db, 'manifest:42', 'commit', 'Duplicate');
+        assert.equal(lock2.acquired, false);
+        if (!lock1.acquired) return;
+
+        // Finish task1 -> lock can be acquired again; leave a running task to test startup recovery.
+        finishIngestionTask(db, lock1.taskId, 'succeeded', 'Done');
+        const lock3 = startIngestionTask(db, 'manifest:42', 'fetch', 'Fetching...');
+        assert.equal(lock3.acquired, true);
+      } finally {
+        db.close();
+      }
+
+      // Opening a fresh service marks any leftover running tasks as interrupted.
+      const service = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        roots,
+        autoDailyBackup: false,
+      });
+      const tasks = await service.listIngestionTasks();
+      assert.equal(tasks.length, 2);
+      assert.equal(tasks[0]!.status, 'interrupted');
+      assert.equal(tasks[1]!.status, 'succeeded');
+
+      // Direct helper check too.
+      const db2 = new DatabaseSync(dbPath);
+      try {
+        assert.equal(markInterruptedIngestionTasks(db2), 0);
+        assert.equal(listIngestionTasks(db2).length, 2);
+      } finally {
+        db2.close();
+      }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

@@ -129,12 +129,13 @@ const MUTATION_SCHEMAS = [
   `let _mediaLibrary_ingestionManifestList$schema$value\nconst _mediaLibrary_ingestionManifestList$schema = () => (_mediaLibrary_ingestionManifestList$schema$value ??= z.array(_mediaLibrary_ingestionManifest$schema()).readonly())`,
   `let _mediaLibrary_scanStagingResult$schema$value\nconst _mediaLibrary_scanStagingResult$schema = () => (_mediaLibrary_scanStagingResult$schema$value ??= z.object({ ok: ${BOOL}, stagingDir: ${STR}, targetRootId: ${STR}, targetSubdir: ${STR}, elapsedMs: ${NUM}, files: z.array(z.object({ filename: ${STR}, relativePath: ${STR}, tempPath: ${STR}, targetRelativePath: ${STR}, fileSize: ${NUM}, mtimeIso: ${STR}, catalogNumber: ${STR}.nullable(), manifestId: ${NUM}.nullable(), state: z.enum(['planned', 'reviewed', 'moving', 'indexed', 'failed']).nullable(), reviewDecision: z.enum(['pending', 'approved', 'rejected']).nullable() }).readonly()).readonly(), manifests: _mediaLibrary_ingestionManifestList$schema(), error: ${STR}.optional() }).readonly())`,
   `let _mediaLibrary_fetchIngestionMetadataInput$schema$value\nconst _mediaLibrary_fetchIngestionMetadataInput$schema = () => (_mediaLibrary_fetchIngestionMetadataInput$schema$value ??= z.object({ manifestId: ${NUM}.optional(), tempPath: ${STR}.optional() }).readonly())`,
-  `let _mediaLibrary_fetchedMetadataCandidate$schema$value\nconst _mediaLibrary_fetchedMetadataCandidate$schema = () => (_mediaLibrary_fetchedMetadataCandidate$schema$value ??= z.object({ ok: ${BOOL}, provider: ${STR}.nullable(), category: ${STR}, reason: ${STR}, sourceUrl: ${STR}, title: ${STR}.nullable(), writer: ${STR}.nullable(), candidateTags: z.array(${STR}).readonly(), manifest: _mediaLibrary_ingestionManifest$schema().nullable() }).readonly())`,
+  `let _mediaLibrary_fetchedMetadataCandidate$schema$value\nconst _mediaLibrary_fetchedMetadataCandidate$schema = () => (_mediaLibrary_fetchedMetadataCandidate$schema$value ??= z.object({ ok: ${BOOL}, provider: ${STR}.nullable(), category: ${STR}, reason: ${STR}, sourceUrl: ${STR}, title: ${STR}.nullable(), writer: ${STR}.nullable(), actresses: z.array(${STR}).readonly(), mediaDate: ${STR}.nullable(), candidateTags: z.array(${STR}).readonly(), manifest: _mediaLibrary_ingestionManifest$schema().nullable() }).readonly())`,
   `let _mediaLibrary_reviewIngestionInput$schema$value\nconst _mediaLibrary_reviewIngestionInput$schema = () => (_mediaLibrary_reviewIngestionInput$schema$value ??= z.object({ manifestId: ${NUM}.optional(), tempPath: ${STR}.optional(), decision: z.enum(['approved', 'rejected']).readonly(), title: ${STR}.optional(), catalogNumber: ${STR}.optional(), mediaDate: ${STR}.optional(), tagIds: z.array(${NUM}).readonly().optional(), newTagNames: z.array(${STR}).readonly().optional() }).readonly())`,
   `let _mediaLibrary_reviewIngestionResult$schema$value\nconst _mediaLibrary_reviewIngestionResult$schema = () => (_mediaLibrary_reviewIngestionResult$schema$value ??= z.object({ ok: ${BOOL}, code: ${STR}.optional(), message: ${STR}.optional(), manifest: _mediaLibrary_ingestionManifest$schema().nullable().optional() }).readonly())`,
   `let _mediaLibrary_commitIngestionInput$schema$value\nconst _mediaLibrary_commitIngestionInput$schema = () => (_mediaLibrary_commitIngestionInput$schema$value ??= z.object({ manifestId: ${NUM} }).readonly())`,
   `let _mediaLibrary_commitIngestionResult$schema$value\nconst _mediaLibrary_commitIngestionResult$schema = () => (_mediaLibrary_commitIngestionResult$schema$value ??= z.object({ ok: ${BOOL}, code: ${STR}.optional(), message: ${STR}, idempotentReplay: ${BOOL}.optional(), mediaId: ${NUM}.nullable().optional(), warning: ${STR}.nullable().optional(), manifest: _mediaLibrary_ingestionManifest$schema().nullable().optional() }).readonly())`,
   `let _mediaLibrary_reconcileIngestionResult$schema$value\nconst _mediaLibrary_reconcileIngestionResult$schema = () => (_mediaLibrary_reconcileIngestionResult$schema$value ??= z.object({ ok: ${BOOL}, reconciledCount: ${NUM}, copiedNotDeletedFixed: ${NUM}, movedNotIndexedFixed: ${NUM}, indexedButMissingMarked: ${NUM}, errors: z.array(${STR}).readonly(), manifests: _mediaLibrary_ingestionManifestList$schema() }).readonly())`,
+  `let _mediaLibrary_ingestionTaskList$schema$value\nconst _mediaLibrary_ingestionTaskList$schema = () => (_mediaLibrary_ingestionTaskList$schema$value ??= z.array(z.object({ id: ${NUM}, targetKey: ${STR}, op: z.enum(['fetch', 'commit', 'reconcile']).readonly(), status: z.enum(['running', 'succeeded', 'failed', 'interrupted']).readonly(), message: ${STR}, startedAt: ${STR}, finishedAt: ${STR}.nullable() }).readonly()).readonly())`,
 ].join('\n\n');
 
 interface MutationMethodSpec {
@@ -496,6 +497,18 @@ const REMOTE_INFO_BODY = `{
       },
       sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 242, column: 3 },
     },
+    'mediaLibrary/listIngestionTasks': {
+      service: 'mediaLibrary',
+      description: 'List durable ingestion task progress records (running/succeeded/failed/interrupted).',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-experimental-media-library/types#IngestionTask[]',
+        create: _mediaLibrary_ingestionTaskList$schema,
+      },
+      sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 250, column: 3 },
+    },
     'mediaLibrary/reconcileIngestion': {
       service: 'mediaLibrary',
       description: 'Reconcile interrupted manifests (copied-not-deleted, moved-not-indexed, indexed-but-missing).',
@@ -753,6 +766,7 @@ import type {
   OpsStatus,
   ScanStagingResult,
   IngestionManifest,
+  IngestionTask,
   ReconcileIngestionResult,
 ${MUTATION_DTS_IMPORTS.map(n => `  ${n},`).join('\n')}
 } from '../src/types.ts'
@@ -764,6 +778,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     getOpsStatus: () => Promise<RemoteResult<OpsStatus>>
     scanStagingFiles: () => Promise<RemoteResult<ScanStagingResult>>
     listIngestionManifests: () => Promise<RemoteResult<IngestionManifest[]>>
+    listIngestionTasks: () => Promise<RemoteResult<IngestionTask[]>>
     reconcileIngestion: () => Promise<RemoteResult<ReconcileIngestionResult>>
     importTagStudioCopy: (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     listTags: (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
@@ -779,6 +794,7 @@ ${MUTATION_DTS_NAMESPACE}
     'mediaLibrary/getOpsStatus': () => Promise<RemoteResult<OpsStatus>>
     'mediaLibrary/scanStagingFiles': () => Promise<RemoteResult<ScanStagingResult>>
     'mediaLibrary/listIngestionManifests': () => Promise<RemoteResult<IngestionManifest[]>>
+    'mediaLibrary/listIngestionTasks': () => Promise<RemoteResult<IngestionTask[]>>
     'mediaLibrary/reconcileIngestion': () => Promise<RemoteResult<ReconcileIngestionResult>>
     'mediaLibrary/importTagStudioCopy': (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     'mediaLibrary/listTags': (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
@@ -799,6 +815,7 @@ export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'mediaLibrary/getOpsStatus': TypertRemoteMethod<{}, OpsStatus>
   readonly 'mediaLibrary/scanStagingFiles': TypertRemoteMethod<{}, ScanStagingResult>
   readonly 'mediaLibrary/listIngestionManifests': TypertRemoteMethod<{}, IngestionManifest[]>
+  readonly 'mediaLibrary/listIngestionTasks': TypertRemoteMethod<{}, IngestionTask[]>
   readonly 'mediaLibrary/reconcileIngestion': TypertRemoteMethod<{}, ReconcileIngestionResult>
   readonly 'mediaLibrary/importTagStudioCopy': TypertRemoteMethod<{ readonly input?: ImportTagStudioInput }, ImportTagStudioResult>
   readonly 'mediaLibrary/listTags': TypertRemoteMethod<{ readonly input?: ListTagsInput }, ListTagsResult>

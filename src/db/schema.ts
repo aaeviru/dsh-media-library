@@ -331,6 +331,18 @@ export const V4_INGESTION_MANIFESTS_MIGRATION: SchemaMigration = {
       );
       CREATE INDEX idx_ingestion_manifests_checksum ON ingestion_manifests(checksum_sha256);
       CREATE INDEX idx_ingestion_manifests_state ON ingestion_manifests(state, updated_at DESC);
+
+      CREATE TABLE ingestion_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_key TEXT NOT NULL,
+        op TEXT NOT NULL CHECK (op IN ('fetch', 'commit', 'reconcile')),
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'interrupted')),
+        message TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+      CREATE INDEX idx_ingestion_tasks_target_status ON ingestion_tasks(target_key, status);
+      CREATE INDEX idx_ingestion_tasks_started ON ingestion_tasks(started_at DESC, id DESC);
     `)
   },
 }
@@ -385,7 +397,7 @@ export async function migrateDatabase(
   ensureSchemaVersionsTable(db)
 
   const migrations = [...(options?.migrations ?? DEFAULT_MIGRATIONS)].sort((a, b) => a.version - b.version)
-  const appVersion = options?.appVersion ?? '0.5.0'
+  const appVersion = options?.appVersion ?? '0.5.1'
   const nowFn = options?.now ?? (() => new Date())
 
   const previousVersion = getCurrentSchemaVersion(db)

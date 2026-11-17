@@ -16,6 +16,7 @@ In the initial Issue #7 implementation, `scanStagingFiles` walked the NAS `temp`
    - Staged files are matched in-memory against existing manifests by path/size; no `planned` rows are written during a scan.
 2. **Lazy Manifest Persistence**:
    - An `ingestion_manifests` row is created only when the user takes an explicit action on a staged file (`fetchIngestionMetadata` or `reviewIngestion`), then transitions through `reviewed -> moving -> indexed | failed`.
+   - Slow staging operations (`fetch`, `commit`, `reconcile`) also record a durable `ingestion_tasks` row (`running -> succeeded | failed | interrupted`) so duplicate concurrent triggers on the same item are blocked on the Host and UI state/results survive panel switches or reloads. Client-side unsubmitted edits are stored in a per-item `dirtyDrafts` map separated from server manifest refreshes.
 3. **Same-NAS Rename First, Copy+Verify Fallback on `EXDEV`**:
    - Since both `temp` and `targetSubdir` live inside the same NAS share, `commitIngestion` attempts an async server-side `rename` first and verifies destination existence and `file_size`.
    - Only when `rename` returns `EXDEV` (cross-volume/cross-share) does it fall back to copy + size/SHA-256 verification + conservative source removal.

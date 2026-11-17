@@ -14,6 +14,7 @@ import type {
   ImportTagStudioInput,
   ImportTagStudioResult,
   IngestionManifest,
+  IngestionTask,
   LibraryOverview,
   ListTagsInput,
   ListTagsResult,
@@ -61,6 +62,7 @@ export interface MediaLibraryNamespace {
   exportMappingReport: (input: ExportMappingReportInput) => Promise<RemoteResult<ExportMappingReportResult>>;
   scanStagingFiles: () => Promise<RemoteResult<ScanStagingResult>>;
   listIngestionManifests: () => Promise<RemoteResult<IngestionManifest[]>>;
+  listIngestionTasks: () => Promise<RemoteResult<IngestionTask[]>>;
   fetchIngestionMetadata: (input: FetchIngestionMetadataInput) => Promise<RemoteResult<FetchedMetadataCandidate>>;
   reviewIngestion: (input: ReviewIngestionInput) => Promise<RemoteResult<ReviewIngestionResult>>;
   commitIngestion: (input: CommitIngestionInput) => Promise<RemoteResult<CommitIngestionResult>>;

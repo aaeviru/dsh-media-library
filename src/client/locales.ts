@@ -140,6 +140,7 @@ export const en = {
   ingestionCommitBtn: 'Move & Index',
   ingestionCommittingBtn: 'Moving & Indexing...',
   ingestionTitleLabel: 'Title',
+  ingestionDateLabel: 'Release Date (YYYY-MM-DD)',
   ingestionTagsLabel: 'Tags (comma-separated)',
   ingestionTargetLabel: 'Target Path',
 } as const;
@@ -286,6 +287,7 @@ export const zh: Record<keyof typeof en, string> = {
   ingestionCommitBtn: '移动并入库',
   ingestionCommittingBtn: '正在移动并入库...',
   ingestionTitleLabel: '标题',
+  ingestionDateLabel: '发售/发布日期（YYYY-MM-DD）',
   ingestionTagsLabel: '标签（逗号分隔，可自由增删）',
   ingestionTargetLabel: '固定目标路径',
 };

@@ -466,6 +466,8 @@ export interface FetchedMetadataCandidate {
   readonly sourceUrl: string;
   readonly title: string | null;
   readonly writer: string | null;
+  readonly actresses: readonly string[];
+  readonly mediaDate: string | null;
   readonly candidateTags: readonly string[];
   readonly manifest: IngestionManifest | null;
 }
@@ -494,12 +496,25 @@ export interface CommitIngestionInput {
 
 export interface CommitIngestionResult {
   readonly ok: boolean;
-  readonly code?: MediaActionErrorCode | 'REVIEW_REQUIRED' | 'READ_ONLY_DEGRADED' | 'MANIFEST_NOT_FOUND' | 'MOVE_FAILED' | 'INDEX_FAILED' | 'CHECKSUM_MISMATCH' | undefined;
+  readonly code?: 'REVIEW_REQUIRED' | 'READ_ONLY_DEGRADED' | 'MANIFEST_NOT_FOUND' | 'MOVE_FAILED' | 'INDEX_FAILED' | 'CHECKSUM_MISMATCH' | 'IN_PROGRESS' | MediaActionErrorCode | undefined;
   readonly message: string;
   readonly idempotentReplay?: boolean | undefined;
   readonly mediaId?: number | null | undefined;
   readonly warning?: string | null | undefined;
   readonly manifest?: IngestionManifest | null | undefined;
+}
+
+export type IngestionTaskOp = 'fetch' | 'commit' | 'reconcile';
+export type IngestionTaskStatus = 'running' | 'succeeded' | 'failed' | 'interrupted';
+
+export interface IngestionTask {
+  readonly id: number;
+  readonly targetKey: string;
+  readonly op: IngestionTaskOp;
+  readonly status: IngestionTaskStatus;
+  readonly message: string;
+  readonly startedAt: string;
+  readonly finishedAt: string | null;
 }
 
 export interface ReconcileIngestionResult {

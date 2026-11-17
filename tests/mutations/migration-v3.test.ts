@@ -68,7 +68,7 @@ describe('Schema v3 migration (Issue #5 B6)', () => {
       assert.equal(Number((db.prepare('SELECT COUNT(*) AS c FROM mutation_log').get() as { c: number }).c), 0)
       assert.equal(
         (db.prepare('SELECT app_version FROM schema_versions WHERE version = 3').get() as { app_version: string }).app_version,
-        '0.5.0',
+        '0.5.1',
       )
       assert.equal(runDatabaseHealthChecks(db).ok, true)
 

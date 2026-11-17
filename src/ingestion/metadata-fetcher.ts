@@ -10,6 +10,8 @@ export interface ProviderMetadata {
   readonly videoId: string;
   readonly title: string;
   readonly writer: string;
+  readonly actresses: readonly string[];
+  readonly mediaDate: string | null;
   readonly candidateTags: readonly string[];
   readonly sourceUrl: string;
   readonly provider: 'FC2CMADB' | 'FC2PPVDB';
@@ -58,8 +60,59 @@ export function cleanMetadataText(text: string | null | undefined): string {
     .trim();
 }
 
+function extractIsoDateFromText(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const match = /\b(20\d{2}|19\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b/.exec(raw);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : null;
+}
+
+function extractAnchorOrTextValues(cellHtml: string): string[] {
+  const anchors = [...cellHtml.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)]
+    .map((m) => cleanMetadataText(m[1]!.replace(/<[^>]+>/g, '')))
+    .filter(Boolean);
+  if (anchors.length > 0) return anchors;
+  const plain = cleanMetadataText(cellHtml.replace(/<[^>]+>/g, ' '));
+  return plain
+    .split(/[,、/]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parseTableMetadataRows(html: string): {
+  writer: string;
+  actresses: string[];
+  mediaDate: string | null;
+  tags: string[];
+} {
+  let writer = '';
+  const actresses: string[] = [];
+  let mediaDate: string | null = null;
+  const tags: string[] = [];
+
+  for (const rowMatch of html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const rowHtml = rowMatch[1]!;
+    const thMatch = /<th\b[^>]*>([\s\S]*?)<\/th>/i.exec(rowHtml);
+    const tdMatch = /<td\b[^>]*>([\s\S]*?)<\/td>/i.exec(rowHtml);
+    if (!thMatch || !tdMatch) continue;
+    const label = cleanMetadataText(thMatch[1]!.replace(/<[^>]+>/g, '')).replace(/[:：]+$/, '');
+    const cellHtml = tdMatch[1]!;
+
+    if (label === '販売者' && !writer) {
+      writer = extractAnchorOrTextValues(cellHtml)[0] ?? '';
+    } else if (label === '女優') {
+      actresses.push(...extractAnchorOrTextValues(cellHtml));
+    } else if ((label === '販売日' || label === '公開日' || label === '配信日') && !mediaDate) {
+      mediaDate = extractIsoDateFromText(cleanMetadataText(cellHtml.replace(/<[^>]+>/g, ' ')));
+    } else if (label === 'タグ') {
+      tags.push(...extractAnchorOrTextValues(cellHtml));
+    }
+  }
+
+  return { writer, actresses, mediaDate, tags };
+}
+
 /**
- * Parse FC2CMADB HTML (`<script data-page="app" type="application/json">...`).
+ * Parse FC2CMADB HTML (`<script data-page="app" type="application/json">` + rendered metadata `<table>`).
  * Does not bypass login pages; reports `auth_or_blocked` cleanly.
  */
 export function parseCmadbHtml(html: string, videoId: string, sourceUrl: string): ProviderLookupResult {
@@ -117,16 +170,44 @@ export function parseCmadbHtml(html: string, videoId: string, sourceUrl: string)
     };
   }
 
+  const tableInfo = parseTableMetadataRows(html);
+
   const title = cleanMetadataText(typeof article.title === 'string' ? article.title : '');
   const writerObj = article.writer as Record<string, unknown> | undefined;
   let writer =
-    writerObj && typeof writerObj === 'object' && typeof writerObj.name === 'string'
+    (writerObj && typeof writerObj === 'object' && typeof writerObj.name === 'string'
       ? cleanMetadataText(writerObj.name)
-      : '';
+      : '') || tableInfo.writer;
   if (writer.toLowerCase() === 'fc2cmadb') writer = '';
 
+  const actressSet = new Set<string>(tableInfo.actresses);
+  for (const field of ['actresses', 'actors', 'performers', 'casts'] as const) {
+    const list = article[field];
+    if (Array.isArray(list)) {
+      for (const entry of list) {
+        if (typeof entry === 'string') {
+          const cleaned = cleanMetadataText(entry);
+          if (cleaned) actressSet.add(cleaned);
+        } else if (entry && typeof entry === 'object' && typeof (entry as { name?: unknown }).name === 'string') {
+          const cleaned = cleanMetadataText((entry as { name: string }).name);
+          if (cleaned) actressSet.add(cleaned);
+        }
+      }
+    }
+  }
+
+  const mediaDate =
+    extractIsoDateFromText(article.release_date) ??
+    extractIsoDateFromText(article.published_at) ??
+    extractIsoDateFromText(article.sale_date) ??
+    extractIsoDateFromText(article.date) ??
+    tableInfo.mediaDate;
+
   const candidateTags = new Set<string>();
+  for (const actress of actressSet) candidateTags.add(actress);
   if (writer) candidateTags.add(writer);
+  for (const tag of tableInfo.tags) candidateTags.add(tag);
+
   const rawTags = article.tags;
   if (Array.isArray(rawTags)) {
     for (const entry of rawTags) {
@@ -149,6 +230,8 @@ export function parseCmadbHtml(html: string, videoId: string, sourceUrl: string)
       videoId,
       title,
       writer,
+      actresses: [...actressSet],
+      mediaDate,
       candidateTags: [...candidateTags],
       sourceUrl,
       provider: 'FC2CMADB',
@@ -203,17 +286,21 @@ export function parsePpvdbHtml(html: string, videoId: string, sourceUrl: string)
   ).exec(plainText);
   if (bodyMatch?.[0]) candidates.push(bodyMatch[0]);
 
+  const tableInfo = parseTableMetadataRows(html);
   const idTokenRe = new RegExp(`(?<!\\d)${escapedId}(?!\\d)`);
   for (const candidate of candidates) {
     if (candidate && idTokenRe.test(candidate)) {
       const title = stripSiteTitle(candidate, videoId);
       if (title) {
+        const candidateTags = [...new Set([...tableInfo.actresses, ...(tableInfo.writer ? [tableInfo.writer] : []), ...tableInfo.tags])];
         return {
           metadata: {
             videoId,
             title,
-            writer: '',
-            candidateTags: [],
+            writer: tableInfo.writer,
+            actresses: tableInfo.actresses,
+            mediaDate: tableInfo.mediaDate,
+            candidateTags,
             sourceUrl,
             provider: 'FC2PPVDB',
           },

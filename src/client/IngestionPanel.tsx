@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { IngestionManifest, StagingFileItem } from '../types.ts';
+import type { IngestionManifest, IngestionTask, StagingFileItem } from '../types.ts';
 import { buttonStyle, controlStyle } from './TagManagementPanel.tsx';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
@@ -7,6 +7,28 @@ import type { MediaLibraryNamespace } from './namespace.ts';
 type Translate = (key: MediaLibraryKey) => string;
 
 type BusyOp = null | 'scan' | 'reconcile' | 'fetch' | 'approve' | 'reject' | 'commit';
+
+interface DraftFields {
+  title: string;
+  mediaDate: string;
+  tagsText: string;
+}
+
+// Module-level session cache so switching away from the panel or sidebar never drops
+// scanned temp files, selected row, or unsubmitted title/tag drafts.
+const sessionCache: {
+  stagedFiles: readonly StagingFileItem[];
+  hasScannedOnce: boolean;
+  selectedKey: string | null;
+  dirtyDrafts: Record<string, DraftFields>;
+  lastSeenTaskId: number;
+} = {
+  stagedFiles: [],
+  hasScannedOnce: false,
+  selectedKey: null,
+  dirtyDrafts: {},
+  lastSeenTaskId: 0,
+};
 
 interface UnifiedStagingEntry {
   readonly key: string;
@@ -20,8 +42,8 @@ interface UnifiedStagingEntry {
 
 /**
  * Per-file staging review & recoverable ingestion panel (`B6`).
- * Scans `temp` asynchronously (zero hashing, zero DB writes), lazily persists a manifest
- * only when the user fetches metadata or reviews a file, and shows explicit busy progress.
+ * Uses Host/SQLite `ingestion_tasks` for cross-switch progress visibility & concurrency locks,
+ * and separates client `dirtyDrafts` from server manifest refreshes.
  */
 export function IngestionPanel({
   t,
@@ -34,34 +56,121 @@ export function IngestionPanel({
   degraded: boolean;
   onCommitted: () => void;
 }) {
-  const [stagedFiles, setStagedFiles] = useState<readonly StagingFileItem[]>([]);
+  const [stagedFiles, setStagedFiles] = useState<readonly StagingFileItem[]>(() => sessionCache.stagedFiles);
   const [manifests, setManifests] = useState<readonly IngestionManifest[]>([]);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [tasks, setTasks] = useState<readonly IngestionTask[]>([]);
+  const [selectedKey, setSelectedKeyState] = useState<string | null>(() => sessionCache.selectedKey);
+  const [dirtyDrafts, setDirtyDrafts] = useState<Record<string, DraftFields>>(() => ({ ...sessionCache.dirtyDrafts }));
   const [busyOp, setBusyOp] = useState<BusyOp>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [editTitle, setEditTitle] = useState('');
-  const [editTagsText, setEditTagsText] = useState('');
+  const setSelectedKey = useCallback((next: string | null) => {
+    sessionCache.selectedKey = next;
+    setSelectedKeyState(next);
+  }, []);
 
-  const busy = busyOp !== null;
+  const updateDraft = useCallback((key: string, patch: Partial<DraftFields>, fallback: DraftFields) => {
+    setDirtyDrafts((prev) => {
+      const current = prev[key] ?? fallback;
+      const next = { ...prev, [key]: { ...current, ...patch } };
+      sessionCache.dirtyDrafts = next;
+      return next;
+    });
+  }, []);
 
-  const reloadManifests = useCallback(async () => {
+  const clearDraft = useCallback((key: string) => {
+    setDirtyDrafts((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      sessionCache.dirtyDrafts = next;
+      return next;
+    });
+  }, []);
+
+  const runningHostTask = useMemo(
+    () => tasks.find((task) => task.status === 'running') ?? null,
+    [tasks],
+  );
+  const busy = busyOp !== null || runningHostTask !== null;
+
+  const reloadServerState = useCallback(async () => {
     try {
-      const res = await mediaLibrary.listIngestionManifests();
-      if (res.ok) {
-        setManifests(res.value);
+      const [mRes, tRes] = await Promise.all([
+        mediaLibrary.listIngestionManifests(),
+        mediaLibrary.listIngestionTasks(),
+      ]);
+      if (mRes.ok) {
+        setManifests(mRes.value);
       } else {
-        setError(res.error.message || t('rpcError'));
+        setError(mRes.error.message || t('rpcError'));
+      }
+      if (tRes.ok) {
+        setTasks(tRes.value);
+        const latest = tRes.value[0];
+        if (latest && latest.status !== 'running' && latest.id > sessionCache.lastSeenTaskId) {
+          sessionCache.lastSeenTaskId = latest.id;
+          if (latest.status === 'succeeded') {
+            setMessage(latest.message);
+          } else {
+            setError(latest.message);
+          }
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }, [mediaLibrary, t]);
 
+  const runScan = useCallback(
+    async (silent: boolean) => {
+      if (!silent) {
+        setBusyOp('scan');
+        setMessage(null);
+        setError(null);
+      }
+      try {
+        const res = await mediaLibrary.scanStagingFiles();
+        if (!res.ok) {
+          if (!silent) setError(res.error.message || t('rpcError'));
+          return;
+        }
+        setManifests(res.value.manifests);
+        if (res.value.ok) {
+          sessionCache.stagedFiles = res.value.files;
+          sessionCache.hasScannedOnce = true;
+          setStagedFiles(res.value.files);
+          if (!silent) {
+            setMessage(`Scanned ${res.value.files.length} file(s) in ${res.value.elapsedMs} ms (${res.value.stagingDir})`);
+          }
+        } else if (!silent) {
+          setError(res.value.error ?? 'Scan failed');
+        }
+      } catch (err) {
+        if (!silent) setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!silent) setBusyOp(null);
+      }
+    },
+    [mediaLibrary, t],
+  );
+
   useEffect(() => {
-    void reloadManifests();
-  }, [reloadManifests]);
+    void reloadServerState();
+    if (sessionCache.hasScannedOnce) {
+      void runScan(true);
+    }
+  }, [reloadServerState, runScan]);
+
+  // Poll Host task table while any task is still running across tab switches.
+  useEffect(() => {
+    if (!runningHostTask) return;
+    const timer = setInterval(() => {
+      void reloadServerState();
+    }, 1200);
+    return () => clearInterval(timer);
+  }, [runningHostTask, reloadServerState]);
 
   const entries = useMemo<UnifiedStagingEntry[]>(() => {
     const byManifestId = new Map<number, IngestionManifest>();
@@ -104,39 +213,15 @@ export function IngestionPanel({
 
   const selected = entries.find((e) => e.key === selectedKey) ?? null;
 
-  useEffect(() => {
-    if (!selected) {
-      setEditTitle('');
-      setEditTagsText('');
-      return;
-    }
-    setEditTitle(selected.manifest?.title ?? '');
-    setEditTagsText(selected.manifest?.tags.map((tag) => tag.name).join(', ') ?? '');
-  }, [selected]);
-
-  const handleScan = async () => {
-    setBusyOp('scan');
-    setMessage(null);
-    setError(null);
-    try {
-      const res = await mediaLibrary.scanStagingFiles();
-      if (!res.ok) {
-        setError(res.error.message || t('rpcError'));
-        return;
-      }
-      setManifests(res.value.manifests);
-      setStagedFiles(res.value.files);
-      if (res.value.ok) {
-        setMessage(`Scanned ${res.value.files.length} file(s) in ${res.value.elapsedMs} ms (${res.value.stagingDir})`);
-      } else {
-        setError(res.value.error ?? 'Scan failed');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusyOp(null);
-    }
-  };
+  const serverFallback: DraftFields = useMemo(
+    () => ({
+      title: selected?.manifest?.title ?? '',
+      mediaDate: selected?.manifest?.mediaDate ?? '',
+      tagsText: selected?.manifest?.tags.map((tag) => tag.name).join(', ') ?? '',
+    }),
+    [selected],
+  );
+  const activeDraft = selected ? dirtyDrafts[selected.key] ?? serverFallback : serverFallback;
 
   const handleReconcile = async () => {
     setBusyOp('reconcile');
@@ -157,6 +242,7 @@ export function IngestionPanel({
       } else {
         setError(res.value.errors.join('; '));
       }
+      await reloadServerState();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -176,7 +262,9 @@ export function IngestionPanel({
         setError(res.error.message || t('rpcError'));
         return;
       }
+      clearDraft(entry.key);
       if (res.value.manifest) {
+        clearDraft(`m:${res.value.manifest.id}`);
         setSelectedKey(`m:${res.value.manifest.id}`);
       }
       if (res.value.ok) {
@@ -184,7 +272,7 @@ export function IngestionPanel({
       } else {
         setError(`[${res.value.category}] ${res.value.reason}`);
       }
-      await reloadManifests();
+      await reloadServerState();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -192,60 +280,57 @@ export function IngestionPanel({
     }
   };
 
-  const handleReview = async (entry: UnifiedStagingEntry, decision: 'approved' | 'rejected') => {
-    setBusyOp(decision === 'approved' ? 'approve' : 'reject');
-    setMessage(null);
-    setError(null);
-    try {
-      const tagNames = editTagsText
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const res = await mediaLibrary.reviewIngestion({
-        manifestId: entry.manifest?.id,
-        tempPath: entry.manifest ? undefined : entry.tempPath,
-        decision,
-        title: editTitle,
-        newTagNames: tagNames,
-      });
-      if (!res.ok) {
-        setError(res.error.message || t('rpcError'));
-        return;
-      }
-      if (res.value.manifest) {
-        setSelectedKey(`m:${res.value.manifest.id}`);
-      }
-      if (res.value.ok) {
-        setMessage(decision === 'approved' ? 'Review approved (ready to move & index).' : 'Kept in temp.');
-      } else {
-        setError(res.value.message ?? res.value.code ?? 'Review failed');
-      }
-      await reloadManifests();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusyOp(null);
-    }
-  };
-
-  const handleCommit = async (manifest: IngestionManifest) => {
+  const handleMoveAndIndex = async (entry: UnifiedStagingEntry) => {
     setBusyOp('commit');
     setMessage(null);
     setError(null);
     try {
-      const res = await mediaLibrary.commitIngestion({ manifestId: manifest.id });
-      if (!res.ok) {
-        setError(res.error.message || t('rpcError'));
+      const tagNames = activeDraft.tagsText
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const reviewRes = await mediaLibrary.reviewIngestion({
+        manifestId: entry.manifest?.id,
+        tempPath: entry.manifest ? undefined : entry.tempPath,
+        decision: 'approved',
+        title: activeDraft.title,
+        mediaDate: activeDraft.mediaDate,
+        newTagNames: tagNames,
+      });
+      if (!reviewRes.ok) {
+        setError(reviewRes.error.message || t('rpcError'));
         return;
       }
-      if (res.value.ok) {
-        setMessage(res.value.message + (res.value.warning ? ` (${res.value.warning})` : ''));
-        setStagedFiles((prev) => prev.filter((f) => f.tempPath.toLowerCase() !== manifest.tempPath.toLowerCase()));
+      if (!reviewRes.value.ok || !reviewRes.value.manifest) {
+        setError(reviewRes.value.message ?? reviewRes.value.code ?? 'Review failed');
+        await reloadServerState();
+        return;
+      }
+
+      const approvedManifest = reviewRes.value.manifest;
+      clearDraft(entry.key);
+      clearDraft(`m:${approvedManifest.id}`);
+      setSelectedKey(`m:${approvedManifest.id}`);
+
+      const commitRes = await mediaLibrary.commitIngestion({ manifestId: approvedManifest.id });
+      if (!commitRes.ok) {
+        setError(commitRes.error.message || t('rpcError'));
+        await reloadServerState();
+        return;
+      }
+      if (commitRes.value.ok) {
+        clearDraft(`m:${approvedManifest.id}`);
+        setMessage(commitRes.value.message + (commitRes.value.warning ? ` (${commitRes.value.warning})` : ''));
+        const nextStaged = stagedFiles.filter(
+          (f) => f.tempPath.toLowerCase() !== approvedManifest.tempPath.toLowerCase(),
+        );
+        sessionCache.stagedFiles = nextStaged;
+        setStagedFiles(nextStaged);
         onCommitted();
       } else {
-        setError(`[${res.value.code ?? 'ERROR'}] ${res.value.message}`);
+        setError(`[${commitRes.value.code ?? 'ERROR'}] ${commitRes.value.message}`);
       }
-      await reloadManifests();
+      await reloadServerState();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -266,7 +351,9 @@ export function IngestionPanel({
               ? t('ingestionCommittingBtn')
               : busyOp === 'reject'
                 ? t('ingestionRejectBtn')
-                : null;
+                : runningHostTask
+                  ? runningHostTask.message || `${runningHostTask.op} running...`
+                  : null;
 
   return (
     <section
@@ -288,7 +375,7 @@ export function IngestionPanel({
             type="button"
             data-testid="ingestion-scan-btn"
             disabled={busy || degraded}
-            onClick={() => void handleScan()}
+            onClick={() => void runScan(false)}
             style={buttonStyle}
           >
             {busyOp === 'scan' ? t('ingestionScanningBtn') : t('ingestionScanBtn')}
@@ -374,8 +461,19 @@ export function IngestionPanel({
             <input
               type="text"
               data-testid="ingestion-title-input"
-              value={editTitle}
-              onChange={(e) => setEditTitle(e.target.value)}
+              value={activeDraft.title}
+              onChange={(e) => updateDraft(selected.key, { title: e.target.value }, serverFallback)}
+              style={controlStyle}
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <span>{t('ingestionDateLabel')}</span>
+            <input
+              type="text"
+              data-testid="ingestion-date-input"
+              placeholder="YYYY-MM-DD"
+              value={activeDraft.mediaDate}
+              onChange={(e) => updateDraft(selected.key, { mediaDate: e.target.value }, serverFallback)}
               style={controlStyle}
             />
           </label>
@@ -384,8 +482,8 @@ export function IngestionPanel({
             <input
               type="text"
               data-testid="ingestion-tags-input"
-              value={editTagsText}
-              onChange={(e) => setEditTagsText(e.target.value)}
+              value={activeDraft.tagsText}
+              onChange={(e) => updateDraft(selected.key, { tagsText: e.target.value }, serverFallback)}
               style={controlStyle}
             />
           </label>
@@ -401,29 +499,9 @@ export function IngestionPanel({
             </button>
             <button
               type="button"
-              data-testid="ingestion-approve-btn"
-              disabled={busy || degraded || selected.manifest?.state === 'indexed'}
-              onClick={() => void handleReview(selected, 'approved')}
-              style={buttonStyle}
-            >
-              {busyOp === 'approve' ? t('ingestionApprovingBtn') : t('ingestionApproveBtn')}
-            </button>
-            <button
-              type="button"
-              data-testid="ingestion-reject-btn"
-              disabled={busy || degraded || selected.manifest?.state === 'indexed'}
-              onClick={() => void handleReview(selected, 'rejected')}
-              style={buttonStyle}
-            >
-              {t('ingestionRejectBtn')}
-            </button>
-            <button
-              type="button"
               data-testid="ingestion-commit-btn"
-              disabled={busy || degraded || !selected.manifest}
-              onClick={() => {
-                if (selected.manifest) void handleCommit(selected.manifest);
-              }}
+              disabled={busy || degraded || selected.manifest?.state === 'indexed'}
+              onClick={() => void handleMoveAndIndex(selected)}
               style={buttonStyle}
             >
               {busyOp === 'commit' ? t('ingestionCommittingBtn') : t('ingestionCommitBtn')}

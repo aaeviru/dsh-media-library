@@ -12,6 +12,9 @@ import type {
   IngestionManifestTag,
   IngestionReviewDecision,
   IngestionState,
+  IngestionTask,
+  IngestionTaskOp,
+  IngestionTaskStatus,
   MediaRootConfig,
   ReconcileIngestionResult,
   ReviewIngestionInput,
@@ -396,6 +399,8 @@ export async function fetchMetadataForManifest(
       sourceUrl: '',
       title: null,
       writer: null,
+      actresses: [],
+      mediaDate: null,
       candidateTags: [],
       manifest: null,
     };
@@ -411,6 +416,8 @@ export async function fetchMetadataForManifest(
       sourceUrl: '',
       title: manifest.title,
       writer: null,
+      actresses: [],
+      mediaDate: manifest.mediaDate,
       candidateTags: [],
       manifest,
     };
@@ -426,6 +433,8 @@ export async function fetchMetadataForManifest(
       sourceUrl: lookup.sourceUrl,
       title: manifest.title,
       writer: null,
+      actresses: [],
+      mediaDate: manifest.mediaDate,
       candidateTags: [],
       manifest,
     };
@@ -452,11 +461,12 @@ export async function fetchMetadataForManifest(
   db.prepare(
     `UPDATE ingestion_manifests
      SET title = COALESCE(NULLIF(?, ''), title),
+         media_date = COALESCE(NULLIF(?, ''), media_date),
          tags_json = ?,
          metadata_source = ?,
          updated_at = ?
      WHERE id = ?`,
-  ).run(meta.title, JSON.stringify([...mergedTagNames.values()]), meta.sourceUrl, ts, manifest.id);
+  ).run(meta.title, meta.mediaDate ?? '', JSON.stringify([...mergedTagNames.values()]), meta.sourceUrl, ts, manifest.id);
 
   return {
     ok: true,
@@ -466,6 +476,8 @@ export async function fetchMetadataForManifest(
     sourceUrl: meta.sourceUrl,
     title: meta.title,
     writer: meta.writer || null,
+    actresses: meta.actresses,
+    mediaDate: meta.mediaDate,
     candidateTags: meta.candidateTags,
     manifest: getIngestionManifestById(db, manifest.id),
   };
@@ -591,7 +603,7 @@ function indexManifestIntoDatabase(
             manifest.catalogNumber,
             manifest.catalogNumber ? 'filename' : null,
             manifest.mediaDate,
-            manifest.mediaDate ? 'filename_or_path' : null,
+            manifest.mediaDate ? 'manual' : null,
             ts,
             manifest.fileSize,
             ts,
@@ -918,4 +930,92 @@ export function reconcileIngestionManifests(
     errors,
     manifests: listIngestionManifests(db),
   };
+}
+
+function mapTaskRow(row: Record<string, unknown>): IngestionTask {
+  return {
+    id: Number(row.id),
+    targetKey: String(row.target_key),
+    op: String(row.op) as IngestionTaskOp,
+    status: String(row.status) as IngestionTaskStatus,
+    message: String(row.message ?? ''),
+    startedAt: String(row.started_at),
+    finishedAt: row.finished_at !== null && row.finished_at !== undefined ? String(row.finished_at) : null,
+  };
+}
+
+export function listIngestionTasks(db: DatabaseSync, limit = 20): IngestionTask[] {
+  const safeLimit = Math.min(Math.max(Number(limit), 1), 100);
+  const rows = db
+    .prepare('SELECT * FROM ingestion_tasks ORDER BY id DESC LIMIT ?')
+    .all(safeLimit) as Array<Record<string, unknown>>;
+  return rows.map(mapTaskRow);
+}
+
+export function markInterruptedIngestionTasks(
+  db: DatabaseSync,
+  now: () => Date = () => new Date(),
+): number {
+  const exists = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingestion_tasks'")
+    .get();
+  if (!exists) return 0;
+  const ts = now().toISOString();
+  const info = db
+    .prepare(
+      `UPDATE ingestion_tasks
+       SET status = 'interrupted',
+           message = CASE WHEN message = '' THEN 'Host restarted while task was running; run Reconcile.' ELSE message || ' (interrupted by Host restart)' END,
+           finished_at = ?
+       WHERE status = 'running'`,
+    )
+    .run(ts);
+  return Number(info.changes);
+}
+
+export function startIngestionTask(
+  db: DatabaseSync,
+  targetKey: string,
+  op: IngestionTaskOp,
+  message: string,
+  now: () => Date = () => new Date(),
+): { readonly acquired: true; readonly taskId: number } | { readonly acquired: false; readonly existing: IngestionTask } {
+  const ts = now().toISOString();
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const running = db
+      .prepare("SELECT * FROM ingestion_tasks WHERE target_key = ? AND status = 'running' ORDER BY id DESC LIMIT 1")
+      .get(targetKey) as Record<string, unknown> | undefined;
+    if (running) {
+      db.exec('COMMIT;');
+      return { acquired: false, existing: mapTaskRow(running) };
+    }
+    const info = db
+      .prepare(
+        `INSERT INTO ingestion_tasks (target_key, op, status, message, started_at, finished_at)
+         VALUES (?, ?, 'running', ?, ?, NULL)`,
+      )
+      .run(targetKey, op, message, ts);
+    db.exec('COMMIT;');
+    return { acquired: true, taskId: Number(info.lastInsertRowid) };
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // Ignore rollback error
+    }
+    throw err;
+  }
+}
+
+export function finishIngestionTask(
+  db: DatabaseSync,
+  taskId: number,
+  status: 'succeeded' | 'failed',
+  message: string,
+  now: () => Date = () => new Date(),
+): void {
+  db.prepare(
+    `UPDATE ingestion_tasks SET status = ?, message = ?, finished_at = ? WHERE id = ?`,
+  ).run(status, message, now().toISOString(), taskId);
 }

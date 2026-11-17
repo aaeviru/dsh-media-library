@@ -30,13 +30,17 @@ import {
   defaultIngestionFileOps,
   ensureManifestForStagingFile,
   fetchMetadataForManifest,
+  finishIngestionTask,
   type IngestionFileOps,
   listIngestionManifests,
+  listIngestionTasks,
+  markInterruptedIngestionTasks,
   MetadataFetcher,
   normalizeTargetSubdir,
   reconcileIngestionManifests,
   reviewIngestionManifest,
   scanStagingDirectory,
+  startIngestionTask,
 } from './ingestion/index.ts';
 import {
   addAlias,
@@ -70,6 +74,7 @@ import type {
   ImportTagStudioInput,
   ImportTagStudioResult,
   IngestionManifest,
+  IngestionTask,
   LibraryOverview,
   ListTagsInput,
   ListTagsResult,
@@ -476,7 +481,7 @@ export class MediaLibrarySpikeService {
         const mig = await migrateDatabase(db, {
           dbPath,
           backupDir: this.backupDir,
-          appVersion: '0.5.0',
+          appVersion: '0.5.1',
           now: this.now,
         });
         if (!mig.health.ok) {
@@ -499,6 +504,8 @@ export class MediaLibrarySpikeService {
           healthOk: true,
           checkedAt,
         };
+
+        markInterruptedIngestionTasks(db, this.now);
 
         if (this.autoDailyBackup) {
           await maybeRunDailyAutoBackup({
@@ -769,7 +776,7 @@ export class MediaLibrarySpikeService {
       return await this.withInitializedDatabase((db) =>
         exportPortableMappingReport(db, {
           format: input.format,
-          appVersion: '0.5.0',
+          appVersion: '0.5.1',
           now: this.now,
         }),
       );
@@ -844,6 +851,10 @@ export class MediaLibrarySpikeService {
     return this.withInitializedDatabase((db) => listIngestionManifests(db));
   }
 
+  async listIngestionTasks(): Promise<IngestionTask[]> {
+    return this.withInitializedDatabase((db) => listIngestionTasks(db));
+  }
+
   async fetchIngestionMetadata(input: FetchIngestionMetadataInput): Promise<FetchedMetadataCandidate> {
     await this.initialize();
     if (this.degradedState.degraded) {
@@ -855,6 +866,8 @@ export class MediaLibrarySpikeService {
         sourceUrl: '',
         title: null,
         writer: null,
+        actresses: [],
+        mediaDate: null,
         candidateTags: [],
         manifest: null,
       };
@@ -863,6 +876,7 @@ export class MediaLibrarySpikeService {
     const { roots } = this.getEffectiveRootsAndItems();
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
     const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+    let taskId: number | null = null;
     try {
       let manifestId = input.manifestId;
       if (!manifestId && input.tempPath) {
@@ -885,11 +899,44 @@ export class MediaLibrarySpikeService {
           sourceUrl: '',
           title: null,
           writer: null,
+          actresses: [],
+          mediaDate: null,
           candidateTags: [],
           manifest: null,
         };
       }
-      return await fetchMetadataForManifest(db, manifestId, fetcher, this.now);
+      const targetKey = `manifest:${manifestId}`;
+      const lock = startIngestionTask(db, targetKey, 'fetch', `Fetching metadata for manifest #${manifestId}...`, this.now);
+      if (!lock.acquired) {
+        return {
+          ok: false,
+          provider: null,
+          category: 'client_error',
+          reason: `IN_PROGRESS: ${lock.existing.message || 'Task already running for this item.'}`,
+          sourceUrl: '',
+          title: null,
+          writer: null,
+          actresses: [],
+          mediaDate: null,
+          candidateTags: [],
+          manifest: null,
+        };
+      }
+      taskId = lock.taskId;
+      const res = await fetchMetadataForManifest(db, manifestId, fetcher, this.now);
+      finishIngestionTask(
+        db,
+        taskId,
+        res.ok ? 'succeeded' : 'failed',
+        res.ok ? `Fetched from ${res.provider}: ${res.title ?? ''}` : `[${res.category}] ${res.reason}`,
+        this.now,
+      );
+      return res;
+    } catch (err) {
+      if (taskId !== null) {
+        finishIngestionTask(db, taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
+      }
+      throw err;
     } finally {
       db.close();
     }
@@ -936,14 +983,30 @@ export class MediaLibrarySpikeService {
       };
     }
     const { roots } = this.getEffectiveRootsAndItems();
-    return this.withInitializedDatabase((db) =>
-      commitIngestionManifest(db, {
-        manifestId: input.manifestId,
-        roots,
-        fileOps: this.ingestionFileOps,
-        now: this.now,
-      }),
-    );
+    return this.withInitializedDatabase((db) => {
+      const targetKey = `manifest:${input.manifestId}`;
+      const lock = startIngestionTask(db, targetKey, 'commit', `Moving & indexing manifest #${input.manifestId}...`, this.now);
+      if (!lock.acquired) {
+        return {
+          ok: false,
+          code: 'IN_PROGRESS',
+          message: lock.existing.message || 'Move & index already in progress for this item.',
+        };
+      }
+      try {
+        const res = commitIngestionManifest(db, {
+          manifestId: input.manifestId,
+          roots,
+          fileOps: this.ingestionFileOps,
+          now: this.now,
+        });
+        finishIngestionTask(db, lock.taskId, res.ok ? 'succeeded' : 'failed', res.message, this.now);
+        return res;
+      } catch (err) {
+        finishIngestionTask(db, lock.taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
+        throw err;
+      }
+    });
   }
 
   async reconcileIngestion(): Promise<ReconcileIngestionResult> {
@@ -960,13 +1023,38 @@ export class MediaLibrarySpikeService {
       };
     }
     const { roots } = this.getEffectiveRootsAndItems();
-    return this.withInitializedDatabase((db) =>
-      reconcileIngestionManifests(db, {
-        roots,
-        fileOps: this.ingestionFileOps,
-        now: this.now,
-      }),
-    );
+    return this.withInitializedDatabase((db) => {
+      const lock = startIngestionTask(db, 'reconcile:all', 'reconcile', 'Reconciling interrupted ingestion manifests...', this.now);
+      if (!lock.acquired) {
+        return {
+          ok: false,
+          reconciledCount: 0,
+          copiedNotDeletedFixed: 0,
+          movedNotIndexedFixed: 0,
+          indexedButMissingMarked: 0,
+          errors: [lock.existing.message || 'Reconcile already in progress.'],
+          manifests: listIngestionManifests(db),
+        };
+      }
+      try {
+        const res = reconcileIngestionManifests(db, {
+          roots,
+          fileOps: this.ingestionFileOps,
+          now: this.now,
+        });
+        finishIngestionTask(
+          db,
+          lock.taskId,
+          res.ok ? 'succeeded' : 'failed',
+          res.ok ? `Reconciled ${res.reconciledCount} manifest(s).` : res.errors.join('; '),
+          this.now,
+        );
+        return res;
+      } catch (err) {
+        finishIngestionTask(db, lock.taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
+        throw err;
+      }
+    });
   }
 
   async importTagStudioCopy(input?: ImportTagStudioInput): Promise<ImportTagStudioResult> {
