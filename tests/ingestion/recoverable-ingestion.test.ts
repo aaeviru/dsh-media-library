@@ -206,6 +206,48 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
     assert.deepEqual(cookieRes.metadata?.actresses, ['ここあ']);
     assert.deepEqual(cookieRes.metadata?.candidateTags, ['ここあ', 'CreatorC', '巨乳']);
     assert.deepEqual(seenCookies, ['fc2cmadb-session=test-token', 'fc2cmadb-session=test-token']);
+
+    // Inertia v2 deferredProps (X-Inertia-Partial-Data: actresses) resolution works even without cookie.
+    const partialHeadersSeen: Array<Record<string, string>> = [];
+    const deferredFetcher = new MetadataFetcher({
+      retries: 1,
+      requestDelayMs: 0,
+      fetchImpl: async (url, init) => {
+        const hdrs = (init?.headers ?? {}) as Record<string, string>;
+        if (url.endsWith('/articles/5003320') && hdrs['X-Inertia'] === 'true') {
+          partialHeadersSeen.push(hdrs);
+          return {
+            status: 200,
+            ok: true,
+            text: async () =>
+              JSON.stringify({
+                component: 'Articles/Show',
+                props: { actresses: [{ id: 12502, name: 'ここあ' }] },
+              }),
+          };
+        }
+        if (url.endsWith('/articles/5003320')) {
+          return {
+            status: 200,
+            ok: true,
+            text: async () => `
+              <html><body><script data-page="app" type="application/json">
+                {"component":"Articles/Show","version":"v123","deferredProps":{"default":["actresses"]},"props":{"auth":{"user":null},"article":{"video_id":5003320,"title":"Deferred 5003320","release_date":"2026-11-06","writer":{"name":"CreatorD"},"tags":[{"name":"巨乳"}],"comments":[]}}}
+              </script></body></html>
+            `,
+          };
+        }
+        return { status: 404, ok: false, text: async () => 'Not Found' };
+      },
+    });
+    const deferredRes = await deferredFetcher.lookup('5003320');
+    assert.equal(deferredRes.category, 'ok');
+    assert.deepEqual(deferredRes.metadata?.actresses, ['ここあ']);
+    assert.deepEqual(deferredRes.metadata?.candidateTags, ['ここあ', 'CreatorD', '巨乳']);
+    assert.equal(partialHeadersSeen.length, 1);
+    assert.equal(partialHeadersSeen[0]?.['X-Inertia-Version'], 'v123');
+    assert.equal(partialHeadersSeen[0]?.['X-Inertia-Partial-Component'], 'Articles/Show');
+    assert.equal(partialHeadersSeen[0]?.['X-Inertia-Partial-Data'], 'actresses');
   });
 
   it('B4 & B5: lazy manifest on action, same-share rename + EXDEV copy fallback, idempotent replay, and 3 crash-point reconciles', async () => {

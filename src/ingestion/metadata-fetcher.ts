@@ -481,6 +481,7 @@ export class MetadataFetcher {
   private async fetchTextWithHeaders(
     url: string,
     cookieHeader: string,
+    extraHeaders?: Record<string, string>,
   ): Promise<
     { ok: true; status: number; body: string } | { ok: false; status: number | null; category: ProviderLookupResult['category']; reason: string }
   > {
@@ -492,6 +493,7 @@ export class MetadataFetcher {
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
         Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
         'Accept-Language': 'ja,en-US;q=0.8,en;q=0.6',
+        ...extraHeaders,
       };
       if (cookieHeader) headers.Cookie = cookieHeader;
 
@@ -518,6 +520,69 @@ export class MetadataFetcher {
       };
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  private async resolveCmadbDeferredActresses(sourceUrl: string, articleHtml: string): Promise<string[]> {
+    const scriptMatch =
+      /<script\b[^>]*data-page=["']app["'][^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/i.exec(
+        articleHtml,
+      ) ??
+      /<script\b[^>]*type=["']application\/json["'][^>]*data-page=["']app["'][^>]*>([\s\S]*?)<\/script>/i.exec(
+        articleHtml,
+      );
+    if (!scriptMatch) return [];
+
+    let component = '';
+    let version = '';
+    let partialKey = '';
+    try {
+      const payload = JSON.parse(decodeHtmlEntities(scriptMatch[1]!)) as {
+        component?: unknown;
+        version?: unknown;
+        deferredProps?: Record<string, unknown>;
+      };
+      component = typeof payload.component === 'string' ? payload.component : '';
+      version = typeof payload.version === 'string' ? payload.version : '';
+      if (payload.deferredProps && typeof payload.deferredProps === 'object') {
+        for (const group of Object.values(payload.deferredProps)) {
+          if (!Array.isArray(group)) continue;
+          const found = group.find((k) => k === 'actresses' || k === 'actress');
+          if (typeof found === 'string') {
+            partialKey = found;
+            break;
+          }
+        }
+      }
+    } catch {
+      return [];
+    }
+
+    if (!component || !version || !partialKey) return [];
+    if (this.requestDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, this.requestDelayMs));
+    }
+
+    const res = await this.fetchTextWithHeaders(sourceUrl, this.cmadbCookie, {
+      Accept: 'application/json',
+      'X-Inertia': 'true',
+      'X-Inertia-Version': version,
+      'X-Inertia-Partial-Component': component,
+      'X-Inertia-Partial-Data': partialKey,
+    });
+    if (!res.ok) return [];
+
+    try {
+      const partial = JSON.parse(res.body) as { props?: Record<string, unknown> };
+      const names = new Set<string>();
+      for (const key of [partialKey, 'actresses', 'actress']) {
+        for (const name of extractEntityNames(partial.props?.[key])) {
+          names.add(name);
+        }
+      }
+      return [...names];
+    } catch {
+      return [];
     }
   }
 
@@ -586,12 +651,15 @@ export class MetadataFetcher {
     if (primary.metadata) {
       let metadata = primary.metadata;
       if (metadata.actresses.length === 0 && primary.rawHtml) {
-        const linkedActresses = await this.resolveCmadbCommentActresses(primary.rawHtml);
-        if (linkedActresses.length > 0) {
-          const mergedTags = [...new Set([...linkedActresses, ...metadata.candidateTags])];
+        let resolvedActresses = await this.resolveCmadbDeferredActresses(primary.sourceUrl, primary.rawHtml);
+        if (resolvedActresses.length === 0) {
+          resolvedActresses = await this.resolveCmadbCommentActresses(primary.rawHtml);
+        }
+        if (resolvedActresses.length > 0) {
+          const mergedTags = [...new Set([...resolvedActresses, ...metadata.candidateTags])];
           metadata = {
             ...metadata,
-            actresses: linkedActresses,
+            actresses: resolvedActresses,
             candidateTags: mergedTags,
           };
         }
