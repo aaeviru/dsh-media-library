@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { migrateDatabase } from '../../src/db/schema.ts';
+import { DEFAULT_MIGRATIONS, migrateDatabase } from '../../src/db/schema.ts';
 import {
   commitIngestionManifest,
   defaultIngestionFileOps,
@@ -66,8 +66,8 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
 
       const db = new DatabaseSync(dbPath);
       try {
-        const mig = await migrateDatabase(db, { dbPath, appVersion: '0.5.0' });
-        assert.equal(mig.currentVersion, 4);
+        const mig = await migrateDatabase(db, { dbPath, appVersion: '0.5.2' });
+        assert.equal(mig.currentVersion, 5);
 
         const dryRun = await previewStagingPlan({
           stagingDir: tempDir,
@@ -313,6 +313,55 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
       const commit = await service.commitIngestion({ manifestId: 1 });
       assert.equal(commit.ok, false);
       assert.equal(commit.code, 'READ_ONLY_DEGRADED');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('upgrades an existing v4 database (without ingestion_tasks) to v5', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ingest-v4-to-v5-'));
+    try {
+      const { dbPath, roots } = setupEnv(tmpDir);
+      const db = new DatabaseSync(dbPath);
+      try {
+        const v4Only = DEFAULT_MIGRATIONS.filter((m) => m.version <= 4);
+        const resV4 = await migrateDatabase(db, {
+          dbPath,
+          appVersion: '0.5.0',
+          migrations: v4Only,
+        });
+        assert.equal(resV4.currentVersion, 4);
+        const beforeTable = db
+          .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ingestion_tasks'`)
+          .get();
+        assert.equal(beforeTable, undefined);
+      } finally {
+        db.close();
+      }
+
+      // Opening MediaLibrarySpikeService in 0.5.2 upgrades v4 -> v5 and creates ingestion_tasks.
+      const service = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        roots,
+        autoDailyBackup: false,
+      });
+      const tasks = await service.listIngestionTasks();
+      assert.deepEqual(tasks, []);
+
+      const dbAfter = new DatabaseSync(dbPath);
+      try {
+        const afterTable = dbAfter
+          .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ingestion_tasks'`)
+          .get() as { name: string } | undefined;
+        assert.equal(afterTable?.name, 'ingestion_tasks');
+        const versionRow = dbAfter
+          .prepare(`SELECT MAX(version) AS v FROM schema_versions`)
+          .get() as { v: number };
+        assert.equal(versionRow.v, 5);
+      } finally {
+        dbAfter.close();
+      }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
