@@ -183,7 +183,16 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         const preview1Again = evaluateManifestPerformers(db, m1.id);
         assert.equal(preview1Again.pendingReview.length, 2);
 
-        // Resolve ambiguous 'ここあ' -> bind to cocoaA ONLY for this video (do not remove ambiguity)
+        // Resolve ambiguous 'ここあ' -> bind to cocoaB first, then modify to cocoaA before commit!
+        const resAmbFirst = resolvePerformerReview(db, {
+          reviewId: ambiguousItem!.id,
+          mode: 'bind_existing',
+          tagId: cocoaB.tagId,
+          rememberRule: false,
+        });
+        assert.equal(resAmbFirst.ok, true);
+        assert.equal(resAmbFirst.item?.resolvedTagId, cocoaB.tagId);
+
         const resAmb = resolvePerformerReview(db, {
           reviewId: ambiguousItem!.id,
           mode: 'bind_existing',
@@ -191,6 +200,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
           rememberRule: false,
         });
         assert.equal(resAmb.ok, true);
+        assert.equal(resAmb.item?.resolvedTagId, cocoaA.tagId);
 
         // Resolve unknown '新人ちゃん' -> create new performer tag (`kind = 'performer'`) and remember durable rule
         const resUnk = resolvePerformerReview(db, {
@@ -307,6 +317,18 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         assert.equal(preview3.canCommit, false);
         assert.equal(preview3.pendingReview[0]?.reason, 'ambiguous');
         assert.equal(preview3.pendingReview[0]?.candidateTags[0]?.id, soloTag.tagId);
+
+        // Overriding an autoMatched performer via (manifestId + rawName) works cleanly before commit.
+        const skipAuto = resolvePerformerReview(db, {
+          manifestId: m3.id,
+          rawName: 'みな',
+          mode: 'skip',
+        });
+        assert.equal(skipAuto.ok, true);
+        const preview3Skipped = evaluateManifestPerformers(db, m3.id);
+        assert.equal(preview3Skipped.canCommit, true);
+        assert.equal(preview3Skipped.skippedEntries.length, 1);
+        assert.equal(preview3Skipped.skippedEntries[0]?.rawName, 'みな');
       } finally {
         db.close();
       }

@@ -21,6 +21,7 @@ import type {
   PerformerReviewItem,
   PerformerReviewReason,
   PerformerReviewStatus,
+  PerformerSkippedEntry,
   PromotePerformerTagInput,
   PromotePerformerTagResult,
   ResolvePerformerReviewInput,
@@ -376,6 +377,7 @@ export function evaluateManifestPerformers(
       autoMatched: [],
       humanResolved: [],
       skipped: [],
+      skippedEntries: [],
       pendingReview: [],
       normalTags: [],
     };
@@ -409,6 +411,7 @@ export function evaluateManifestPerformers(
   const autoMatched: PerformerPreviewEntry[] = [];
   const humanResolved: PerformerPreviewEntry[] = [];
   const skipped: string[] = [];
+  const skippedEntries: PerformerSkippedEntry[] = [];
 
   for (const rawName of rawActresses) {
     const trimmed = rawName.trim();
@@ -432,12 +435,18 @@ export function evaluateManifestPerformers(
       const qStatus = String(existingQueue.status) as PerformerReviewStatus;
       if (qStatus === 'skipped') {
         skipped.push(trimmed);
+        skippedEntries.push({
+          reviewId: Number(existingQueue.id),
+          rawName: trimmed,
+          normalizedName: norm,
+        });
         continue;
       }
       if (qStatus === 'resolved' && existingQueue.resolved_tag_id !== null && existingQueue.resolved_tag_id !== undefined) {
         if (!existingQueue.resolved_tag_archived && existingQueue.resolved_tag_name) {
           const tagId = Number(existingQueue.resolved_tag_id);
           humanResolved.push({
+            reviewId: Number(existingQueue.id),
             rawName: trimmed,
             normalizedName: norm,
             tagId,
@@ -475,6 +484,7 @@ export function evaluateManifestPerformers(
         db.prepare('DELETE FROM performer_review_queue WHERE id = ?').run(Number(existingQueue.id));
       }
       autoMatched.push({
+        reviewId: null,
         rawName: trimmed,
         normalizedName: norm,
         tagId: Number(match.tag_id),
@@ -522,13 +532,16 @@ export function evaluateManifestPerformers(
     autoMatched,
     humanResolved,
     skipped,
+    skippedEntries,
     pendingReview,
     normalTags,
   };
 }
 
 /**
- * Resolve a performer review queue item (`B3`, `B4` Option B):
+ * Resolve or modify a performer decision (`B3`, `B4` Option B):
+ * - Accepts either an existing `reviewId` (pending, resolved, or skipped) OR `{ manifestId, rawName }`
+ *   (to override an auto-matched performer before commit).
  * - `bind_existing`: bind to an existing active tag, optionally persisting `performer_aliases` (`auto` or `always_ask`).
  * - `create_performer_tag`: create a new tag with `kind = 'performer'` (or reuse active normalized match) and optionally save rule.
  * - `skip`: skip performer tagging for this manifest.
@@ -539,16 +552,45 @@ export function resolvePerformerReview(
   input: ResolvePerformerReviewInput,
   options?: RunMutationOptions,
 ): ResolvePerformerReviewResult {
-  if (!Number.isInteger(input.reviewId) || input.reviewId <= 0) {
-    return { ok: false, code: 'INVALID_INPUT', message: 'Invalid reviewId.' };
+  let targetReviewId: number | null =
+    input.reviewId !== undefined && Number.isInteger(input.reviewId) && input.reviewId > 0 ? input.reviewId : null;
+
+  if (targetReviewId !== null) {
+    const existingCheck = db
+      .prepare('SELECT id FROM performer_review_queue WHERE id = ?')
+      .get(targetReviewId) as { id: number } | undefined;
+    if (!existingCheck) {
+      return { ok: false, code: 'REVIEW_NOT_FOUND', message: `Performer review item #${targetReviewId} not found.` };
+    }
+  } else {
+    const manifestId = input.manifestId;
+    const rawName = (input.rawName ?? '').trim();
+    const norm = normalizePerformerName(rawName);
+    if (!manifestId || !Number.isInteger(manifestId) || manifestId <= 0 || !norm) {
+      return { ok: false, code: 'INVALID_INPUT', message: 'Provide either reviewId or (manifestId + rawName).' };
+    }
+    const manifestExists = db
+      .prepare('SELECT id, indexed_media_id FROM ingestion_manifests WHERE id = ?')
+      .get(manifestId) as { id: number; indexed_media_id: number | null } | undefined;
+    if (!manifestExists) {
+      return { ok: false, code: 'REVIEW_NOT_FOUND', message: `Manifest #${manifestId} not found.` };
+    }
+    const ts = (options?.now ? options.now() : new Date()).toISOString();
+    db.prepare(
+      `INSERT INTO performer_review_queue
+         (manifest_id, media_id, raw_name, normalized_name, reason, candidate_tag_ids_json, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'unknown', '[]', 'pending', ?, ?)
+       ON CONFLICT(manifest_id, normalized_name) DO UPDATE SET
+         raw_name = excluded.raw_name,
+         updated_at = excluded.updated_at`,
+    ).run(manifestId, manifestExists.indexed_media_id ?? null, rawName, norm, ts, ts);
+    const upserted = db
+      .prepare('SELECT id FROM performer_review_queue WHERE manifest_id = ? AND normalized_name = ? LIMIT 1')
+      .get(manifestId, norm) as { id: number };
+    targetReviewId = Number(upserted.id);
   }
 
-  const existingCheck = db
-    .prepare('SELECT id FROM performer_review_queue WHERE id = ?')
-    .get(input.reviewId) as { id: number } | undefined;
-  if (!existingCheck) {
-    return { ok: false, code: 'REVIEW_NOT_FOUND', message: `Performer review item #${input.reviewId} not found.` };
-  }
+  const effectiveReviewId = targetReviewId;
 
   const outcome = runMutation(
     db,
@@ -561,9 +603,9 @@ export function resolvePerformerReview(
            LEFT JOIN ingestion_manifests m ON m.id = q.manifest_id
            WHERE q.id = ?`,
         )
-        .get(input.reviewId) as Record<string, unknown> | undefined;
+        .get(effectiveReviewId) as Record<string, unknown> | undefined;
       if (!row) {
-        abort('TAG_NOT_FOUND', `Performer review item #${input.reviewId} not found.`);
+        abort('TAG_NOT_FOUND', `Performer review item #${effectiveReviewId} not found.`);
       }
 
       const rawName = String(row.raw_name);
@@ -588,7 +630,7 @@ export function resolvePerformerReview(
              SET status = 'skipped', resolution_mode = 'skip', resolved_tag_id = NULL, updated_at = ?
              WHERE id = ?`,
           )
-          .run(env.now, input.reviewId);
+          .run(env.now, effectiveReviewId);
       } else if (input.mode === 'bind_existing') {
         if (!Number.isInteger(input.tagId) || (input.tagId ?? 0) <= 0) {
           abort('INVALID_INPUT', 'tagId is required for bind_existing.');
@@ -616,7 +658,7 @@ export function resolvePerformerReview(
              SET status = 'resolved', resolution_mode = 'bind_existing', resolved_tag_id = ?, updated_at = ?
              WHERE id = ?`,
           )
-          .run(resolvedTagId, env.now, input.reviewId);
+          .run(resolvedTagId, env.now, effectiveReviewId);
       } else if (input.mode === 'create_performer_tag') {
         const tagName = (input.newTagName ?? rawName).trim();
         const tagNorm = normalizeLabel(tagName);
@@ -661,7 +703,7 @@ export function resolvePerformerReview(
              SET status = 'resolved', resolution_mode = 'create_performer_tag', resolved_tag_id = ?, updated_at = ?
              WHERE id = ?`,
           )
-          .run(resolvedTagId, env.now, input.reviewId);
+          .run(resolvedTagId, env.now, effectiveReviewId);
       } else {
         abort('INVALID_INPUT', `Unsupported resolution mode "${String(input.mode)}".`);
       }
@@ -682,7 +724,7 @@ export function resolvePerformerReview(
 
       return {
         payload: {
-          reviewId: input.reviewId,
+          reviewId: effectiveReviewId,
           manifestId,
           mediaId: targetMediaId,
           rawName,
@@ -706,7 +748,7 @@ export function resolvePerformerReview(
   }
   return {
     ok: true,
-    item: getPerformerReviewItemById(db, input.reviewId),
+    item: getPerformerReviewItemById(db, effectiveReviewId),
     createdTagId: outcome.createdTagId,
   };
 }

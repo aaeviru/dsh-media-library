@@ -30,6 +30,7 @@ import type {
   MergePreviewResult,
   MergeTagsInput,
   MergeTagsResult,
+  OpenStagingFileInput,
   OpsStatus,
   PerformerAliasRecord,
   PerformerReviewItem,
@@ -306,6 +307,14 @@ export class MediaLibraryRemote extends TypertRemoteService {
   @Remote('reconcileIngestion')
   async reconcileIngestion(): Promise<ReconcileIngestionResult> {
     return this.spikeService.reconcileIngestion();
+  }
+
+  /**
+   * Open a video file currently inside the Host-configured staging temp folder using the native player.
+   */
+  @Remote('openStagingFile')
+  async openStagingFile(input: OpenStagingFileInput): Promise<MediaActionResult> {
+    return this.spikeService.openStagingFile(input);
   }
 
   /**

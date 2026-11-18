@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type {
   ManifestPerformerPreview,
   PerformerAliasRecord,
+  PerformerCandidateTag,
   PerformerReviewItem,
   TagSummary,
 } from '../types.ts';
@@ -17,39 +18,55 @@ function reasonLabel(t: Translate, reason: PerformerReviewItem['reason']): strin
   return t('performerPendingReasonUnknown');
 }
 
-function PendingReviewRow({
+interface PerformerPickerTarget {
+  readonly key: string;
+  readonly reviewId: number | null;
+  readonly manifestId: number | null;
+  readonly manifestFilename: string | null;
+  readonly rawName: string;
+  readonly headingText: string;
+  readonly candidateTags: readonly PerformerCandidateTag[];
+  readonly initialTagId: number;
+  readonly defaultRememberRule: boolean;
+  readonly defaultAlwaysAsk: boolean;
+}
+
+/**
+ * Search + clickable suggestion pill picker (no native `<select>` dropdown).
+ * Used both for pending performer review rows and for editing already-selected/skipped performers.
+ */
+function PerformerTagPickerEditor({
   t,
-  item,
+  target,
   mediaLibrary,
   disabled,
   onResolved,
   onError,
+  onCancel,
 }: {
   t: Translate;
-  item: PerformerReviewItem;
+  target: PerformerPickerTarget;
   mediaLibrary: MediaLibraryNamespace;
   disabled: boolean;
   onResolved: (msg: string) => void;
   onError: (msg: string) => void;
+  onCancel?: (() => void) | undefined;
 }) {
   const [searchText, setSearchText] = useState('');
   const [options, setOptions] = useState<readonly TagSummary[]>([]);
-  const [selectedTagId, setSelectedTagId] = useState<number>(item.candidateTags[0]?.id ?? 0);
-  const [rememberRule, setRememberRule] = useState<boolean>(item.reason !== 'ambiguous');
-  const [alwaysAsk, setAlwaysAsk] = useState<boolean>(item.reason === 'ambiguous');
+  const [selectedTagId, setSelectedTagId] = useState<number>(target.initialTagId);
+  const [rememberRule, setRememberRule] = useState<boolean>(target.defaultRememberRule);
+  const [alwaysAsk, setAlwaysAsk] = useState<boolean>(target.defaultAlwaysAsk);
   const [working, setWorking] = useState(false);
 
   useEffect(() => {
     let active = true;
     const timer = setTimeout(() => {
       void mediaLibrary
-        .listTags({ query: searchText.trim() || undefined, limit: 25 })
+        .listTags({ query: searchText.trim() || undefined, limit: 16 })
         .then((res) => {
           if (!active || !res.ok) return;
           setOptions(res.value.tags);
-          if (selectedTagId === 0 && res.value.tags.length > 0 && item.candidateTags.length === 0) {
-            setSelectedTagId(res.value.tags[0]!.id);
-          }
         })
         .catch(() => undefined);
     }, 120);
@@ -57,28 +74,30 @@ function PendingReviewRow({
       active = false;
       clearTimeout(timer);
     };
-  }, [item.candidateTags.length, mediaLibrary, searchText, selectedTagId]);
+  }, [mediaLibrary, searchText]);
 
-  const mergedOptions: Array<{ id: number; name: string; kind: string }> = [];
+  const mergedOptions: Array<{ id: number; name: string; isCandidate: boolean }> = [];
   const seenIds = new Set<number>();
-  for (const c of item.candidateTags) {
+  for (const c of target.candidateTags) {
     seenIds.add(c.id);
-    mergedOptions.push(c);
+    mergedOptions.push({ id: c.id, name: c.name, isCandidate: true });
   }
   for (const o of options) {
     if (seenIds.has(o.id)) continue;
     seenIds.add(o.id);
-    mergedOptions.push({ id: o.id, name: o.name, kind: '' });
+    mergedOptions.push({ id: o.id, name: o.name, isCandidate: false });
   }
 
   const runResolve = async (mode: 'bind_existing' | 'create_performer_tag' | 'skip') => {
     setWorking(true);
     try {
       const res = await mediaLibrary.resolvePerformerReview({
-        reviewId: item.id,
+        reviewId: target.reviewId ?? undefined,
+        manifestId: target.reviewId === null ? (target.manifestId ?? undefined) : undefined,
+        rawName: target.reviewId === null ? target.rawName : undefined,
         mode,
         tagId: mode === 'bind_existing' ? selectedTagId : undefined,
-        newTagName: mode === 'create_performer_tag' ? item.rawName : undefined,
+        newTagName: mode === 'create_performer_tag' ? target.rawName : undefined,
         rememberRule: mode === 'skip' ? false : rememberRule,
         rulePolicy: alwaysAsk ? 'always_ask' : 'auto',
       });
@@ -92,8 +111,8 @@ function PendingReviewRow({
       }
       onResolved(
         mode === 'skip'
-          ? `Skipped performer "${item.rawName}".`
-          : `Confirmed performer "${item.rawName}" -> ${res.value.item?.resolvedTagName ?? `#${selectedTagId}`}.`,
+          ? `Skipped performer "${target.rawName}".`
+          : `Confirmed performer "${target.rawName}" -> ${res.value.item?.resolvedTagName ?? `#${selectedTagId}`}.`,
       );
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));
@@ -104,7 +123,7 @@ function PendingReviewRow({
 
   return (
     <div
-      data-testid={`performer-pending-row-${item.id}`}
+      data-testid={`performer-picker-${target.key}`}
       style={{
         padding: '8px 10px',
         borderRadius: '6px',
@@ -117,60 +136,72 @@ function PendingReviewRow({
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
         <span>
-          <strong>⚠ {item.rawName}</strong>{' '}
-          <span style={{ opacity: 0.85 }}>({reasonLabel(t, item.reason)})</span>
-          {item.manifestFilename ? (
-            <span style={{ opacity: 0.72, marginLeft: '6px' }}>· {item.manifestFilename}</span>
+          <strong>{target.headingText}</strong>
+          {target.manifestFilename ? (
+            <span style={{ opacity: 0.72, marginLeft: '6px' }}>· {target.manifestFilename}</span>
           ) : null}
         </span>
+        {onCancel ? (
+          <button
+            type="button"
+            disabled={working}
+            onClick={onCancel}
+            style={{ ...buttonStyle, padding: '2px 8px' }}
+          >
+            {t('performerCancelEditBtn')}
+          </button>
+        ) : null}
       </div>
 
-      {item.candidateTags.length > 0 ? (
-        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
-          {item.candidateTags.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              disabled={disabled || working}
-              onClick={() => setSelectedTagId(c.id)}
-              style={{
-                ...buttonStyle,
-                padding: '2px 8px',
-                borderColor: selectedTagId === c.id ? 'rgba(59,130,246,0.9)' : undefined,
-                background: selectedTagId === c.id ? 'rgba(59,130,246,0.18)' : undefined,
-              }}
-            >
-              #{c.id} {c.name}
-            </button>
-          ))}
-        </div>
-      ) : null}
+      <input
+        type="text"
+        data-testid={`performer-tag-search-${target.key}`}
+        placeholder={t('performerSearchTagPlaceholder')}
+        value={searchText}
+        onChange={(e) => setSearchText(e.target.value)}
+        disabled={disabled || working}
+        style={controlStyle}
+      />
 
-      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
-        <input
-          type="text"
-          data-testid={`performer-tag-search-${item.id}`}
-          placeholder={t('performerSearchTagPlaceholder')}
-          value={searchText}
-          onChange={(e) => setSearchText(e.target.value)}
-          disabled={disabled || working}
-          style={{ ...controlStyle, minWidth: '150px', flex: '1 1 150px' }}
-        />
-        <select
-          data-testid={`performer-tag-select-${item.id}`}
-          value={selectedTagId || ''}
-          onChange={(e) => setSelectedTagId(Number(e.target.value) || 0)}
-          disabled={disabled || working || mergedOptions.length === 0}
-          style={{ ...controlStyle, minWidth: '160px', flex: '1 1 160px' }}
+      {mergedOptions.length === 0 ? (
+        <span style={{ opacity: 0.72 }}>{t('performerNoMatchingTags')}</span>
+      ) : (
+        <div
+          data-testid={`performer-tag-pills-${target.key}`}
+          style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center', maxHeight: '110px', overflowY: 'auto' }}
         >
-          {mergedOptions.length === 0 ? <option value="">--</option> : null}
-          {mergedOptions.map((o) => (
-            <option key={o.id} value={o.id}>
-              #{o.id} {o.name}{o.kind ? ` (${o.kind})` : ''}
-            </option>
-          ))}
-        </select>
-      </div>
+          {mergedOptions.map((o) => {
+            const isSelected = selectedTagId === o.id;
+            return (
+              <button
+                key={o.id}
+                type="button"
+                data-testid={`performer-tag-pill-${o.id}`}
+                disabled={disabled || working}
+                onClick={() => setSelectedTagId(o.id)}
+                style={{
+                  ...buttonStyle,
+                  padding: '2px 9px',
+                  borderRadius: '999px',
+                  borderColor: isSelected
+                    ? 'rgba(59,130,246,0.95)'
+                    : o.isCandidate
+                      ? 'rgba(245,158,11,0.75)'
+                      : undefined,
+                  background: isSelected
+                    ? 'rgba(59,130,246,0.22)'
+                    : o.isCandidate
+                      ? 'rgba(245,158,11,0.12)'
+                      : undefined,
+                  fontWeight: isSelected ? 600 : 400,
+                }}
+              >
+                {isSelected ? '✓ ' : ''}#{o.id} {o.name}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
@@ -195,7 +226,7 @@ function PendingReviewRow({
         ) : null}
         <button
           type="button"
-          data-testid={`performer-bind-btn-${item.id}`}
+          data-testid={`performer-bind-btn-${target.key}`}
           disabled={disabled || working || selectedTagId <= 0}
           onClick={() => void runResolve('bind_existing')}
           style={buttonStyle}
@@ -204,7 +235,7 @@ function PendingReviewRow({
         </button>
         <button
           type="button"
-          data-testid={`performer-create-btn-${item.id}`}
+          data-testid={`performer-create-btn-${target.key}`}
           disabled={disabled || working}
           onClick={() => void runResolve('create_performer_tag')}
           style={buttonStyle}
@@ -213,7 +244,7 @@ function PendingReviewRow({
         </button>
         <button
           type="button"
-          data-testid={`performer-skip-btn-${item.id}`}
+          data-testid={`performer-skip-btn-${target.key}`}
           disabled={disabled || working}
           onClick={() => void runResolve('skip')}
           style={buttonStyle}
@@ -223,6 +254,21 @@ function PendingReviewRow({
       </div>
     </div>
   );
+}
+
+function toPendingTarget(t: Translate, item: PerformerReviewItem): PerformerPickerTarget {
+  return {
+    key: `r-${item.id}`,
+    reviewId: item.id,
+    manifestId: item.manifestId,
+    manifestFilename: item.manifestFilename,
+    rawName: item.rawName,
+    headingText: `⚠ ${item.rawName} (${reasonLabel(t, item.reason)})`,
+    candidateTags: item.candidateTags,
+    initialTagId: item.candidateTags[0]?.id ?? 0,
+    defaultRememberRule: item.reason !== 'ambiguous',
+    defaultAlwaysAsk: item.reason === 'ambiguous',
+  };
 }
 
 export function PerformerInlineCard({
@@ -240,13 +286,31 @@ export function PerformerInlineCard({
   onChanged: (msg: string) => void;
   onError: (msg: string) => void;
 }) {
+  const [editingTarget, setEditingTarget] = useState<PerformerPickerTarget | null>(null);
+
+  useEffect(() => {
+    setEditingTarget(null);
+  }, [preview.manifestId]);
+
   const hasAny =
     preview.autoMatched.length > 0 ||
     preview.humanResolved.length > 0 ||
     preview.pendingReview.length > 0 ||
-    preview.skipped.length > 0;
+    preview.skippedEntries.length > 0;
 
   if (!hasAny) return null;
+
+  const chipEditBtnStyle = {
+    border: 'none',
+    background: 'transparent',
+    color: 'inherit',
+    cursor: 'pointer',
+    textDecoration: 'underline',
+    padding: '0 2px',
+    marginLeft: '4px',
+    fontSize: '11px',
+    opacity: 0.85,
+  } as const;
 
   return (
     <div
@@ -262,20 +326,47 @@ export function PerformerInlineCard({
     >
       <strong>{t('performerSectionHeading')}</strong>
 
-      {(preview.autoMatched.length > 0 || preview.humanResolved.length > 0 || preview.skipped.length > 0) ? (
+      {(preview.autoMatched.length > 0 || preview.humanResolved.length > 0 || preview.skippedEntries.length > 0) ? (
         <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
           {preview.autoMatched.map((m) => (
             <span
               key={`auto-${m.normalizedName}-${m.tagId}`}
               data-testid={`performer-auto-chip-${m.tagId}`}
               style={{
+                display: 'inline-flex',
+                alignItems: 'center',
                 padding: '2px 8px',
                 borderRadius: '999px',
                 border: '1px solid rgba(34,197,94,0.6)',
                 background: 'rgba(34,197,94,0.12)',
               }}
             >
-              ✓ {m.rawName} → #{m.tagId} {m.tagName} ({t('performerAutoMatched')})
+              <span>
+                ✓ {m.rawName} → #{m.tagId} {m.tagName} ({t('performerAutoMatched')})
+              </span>
+              {!disabled ? (
+                <button
+                  type="button"
+                  data-testid={`performer-edit-auto-${m.tagId}`}
+                  onClick={() =>
+                    setEditingTarget({
+                      key: `auto-${m.normalizedName}`,
+                      reviewId: null,
+                      manifestId: preview.manifestId,
+                      manifestFilename: null,
+                      rawName: m.rawName,
+                      headingText: `${t('performerEditBtn')}: ${m.rawName}`,
+                      candidateTags: [{ id: m.tagId, name: m.tagName, kind: 'performer' }],
+                      initialTagId: m.tagId,
+                      defaultRememberRule: false,
+                      defaultAlwaysAsk: false,
+                    })
+                  }
+                  style={chipEditBtnStyle}
+                >
+                  {t('performerEditBtn')}
+                </button>
+              ) : null}
             </span>
           ))}
           {preview.humanResolved.map((m) => (
@@ -283,36 +374,107 @@ export function PerformerInlineCard({
               key={`human-${m.normalizedName}-${m.tagId}`}
               data-testid={`performer-human-chip-${m.tagId}`}
               style={{
+                display: 'inline-flex',
+                alignItems: 'center',
                 padding: '2px 8px',
                 borderRadius: '999px',
                 border: '1px solid rgba(59,130,246,0.6)',
                 background: 'rgba(59,130,246,0.12)',
               }}
             >
-              ✓ {m.rawName} → #{m.tagId} {m.tagName} ({t('performerHumanConfirmed')})
+              <span>
+                ✓ {m.rawName} → #{m.tagId} {m.tagName} ({t('performerHumanConfirmed')})
+              </span>
+              {!disabled ? (
+                <button
+                  type="button"
+                  data-testid={`performer-edit-human-${m.tagId}`}
+                  onClick={() =>
+                    setEditingTarget({
+                      key: `human-${m.reviewId ?? m.normalizedName}`,
+                      reviewId: m.reviewId,
+                      manifestId: preview.manifestId,
+                      manifestFilename: null,
+                      rawName: m.rawName,
+                      headingText: `${t('performerEditBtn')}: ${m.rawName}`,
+                      candidateTags: [{ id: m.tagId, name: m.tagName, kind: 'performer' }],
+                      initialTagId: m.tagId,
+                      defaultRememberRule: false,
+                      defaultAlwaysAsk: false,
+                    })
+                  }
+                  style={chipEditBtnStyle}
+                >
+                  {t('performerEditBtn')}
+                </button>
+              ) : null}
             </span>
           ))}
-          {preview.skipped.map((name) => (
+          {preview.skippedEntries.map((s) => (
             <span
-              key={`skip-${name}`}
+              key={`skip-${s.reviewId}`}
+              data-testid={`performer-skipped-chip-${s.reviewId}`}
               style={{
+                display: 'inline-flex',
+                alignItems: 'center',
                 padding: '2px 8px',
                 borderRadius: '999px',
                 border: '1px solid rgba(128,128,128,0.4)',
-                opacity: 0.72,
+                opacity: 0.82,
               }}
             >
-              {t('performerSkipped')}: {name}
+              <span>
+                {t('performerSkipped')}: {s.rawName}
+              </span>
+              {!disabled ? (
+                <button
+                  type="button"
+                  data-testid={`performer-edit-skipped-${s.reviewId}`}
+                  onClick={() =>
+                    setEditingTarget({
+                      key: `skip-${s.reviewId}`,
+                      reviewId: s.reviewId,
+                      manifestId: preview.manifestId,
+                      manifestFilename: null,
+                      rawName: s.rawName,
+                      headingText: `${t('performerEditBtn')}: ${s.rawName}`,
+                      candidateTags: [],
+                      initialTagId: 0,
+                      defaultRememberRule: true,
+                      defaultAlwaysAsk: false,
+                    })
+                  }
+                  style={chipEditBtnStyle}
+                >
+                  {t('performerEditBtn')}
+                </button>
+              ) : null}
             </span>
           ))}
         </div>
       ) : null}
 
+      {editingTarget ? (
+        <PerformerTagPickerEditor
+          key={editingTarget.key}
+          t={t}
+          target={editingTarget}
+          mediaLibrary={mediaLibrary}
+          disabled={disabled}
+          onResolved={(msg) => {
+            setEditingTarget(null);
+            onChanged(msg);
+          }}
+          onError={onError}
+          onCancel={() => setEditingTarget(null)}
+        />
+      ) : null}
+
       {preview.pendingReview.map((item) => (
-        <PendingReviewRow
+        <PerformerTagPickerEditor
           key={item.id}
           t={t}
-          item={item}
+          target={toPendingTarget(t, item)}
           mediaLibrary={mediaLibrary}
           disabled={disabled}
           onResolved={onChanged}
@@ -393,10 +555,10 @@ export function PerformerDrawer({
           <span style={{ opacity: 0.72 }}>{t('performerNoPending')}</span>
         ) : (
           pendingQueue.map((item) => (
-            <PendingReviewRow
+            <PerformerTagPickerEditor
               key={item.id}
               t={t}
-              item={item}
+              target={toPendingTarget(t, item)}
               mediaLibrary={mediaLibrary}
               disabled={disabled}
               onResolved={onChanged}

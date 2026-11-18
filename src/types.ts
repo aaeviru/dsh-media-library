@@ -499,6 +499,10 @@ export interface CommitIngestionInput {
   readonly manifestId: number;
 }
 
+export interface OpenStagingFileInput {
+  readonly relativePath: string;
+}
+
 export interface CommitIngestionResult {
   readonly ok: boolean;
   readonly code?: 'REVIEW_REQUIRED' | 'PERFORMER_REVIEW_REQUIRED' | 'READ_ONLY_DEGRADED' | 'MANIFEST_NOT_FOUND' | 'MOVE_FAILED' | 'INDEX_FAILED' | 'CHECKSUM_MISMATCH' | 'IN_PROGRESS' | MediaActionErrorCode | undefined;
@@ -581,6 +585,7 @@ export interface PerformerReviewItem {
 }
 
 export interface PerformerPreviewEntry {
+  readonly reviewId: number | null;
   readonly rawName: string;
   readonly normalizedName: string;
   readonly tagId: number;
@@ -589,6 +594,12 @@ export interface PerformerPreviewEntry {
   readonly confidence: number | null;
   readonly resolutionMode: PerformerResolutionMode | null;
   readonly alreadyManual: boolean;
+}
+
+export interface PerformerSkippedEntry {
+  readonly reviewId: number;
+  readonly rawName: string;
+  readonly normalizedName: string;
 }
 
 export interface NormalTagPreviewEntry {
@@ -604,6 +615,7 @@ export interface ManifestPerformerPreview {
   readonly autoMatched: readonly PerformerPreviewEntry[];
   readonly humanResolved: readonly PerformerPreviewEntry[];
   readonly skipped: readonly string[];
+  readonly skippedEntries: readonly PerformerSkippedEntry[];
   readonly pendingReview: readonly PerformerReviewItem[];
   readonly normalTags: readonly NormalTagPreviewEntry[];
 }
@@ -642,7 +654,9 @@ export interface ListPerformerReviewInput {
 }
 
 export interface ResolvePerformerReviewInput {
-  readonly reviewId: number;
+  readonly reviewId?: number | undefined;
+  readonly manifestId?: number | undefined;
+  readonly rawName?: string | undefined;
   readonly mode: PerformerResolutionMode;
   readonly tagId?: number | undefined;
   readonly newTagName?: string | undefined;

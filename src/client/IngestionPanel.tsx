@@ -14,7 +14,7 @@ import type { MediaLibraryNamespace } from './namespace.ts';
 
 type Translate = (key: MediaLibraryKey) => string;
 
-type BusyOp = null | 'scan' | 'reconcile' | 'fetch' | 'approve' | 'reject' | 'commit';
+type BusyOp = null | 'scan' | 'reconcile' | 'fetch' | 'play' | 'approve' | 'reject' | 'commit';
 
 interface DraftFields {
   title: string;
@@ -43,6 +43,7 @@ const sessionCache: {
 interface UnifiedStagingEntry {
   readonly key: string;
   readonly filename: string;
+  readonly relativePath: string;
   readonly tempPath: string;
   readonly targetRelativePath: string;
   readonly catalogNumber: string | null;
@@ -206,36 +207,22 @@ export function IngestionPanel({
     const byManifestId = new Map<number, IngestionManifest>();
     for (const m of manifests) byManifestId.set(m.id, m);
 
-    const seenManifestIds = new Set<number>();
+    // Show only files currently present in the temp staging folder (exclude already-moved history).
     const list: UnifiedStagingEntry[] = [];
-
     for (const file of stagedFiles) {
       const matched =
         (file.manifestId !== null ? byManifestId.get(file.manifestId) : undefined) ??
         manifests.find((m) => m.tempPath.toLowerCase() === file.tempPath.toLowerCase()) ??
         null;
-      if (matched) seenManifestIds.add(matched.id);
       list.push({
         key: matched ? `m:${matched.id}` : `f:${file.tempPath}`,
         filename: file.filename,
+        relativePath: file.relativePath,
         tempPath: file.tempPath,
         targetRelativePath: matched?.targetRelativePath ?? file.targetRelativePath,
         catalogNumber: matched?.catalogNumber ?? file.catalogNumber,
         fileSize: file.fileSize,
         manifest: matched,
-      });
-    }
-
-    for (const m of manifests) {
-      if (seenManifestIds.has(m.id)) continue;
-      list.push({
-        key: `m:${m.id}`,
-        filename: m.filename,
-        tempPath: m.tempPath,
-        targetRelativePath: m.targetRelativePath,
-        catalogNumber: m.catalogNumber,
-        fileSize: m.fileSize,
-        manifest: m,
       });
     }
     return list;
@@ -344,6 +331,31 @@ export function IngestionPanel({
     }
   };
 
+  const handlePlay = async (entry: UnifiedStagingEntry) => {
+    setBusyOp('play');
+    setMessage(null);
+    setError(null);
+    try {
+      const res =
+        entry.manifest?.state === 'indexed' && entry.manifest.indexedMediaId !== null
+          ? await mediaLibrary.openMedia(String(entry.manifest.indexedMediaId))
+          : await mediaLibrary.openStagingFile({ relativePath: entry.relativePath });
+      if (!res.ok) {
+        setError(res.error.message || t('rpcError'));
+        return;
+      }
+      if (res.value.ok) {
+        setMessage(`Opened ${entry.filename}`);
+      } else {
+        setError(`[${res.value.code}] ${res.value.message}`);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyOp(null);
+    }
+  };
+
   const handleFetch = async (entry: UnifiedStagingEntry) => {
     setBusyOp('fetch');
     setMessage(null);
@@ -415,11 +427,6 @@ export function IngestionPanel({
       if (commitRes.value.ok) {
         clearDraft(`m:${approvedManifest.id}`);
         setMessage(commitRes.value.message + (commitRes.value.warning ? ` (${commitRes.value.warning})` : ''));
-        const nextStaged = stagedFiles.filter(
-          (f) => f.tempPath.toLowerCase() !== approvedManifest.tempPath.toLowerCase(),
-        );
-        sessionCache.stagedFiles = nextStaged;
-        setStagedFiles(nextStaged);
         onCommitted();
       } else {
         setError(`[${commitRes.value.code ?? 'ERROR'}] ${commitRes.value.message}`);
@@ -683,6 +690,15 @@ export function IngestionPanel({
             </div>
           ) : null}
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              data-testid="ingestion-play-btn"
+              disabled={busy}
+              onClick={() => void handlePlay(selected)}
+              style={buttonStyle}
+            >
+              {busyOp === 'play' ? t('ingestionPlayingBtn') : t('ingestionPlayBtn')}
+            </button>
             <button
               type="button"
               data-testid="ingestion-fetch-btn"

@@ -599,4 +599,47 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('openStagingFile plays video strictly inside stagingDir and rejects traversal/non-video paths', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ingest-play-'));
+    try {
+      const stagingDir = path.join(tmpDir, 'temp');
+      fs.mkdirSync(stagingDir, { recursive: true });
+      const sampleVideo = path.join(stagingDir, 'FC2-PPV-5006891.mp4');
+      fs.writeFileSync(sampleVideo, 'video-bytes');
+
+      const openedPaths: string[] = [];
+      const service = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        configuredUncRoot: '\\\\TestNAS\\Media',
+        configuredStagingDir: stagingDir,
+        autoDailyBackup: false,
+        fileProbe: async (p) => (fs.existsSync(p) ? { ok: true } : { ok: false, code: 'FILE_NOT_FOUND' }),
+        opener: {
+          async openPath(p) {
+            openedPaths.push(p);
+          },
+          async revealPath() {},
+        },
+      });
+
+      const okRes = await service.openStagingFile({ relativePath: 'FC2-PPV-5006891.mp4' });
+      assert.equal(okRes.ok, true);
+      assert.deepEqual(openedPaths, [path.resolve(sampleVideo)]);
+
+      const traversal = await service.openStagingFile({ relativePath: '../secret.mp4' });
+      assert.equal(traversal.ok, false);
+      if (!traversal.ok) assert.equal(traversal.code, 'PATH_TRAVERSAL_REJECTED');
+
+      const uncAttempt = await service.openStagingFile({ relativePath: '\\\\OtherNAS\\Share\\a.mp4' });
+      assert.equal(uncAttempt.ok, false);
+      if (!uncAttempt.ok) assert.equal(uncAttempt.code, 'PATH_TRAVERSAL_REJECTED');
+
+      const nonVideo = await service.openStagingFile({ relativePath: 'notes.txt' });
+      assert.equal(nonVideo.ok, false);
+      if (!nonVideo.ok) assert.equal(nonVideo.code, 'PATH_TRAVERSAL_REJECTED');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

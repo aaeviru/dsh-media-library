@@ -101,6 +101,7 @@ import type {
   MergeTagsInput,
   MergeTagsResult,
   MutationError,
+  OpenStagingFileInput,
   OpsStatus,
   PerformerAliasRecord,
   PerformerReviewItem,
@@ -503,7 +504,7 @@ export class MediaLibrarySpikeService {
         const mig = await migrateDatabase(db, {
           dbPath,
           backupDir: this.backupDir,
-          appVersion: '0.6.0',
+          appVersion: '0.6.1',
           now: this.now,
         });
         if (!mig.health.ok) {
@@ -798,7 +799,7 @@ export class MediaLibrarySpikeService {
       return await this.withInitializedDatabase((db) =>
         exportPortableMappingReport(db, {
           format: input.format,
-          appVersion: '0.6.0',
+          appVersion: '0.6.1',
           now: this.now,
         }),
       );
@@ -1077,6 +1078,111 @@ export class MediaLibrarySpikeService {
         throw err;
       }
     });
+  }
+
+  /**
+   * Open a video file currently inside the Host-configured staging `temp` directory using the native player.
+   * Strictly enforces Host-side containment inside `stagingDir` (rejects traversal, absolute/UNC paths, and non-video files).
+   */
+  async openStagingFile(input: OpenStagingFileInput): Promise<MediaActionResult> {
+    const startMs = Date.now();
+    const rawRel = typeof input?.relativePath === 'string' ? input.relativePath.trim() : '';
+    const mediaId = `staging:${rawRel}`;
+
+    const { roots } = this.getEffectiveRootsAndItems();
+    const configuredStaging = this.readStringSetting(this.configuredStagingDir).trim();
+    const defaultRoot = roots.find((r) => r.rootId === DEFAULT_M1_ROOT_ID && r.enabled);
+    const isPlaceholderUnc = !configuredStaging && defaultRoot?.canonicalUncRoot.toLowerCase() === '\\\\nas\\mediatest';
+    const effectiveStagingDir =
+      configuredStaging || (defaultRoot ? path.join(defaultRoot.canonicalUncRoot, 'temp') : '');
+
+    if (!effectiveStagingDir || isPlaceholderUnc) {
+      return {
+        ok: false,
+        mediaId,
+        action: 'open',
+        code: 'INVALID_UNC_ROOT',
+        message: 'Staging temp directory is not configured.',
+        elapsedMs: Date.now() - startMs,
+      };
+    }
+
+    const normalizedRel = rawRel.replace(/\\/g, '/');
+    const segments = normalizedRel.split('/').filter(Boolean);
+    const videoExts = new Set(['.avi', '.mkv', '.mp4', '.mov', '.wmv', '.m4v', '.ts']);
+    const ext = path.extname(rawRel).toLowerCase();
+    if (
+      !rawRel ||
+      rawRel.includes('\0') ||
+      rawRel.startsWith('/') ||
+      rawRel.startsWith('\\') ||
+      /^[a-zA-Z]:/.test(rawRel) ||
+      segments.length === 0 ||
+      segments.some((s) => s === '.' || s === '..') ||
+      !videoExts.has(ext)
+    ) {
+      return {
+        ok: false,
+        mediaId,
+        action: 'open',
+        code: 'PATH_TRAVERSAL_REJECTED',
+        message: `Rejected staging path '${rawRel}': must be a relative video file inside stagingDir.`,
+        elapsedMs: Date.now() - startMs,
+      };
+    }
+
+    const isWinStyle = effectiveStagingDir.startsWith('\\\\') || /^[a-zA-Z]:[\\/]/.test(effectiveStagingDir);
+    const resolvedPath = isWinStyle
+      ? path.win32.resolve(effectiveStagingDir, ...segments)
+      : path.resolve(effectiveStagingDir, ...segments);
+    const baseResolved = isWinStyle ? path.win32.resolve(effectiveStagingDir) : path.resolve(effectiveStagingDir);
+    const relCheck = isWinStyle
+      ? path.win32.relative(baseResolved, resolvedPath)
+      : path.relative(baseResolved, resolvedPath);
+    if (!relCheck || relCheck.startsWith('..') || (isWinStyle ? path.win32.isAbsolute(relCheck) : path.isAbsolute(relCheck))) {
+      return {
+        ok: false,
+        mediaId,
+        action: 'open',
+        code: 'PATH_TRAVERSAL_REJECTED',
+        message: `Resolved path escaped stagingDir: ${rawRel}`,
+        elapsedMs: Date.now() - startMs,
+      };
+    }
+
+    const probe = await this.fileProbe(resolvedPath, this.probeTimeoutMs);
+    if (!probe.ok) {
+      return {
+        ok: false,
+        mediaId,
+        action: 'open',
+        code: probe.code ?? 'FILE_NOT_FOUND',
+        message: probe.message ?? `Staging file not accessible: ${resolvedPath}`,
+        resolvedUncPath: resolvedPath,
+        elapsedMs: Date.now() - startMs,
+      };
+    }
+
+    try {
+      await this.opener.openPath(resolvedPath);
+      return {
+        ok: true,
+        mediaId,
+        action: 'open',
+        resolvedUncPath: resolvedPath,
+        elapsedMs: Date.now() - startMs,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        mediaId,
+        action: 'open',
+        code: 'OPENER_FAILED',
+        message: err instanceof Error ? err.message : String(err),
+        resolvedUncPath: resolvedPath,
+        elapsedMs: Date.now() - startMs,
+      };
+    }
   }
 
   async previewManifestPerformers(input: PreviewManifestPerformersInput): Promise<ManifestPerformerPreview> {
