@@ -23,6 +23,7 @@ import type {
   StagingFileItem,
 } from '../types.ts';
 import { resolveAllowlistedUncPath } from '../unc-path.ts';
+import { evaluateManifestPerformers, normalizePerformerName } from '../performers/performer-service.ts';
 import { type MetadataFetcher, parseFc2Code } from './metadata-fetcher.ts';
 
 const VIDEO_EXTENSIONS = new Set(['.avi', '.mkv', '.mp4', '.mov', '.wmv', '.m4v', '.ts']);
@@ -76,6 +77,16 @@ function mapManifestRow(row: Record<string, unknown>): IngestionManifest {
     tags = [];
   }
 
+  let actresses: string[] = [];
+  try {
+    const parsedActresses = JSON.parse(String(row.actresses_json ?? '[]'));
+    if (Array.isArray(parsedActresses)) {
+      actresses = parsedActresses.filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
+    }
+  } catch {
+    actresses = [];
+  }
+
   return {
     id: Number(row.id),
     sourceId: String(row.source_id),
@@ -86,6 +97,7 @@ function mapManifestRow(row: Record<string, unknown>): IngestionManifest {
     title: row.title !== null && row.title !== undefined ? String(row.title) : null,
     catalogNumber: row.catalog_number !== null && row.catalog_number !== undefined ? String(row.catalog_number) : null,
     mediaDate: row.media_date !== null && row.media_date !== undefined ? String(row.media_date) : null,
+    actresses,
     tags,
     metadataSource: row.metadata_source !== null && row.metadata_source !== undefined ? String(row.metadata_source) : null,
     checksumSha256: String(row.checksum_sha256),
@@ -465,11 +477,15 @@ export async function fetchMetadataForManifest(
   }
 
   const meta = lookup.metadata;
+  const actressNormSet = new Set(meta.actresses.map((a) => normalizePerformerName(a)).filter(Boolean));
+  const mergedActresses = [...new Set([...manifest.actresses, ...meta.actresses].map((a) => a.trim()).filter(Boolean))];
   const mergedTagNames = new Map<string, IngestionManifestTag>();
   for (const t of manifest.tags) {
     mergedTagNames.set(normalizeLabel(t.name), t);
   }
   for (const name of meta.candidateTags) {
+    // Route fetched performers through `performer_aliases` + `performer_review_queue` instead of auto-creating normal tags.
+    if (actressNormSet.has(normalizePerformerName(name))) continue;
     const norm = normalizeLabel(name);
     if (!norm || mergedTagNames.has(norm)) continue;
     const existingTag = resolveExistingTagByNameOrAlias(db, norm);
@@ -484,11 +500,23 @@ export async function fetchMetadataForManifest(
     `UPDATE ingestion_manifests
      SET title = COALESCE(NULLIF(?, ''), title),
          media_date = COALESCE(NULLIF(?, ''), media_date),
+         actresses_json = ?,
          tags_json = ?,
          metadata_source = ?,
          updated_at = ?
      WHERE id = ?`,
-  ).run(meta.title, meta.mediaDate ?? '', JSON.stringify([...mergedTagNames.values()]), meta.sourceUrl, ts, manifest.id);
+  ).run(
+    meta.title,
+    meta.mediaDate ?? '',
+    JSON.stringify(mergedActresses),
+    JSON.stringify([...mergedTagNames.values()]),
+    meta.sourceUrl,
+    ts,
+    manifest.id,
+  );
+
+  // Immediately evaluate performer aliases so review queue items are ready for human review (`Issue #8 B1`).
+  evaluateManifestPerformers(db, manifest.id, { now });
 
   return {
     ok: true,
@@ -634,6 +662,7 @@ function indexManifestIntoDatabase(
         mediaId = Number(info.lastInsertRowid);
       }
 
+      const normalTagIds: number[] = [];
       for (const tagEntry of manifest.tags) {
         let resolvedTagId = tagEntry.tagId;
         if (!resolvedTagId) {
@@ -658,6 +687,7 @@ function indexManifestIntoDatabase(
             }
           }
         }
+        normalTagIds.push(resolvedTagId);
         conn
           .prepare(
             `INSERT OR IGNORE INTO media_tags (media_id, tag_id, source, created_at)
@@ -665,6 +695,37 @@ function indexManifestIntoDatabase(
           )
           .run(mediaId, resolvedTagId, ts);
       }
+
+      // Apply performer-alias associations (`Issue #8 B4` Option B):
+      // - Auto-matched rules -> `source='performer-rule', confidence=1.0` (never overwriting `manual`).
+      // - Human-resolved queue items -> `source='manual', confidence=NULL`.
+      const performerPreview = evaluateManifestPerformers(conn, manifest.id, { now: () => new Date(ts) });
+      const autoPerformerTagIds: number[] = [];
+      for (const entry of performerPreview.autoMatched) {
+        autoPerformerTagIds.push(entry.tagId);
+        conn
+          .prepare(
+            `INSERT OR IGNORE INTO media_tags (media_id, tag_id, source, confidence, created_at)
+             VALUES (?, ?, 'performer-rule', 1.0, ?)`,
+          )
+          .run(mediaId, entry.tagId, ts);
+      }
+      const humanConfirmedPerformerTagIds: number[] = [];
+      for (const entry of performerPreview.humanResolved) {
+        humanConfirmedPerformerTagIds.push(entry.tagId);
+        conn
+          .prepare(
+            `INSERT INTO media_tags (media_id, tag_id, source, confidence, created_at)
+             VALUES (?, ?, 'manual', NULL, ?)
+             ON CONFLICT(media_id, tag_id) DO UPDATE SET
+               source = 'manual',
+               confidence = NULL`,
+          )
+          .run(mediaId, entry.tagId, ts);
+      }
+      conn
+        .prepare('UPDATE performer_review_queue SET media_id = ? WHERE manifest_id = ?')
+        .run(mediaId, manifest.id);
 
       conn
         .prepare(
@@ -675,7 +736,14 @@ function indexManifestIntoDatabase(
         .run(mediaId, ts, manifest.id);
 
       return {
-        payload: { manifestId: manifest.id, sourceId: manifest.sourceId, targetRelativePath: manifest.targetRelativePath },
+        payload: {
+          manifestId: manifest.id,
+          sourceId: manifest.sourceId,
+          targetRelativePath: manifest.targetRelativePath,
+          normalTagIds,
+          autoPerformerTagIds,
+          humanConfirmedPerformerTagIds,
+        },
         result: { mediaId },
       };
     },
@@ -728,6 +796,18 @@ export function commitIngestionManifest(
       ok: false,
       code: 'REVIEW_REQUIRED',
       message: `Manifest #${manifest.id} requires human approval before moving or indexing.`,
+      manifest,
+    };
+  }
+
+  // Policy 1 (`Issue #8`): block commit while any performer on this manifest awaits human review.
+  const performerPreview = evaluateManifestPerformers(db, manifest.id, { now: nowFn });
+  if (performerPreview.pendingReview.length > 0) {
+    const names = performerPreview.pendingReview.map((p) => p.rawName).join(', ');
+    return {
+      ok: false,
+      code: 'PERFORMER_REVIEW_REQUIRED',
+      message: `Manifest #${manifest.id} has ${performerPreview.pendingReview.length} unresolved performer(s): ${names}. Resolve or skip them before moving & indexing.`,
       manifest,
     };
   }

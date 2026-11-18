@@ -1,10 +1,10 @@
 {
-  "extends": "/home/aaevi/projects/deepseek-harness/tsconfig.base.json",
+  "extends": "/home/aaevi/projects/project/deepseek-harness/tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "lib/types",
     "typeRoots": [
-      "/home/aaevi/projects/deepseek-harness/node_modules/@types"
+      "/home/aaevi/projects/project/deepseek-harness/node_modules/@types"
     ],
     "tsBuildInfoFile": "lib/tsconfig.host.tsbuildinfo"
   },
@@ -13,16 +13,16 @@
   ],
   "references": [
     {
-      "path": "/home/aaevi/projects/deepseek-harness/vendor/cordis"
+      "path": "/home/aaevi/projects/project/deepseek-harness/vendor/cordis"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/vendor/schemastery"
+      "path": "/home/aaevi/projects/project/deepseek-harness/vendor/schemastery"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/typert/protocol"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/typert/protocol"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/util/native-command"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/util/native-command"
     }
   ],
   "exclude": [

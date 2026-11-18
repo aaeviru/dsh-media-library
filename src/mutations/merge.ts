@@ -25,10 +25,18 @@ interface MergePlan {
   readonly dedupedMedia: number
   readonly aliasesToMigrate: ReadonlyArray<{ id: number; alias: string }>
   readonly aliasesConflicting: ReadonlyArray<{ id: number; alias: string }>
+  readonly performerAliasesToMigrate: ReadonlyArray<{ id: number; normalizedName: string; rawAlias: string; policy: string }>
+  readonly performerAliasesDeduped: ReadonlyArray<{ id: number; normalizedName: string; rawAlias: string; policy: string }>
   /** Distinct edges to create on the target (after replacing B with A and dropping duplicates). */
   readonly newEdges: ReadonlyArray<{ tagId: number; parentId: number }>
   readonly edgesDeduped: number
   readonly wouldCreateCycle: boolean
+}
+
+function hasTable(db: DatabaseSync, tableName: string): boolean {
+  return Boolean(
+    db.prepare(`SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?`).get(tableName),
+  )
 }
 
 function count(db: DatabaseSync, sql: string, ...params: number[]): number {
@@ -127,7 +135,47 @@ function planMerge(db: DatabaseSync, input: PreviewMergeInput): MergePlan {
     }
   }
 
-  return { target, source, affectedMedia, dedupedMedia, aliasesToMigrate, aliasesConflicting, newEdges, edgesDeduped, wouldCreateCycle }
+  const performerAliasesToMigrate: Array<{ id: number; normalizedName: string; rawAlias: string; policy: string }> = []
+  const performerAliasesDeduped: Array<{ id: number; normalizedName: string; rawAlias: string; policy: string }> = []
+  if (hasTable(db, 'performer_aliases')) {
+    const sourcePerfAliases = db
+      .prepare('SELECT id, normalized_name, raw_alias, policy FROM performer_aliases WHERE tag_id = ? ORDER BY id')
+      .all(source.id) as Array<{ id: number; normalized_name: string; raw_alias: string; policy: string }>
+    const targetPerfNorms = new Set(
+      (
+        db.prepare('SELECT normalized_name FROM performer_aliases WHERE tag_id = ?').all(target.id) as Array<{
+          normalized_name: string
+        }>
+      ).map(r => r.normalized_name),
+    )
+    for (const pa of sourcePerfAliases) {
+      const entry = {
+        id: Number(pa.id),
+        normalizedName: String(pa.normalized_name),
+        rawAlias: String(pa.raw_alias),
+        policy: String(pa.policy),
+      }
+      if (targetPerfNorms.has(entry.normalizedName)) {
+        performerAliasesDeduped.push(entry)
+      } else {
+        performerAliasesToMigrate.push(entry)
+      }
+    }
+  }
+
+  return {
+    target,
+    source,
+    affectedMedia,
+    dedupedMedia,
+    aliasesToMigrate,
+    aliasesConflicting,
+    performerAliasesToMigrate,
+    performerAliasesDeduped,
+    newEdges,
+    edgesDeduped,
+    wouldCreateCycle,
+  }
 }
 
 /** `B4`: read-only merge impact preview. Never writes, never audits. */
@@ -146,6 +194,8 @@ export function previewMerge(db: DatabaseSync, input: PreviewMergeInput): MergeP
       aliasesConflicting: plan.aliasesConflicting.length,
       parentEdgesMigrated: plan.newEdges.length,
       parentEdgesDeduped: plan.edgesDeduped,
+      performerAliasesMigrated: plan.performerAliasesToMigrate.length,
+      performerAliasesDeduped: plan.performerAliasesDeduped.length,
       wouldCreateCycle: plan.wouldCreateCycle,
     }
     return preview
@@ -198,6 +248,25 @@ export function mergeTags(db: DatabaseSync, input: MergeTagsInput, options?: Run
         env.db.prepare('DELETE FROM tag_aliases WHERE id = ?').run(alias.id)
       }
 
+      if (hasTable(env.db, 'performer_aliases')) {
+        for (const pa of plan.performerAliasesToMigrate) {
+          env.db.prepare('UPDATE performer_aliases SET tag_id = ?, updated_at = ? WHERE id = ?').run(A, env.now, pa.id)
+        }
+        for (const pa of plan.performerAliasesDeduped) {
+          if (pa.policy === 'always_ask') {
+            env.db
+              .prepare(`UPDATE performer_aliases SET policy = 'always_ask', updated_at = ? WHERE normalized_name = ? AND tag_id = ?`)
+              .run(env.now, pa.normalizedName, A)
+          }
+          env.db.prepare('DELETE FROM performer_aliases WHERE id = ?').run(pa.id)
+        }
+      }
+      if (hasTable(env.db, 'performer_review_queue')) {
+        env.db
+          .prepare('UPDATE performer_review_queue SET resolved_tag_id = ?, updated_at = ? WHERE resolved_tag_id = ?')
+          .run(A, env.now, B)
+      }
+
       env.db.prepare('DELETE FROM tag_parents WHERE tag_id = ? OR parent_tag_id = ?').run(B, B)
       for (const edge of plan.newEdges) {
         env.db.prepare('INSERT INTO tag_parents (tag_id, parent_tag_id) VALUES (?, ?)').run(edge.tagId, edge.parentId)
@@ -217,6 +286,8 @@ export function mergeTags(db: DatabaseSync, input: MergeTagsInput, options?: Run
         aliasesMigrated: plan.aliasesToMigrate.length,
         aliasesDropped: plan.aliasesConflicting.length,
         parentEdgesMigrated: plan.newEdges.length,
+        performerAliasesMigrated: plan.performerAliasesToMigrate.length,
+        performerAliasesDeduped: plan.performerAliasesDeduped.length,
       }
       return {
         payload: {

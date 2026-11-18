@@ -3,7 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-HARNESS_DIR="${DSH_HARNESS_DIR:-/home/aaevi/projects/deepseek-harness}"
+if [[ -n "${DSH_HARNESS_DIR:-}" ]]; then
+  HARNESS_DIR="${DSH_HARNESS_DIR}"
+elif [[ -d "/home/aaevi/projects/project/deepseek-harness" ]]; then
+  HARNESS_DIR="/home/aaevi/projects/project/deepseek-harness"
+else
+  HARNESS_DIR="/home/aaevi/projects/deepseek-harness"
+fi
 
 if [[ ! -d "$HARNESS_DIR/packages/client" ]]; then
   echo "Error: deepseek-harness not found at $HARNESS_DIR (set DSH_HARNESS_DIR to override)" >&2

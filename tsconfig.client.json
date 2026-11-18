@@ -1,5 +1,5 @@
 {
-  "extends": "/home/aaevi/projects/deepseek-harness/tsconfig.base.client.json",
+  "extends": "/home/aaevi/projects/project/deepseek-harness/tsconfig.base.client.json",
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "lib/types",
@@ -11,31 +11,31 @@
   ],
   "references": [
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/client/ui-plugin-manager/tsconfig.client.json"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/client/ui-plugin-manager/tsconfig.client.json"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/vendor/cordis"
+      "path": "/home/aaevi/projects/project/deepseek-harness/vendor/cordis"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/client/ui-renderer"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/client/ui-renderer"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/client/ui-slots"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/client/ui-slots"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/client/locale/tsconfig.client.json"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/client/locale/tsconfig.client.json"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/client/ui-layout"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/client/ui-layout"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/client/ui-sidebar"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/client/ui-sidebar"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/api/remotes/tsconfig.client.json"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/api/remotes/tsconfig.client.json"
     },
     {
-      "path": "/home/aaevi/projects/deepseek-harness/packages/typert/protocol"
+      "path": "/home/aaevi/projects/project/deepseek-harness/packages/typert/protocol"
     }
   ]
 }
