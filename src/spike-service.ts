@@ -54,6 +54,15 @@ import {
   setMediaTags,
 } from './mutations/index.ts';
 import {
+  deletePerformerAlias,
+  evaluateManifestPerformers,
+  listPerformerAliases,
+  listPerformerReviewQueue,
+  promotePerformerTagToManual,
+  resolvePerformerReview,
+  upsertPerformerAlias,
+} from './performers/index.ts';
+import {
   getMediaDetailInDatabase,
   listTagsInDatabase,
   searchMediaInDatabase,
@@ -66,6 +75,8 @@ import type {
   CreateBackupResult,
   CreateTagInput,
   DegradedModeState,
+  DeletePerformerAliasInput,
+  DeletePerformerAliasResult,
   ExportMappingReportInput,
   ExportMappingReportResult,
   FetchedMetadataCandidate,
@@ -76,9 +87,11 @@ import type {
   IngestionManifest,
   IngestionTask,
   LibraryOverview,
+  ListPerformerReviewInput,
   ListTagsInput,
   ListTagsResult,
   M1TestMediaItem,
+  ManifestPerformerPreview,
   MediaActionErrorCode,
   MediaActionResult,
   MediaDetailItem,
@@ -89,9 +102,16 @@ import type {
   MergeTagsResult,
   MutationError,
   OpsStatus,
+  PerformerAliasRecord,
+  PerformerReviewItem,
+  PreviewManifestPerformersInput,
   PreviewMergeInput,
+  PromotePerformerTagInput,
+  PromotePerformerTagResult,
   ReconcileIngestionResult,
   RenameTagInput,
+  ResolvePerformerReviewInput,
+  ResolvePerformerReviewResult,
   ReviewIngestionInput,
   ReviewIngestionResult,
   ScanStagingResult,
@@ -102,6 +122,8 @@ import type {
   SpikeStatus,
   TagMutationResult,
   TagRevisionInput,
+  UpsertPerformerAliasInput,
+  UpsertPerformerAliasResult,
 } from './types.ts';
 import {
   normalizeCanonicalUncRoot,
@@ -481,7 +503,7 @@ export class MediaLibrarySpikeService {
         const mig = await migrateDatabase(db, {
           dbPath,
           backupDir: this.backupDir,
-          appVersion: '0.5.5',
+          appVersion: '0.6.0',
           now: this.now,
         });
         if (!mig.health.ok) {
@@ -776,7 +798,7 @@ export class MediaLibrarySpikeService {
       return await this.withInitializedDatabase((db) =>
         exportPortableMappingReport(db, {
           format: input.format,
-          appVersion: '0.5.5',
+          appVersion: '0.6.0',
           now: this.now,
         }),
       );
@@ -1055,6 +1077,69 @@ export class MediaLibrarySpikeService {
         throw err;
       }
     });
+  }
+
+  async previewManifestPerformers(input: PreviewManifestPerformersInput): Promise<ManifestPerformerPreview> {
+    await this.initialize();
+    return this.withInitializedDatabase((db) => evaluateManifestPerformers(db, input.manifestId, { now: this.now }));
+  }
+
+  async listPerformerAliases(): Promise<PerformerAliasRecord[]> {
+    await this.initialize();
+    return this.withInitializedDatabase((db) => listPerformerAliases(db));
+  }
+
+  async upsertPerformerAlias(input: UpsertPerformerAliasInput): Promise<UpsertPerformerAliasResult> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        code: 'READ_ONLY_DEGRADED',
+        message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+    return this.withInitializedDatabase((db) => upsertPerformerAlias(db, input, { now: this.now }));
+  }
+
+  async deletePerformerAlias(input: DeletePerformerAliasInput): Promise<DeletePerformerAliasResult> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        code: 'READ_ONLY_DEGRADED',
+        message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+    return this.withInitializedDatabase((db) => deletePerformerAlias(db, input, { now: this.now }));
+  }
+
+  async listPerformerReviewQueue(input?: ListPerformerReviewInput): Promise<PerformerReviewItem[]> {
+    await this.initialize();
+    return this.withInitializedDatabase((db) => listPerformerReviewQueue(db, input));
+  }
+
+  async resolvePerformerReview(input: ResolvePerformerReviewInput): Promise<ResolvePerformerReviewResult> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        code: 'READ_ONLY_DEGRADED',
+        message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+    return this.withInitializedDatabase((db) => resolvePerformerReview(db, input, { now: this.now }));
+  }
+
+  async promotePerformerTagToManual(input: PromotePerformerTagInput): Promise<PromotePerformerTagResult> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        code: 'READ_ONLY_DEGRADED',
+        message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+    return this.withInitializedDatabase((db) => promotePerformerTagToManual(db, input, { now: this.now }));
   }
 
   async importTagStudioCopy(input?: ImportTagStudioInput): Promise<ImportTagStudioResult> {

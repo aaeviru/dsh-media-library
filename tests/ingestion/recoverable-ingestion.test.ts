@@ -66,8 +66,8 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
 
       const db = new DatabaseSync(dbPath);
       try {
-        const mig = await migrateDatabase(db, { dbPath, appVersion: '0.5.2' });
-        assert.equal(mig.currentVersion, 5);
+        const mig = await migrateDatabase(db, { dbPath, appVersion: '0.6.0' });
+        assert.equal(mig.currentVersion, 6);
 
         const dryRun = await previewStagingPlan({
           stagingDir: tempDir,
@@ -452,7 +452,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         const versionRow = dbAfter
           .prepare(`SELECT MAX(version) AS v FROM schema_versions`)
           .get() as { v: number };
-        assert.equal(versionRow.v, 5);
+        assert.equal(versionRow.v, 6);
       } finally {
         dbAfter.close();
       }

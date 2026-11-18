@@ -8,5 +8,7 @@
 - **Human Review Gate**: The explicit approval step confirming tags and metadata before any file is moved or indexed.
 - **Recoverable Move**: Moving a reviewed file from the Staging Folder to the fixed target folder inside the NAS, then recording it in the local catalog and cleaning up the source only if copied across volumes.
 - **Reconcile**: Repairing interrupted ingestion states (`copied-not-deleted`, `moved-not-indexed`, `indexed-but-missing`) after a crash or network drop.
+- **Performer Alias**: An explicit mapping from a normalized source performer name to a target tag, either resolving automatically (`auto`) when unique or always prompting (`always_ask`) for shared/ambiguous stage names.
+- **Performer Review Queue**: The human decision queue for unknown, ambiguous, or archived-target performer names so automation never silently guesses or creates performer tags.
 - **Cold Fallback**: Keeping the original TagStudio database read-only and untouched as an archive after cutover.
 - **Read-Only Degraded Mode**: A protective state where writes and moves are blocked due to schema or integrity mismatch while search and exports stay available.

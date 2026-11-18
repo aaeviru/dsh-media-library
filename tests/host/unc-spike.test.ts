@@ -276,8 +276,13 @@ describe('MediaLibrarySpikeService Open, Reveal & Error Semantics (B2, B3, B4, B
 
   it('produces a self-contained bundle/lib/typert.host.js manifest validated by @deepseek-ai/dsh-typert-loader', async () => {
     const { TYPERT } = await import('../../bundle/lib/typert.host.js');
+    const harnessDir =
+      process.env.DSH_HARNESS_DIR ??
+      (fs.existsSync('/home/aaevi/projects/project/deepseek-harness')
+        ? '/home/aaevi/projects/project/deepseek-harness'
+        : '/home/aaevi/projects/deepseek-harness');
     const { validateTypertManifest } = await import(
-      '/home/aaevi/projects/deepseek-harness/packages/typert/loader/src/index.ts'
+      `${harnessDir}/packages/typert/loader/src/index.ts`
     );
     const validated = validateTypertManifest(
       '@deepseek-ai/dsh-experimental-media-library',
@@ -285,7 +290,7 @@ describe('MediaLibrarySpikeService Open, Reveal & Error Semantics (B2, B3, B4, B
     );
     assert.equal(validated.package, '@deepseek-ai/dsh-experimental-media-library');
     assert.equal(validated.face, 'host');
-    assert.equal(validated.invocations.length, 27);
+    assert.equal(validated.invocations.length, 34);
     for (const inv of TYPERT.invocations) {
       for (const param of inv.parameters ?? []) {
         if (param?.codec?.create) assert.ok(param.codec.create());

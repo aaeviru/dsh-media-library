@@ -6,6 +6,8 @@ import type {
   CreateBackupInput,
   CreateBackupResult,
   CreateTagInput,
+  DeletePerformerAliasInput,
+  DeletePerformerAliasResult,
   ExportMappingReportInput,
   ExportMappingReportResult,
   FetchedMetadataCandidate,
@@ -16,17 +18,26 @@ import type {
   IngestionManifest,
   IngestionTask,
   LibraryOverview,
+  ListPerformerReviewInput,
   ListTagsInput,
   ListTagsResult,
+  ManifestPerformerPreview,
   MediaActionResult,
   MediaDetailItem,
   MergePreviewResult,
   MergeTagsInput,
   MergeTagsResult,
   OpsStatus,
+  PerformerAliasRecord,
+  PerformerReviewItem,
+  PreviewManifestPerformersInput,
   PreviewMergeInput,
+  PromotePerformerTagInput,
+  PromotePerformerTagResult,
   ReconcileIngestionResult,
   RenameTagInput,
+  ResolvePerformerReviewInput,
+  ResolvePerformerReviewResult,
   ReviewIngestionInput,
   ReviewIngestionResult,
   ScanStagingResult,
@@ -37,6 +48,8 @@ import type {
   SpikeStatus,
   TagMutationResult,
   TagRevisionInput,
+  UpsertPerformerAliasInput,
+  UpsertPerformerAliasResult,
 } from '../types.ts';
 
 export interface MediaLibraryNamespace {
@@ -67,4 +80,11 @@ export interface MediaLibraryNamespace {
   reviewIngestion: (input: ReviewIngestionInput) => Promise<RemoteResult<ReviewIngestionResult>>;
   commitIngestion: (input: CommitIngestionInput) => Promise<RemoteResult<CommitIngestionResult>>;
   reconcileIngestion: () => Promise<RemoteResult<ReconcileIngestionResult>>;
+  previewManifestPerformers: (input: PreviewManifestPerformersInput) => Promise<RemoteResult<ManifestPerformerPreview>>;
+  listPerformerAliases: () => Promise<RemoteResult<PerformerAliasRecord[]>>;
+  upsertPerformerAlias: (input: UpsertPerformerAliasInput) => Promise<RemoteResult<UpsertPerformerAliasResult>>;
+  deletePerformerAlias: (input: DeletePerformerAliasInput) => Promise<RemoteResult<DeletePerformerAliasResult>>;
+  listPerformerReviewQueue: (input?: ListPerformerReviewInput) => Promise<RemoteResult<PerformerReviewItem[]>>;
+  resolvePerformerReview: (input: ResolvePerformerReviewInput) => Promise<RemoteResult<ResolvePerformerReviewResult>>;
+  promotePerformerTagToManual: (input: PromotePerformerTagInput) => Promise<RemoteResult<PromotePerformerTagResult>>;
 }

@@ -9,6 +9,8 @@ import type {
   CreateBackupInput,
   CreateBackupResult,
   CreateTagInput,
+  DeletePerformerAliasInput,
+  DeletePerformerAliasResult,
   ExportMappingReportInput,
   ExportMappingReportResult,
   FetchedMetadataCandidate,
@@ -19,17 +21,26 @@ import type {
   IngestionManifest,
   IngestionTask,
   LibraryOverview,
+  ListPerformerReviewInput,
   ListTagsInput,
   ListTagsResult,
+  ManifestPerformerPreview,
   MediaActionResult,
   MediaDetailItem,
   MergePreviewResult,
   MergeTagsInput,
   MergeTagsResult,
   OpsStatus,
+  PerformerAliasRecord,
+  PerformerReviewItem,
+  PreviewManifestPerformersInput,
   PreviewMergeInput,
+  PromotePerformerTagInput,
+  PromotePerformerTagResult,
   ReconcileIngestionResult,
   RenameTagInput,
+  ResolvePerformerReviewInput,
+  ResolvePerformerReviewResult,
   ReviewIngestionInput,
   ReviewIngestionResult,
   ScanStagingResult,
@@ -40,6 +51,8 @@ import type {
   SpikeStatus,
   TagMutationResult,
   TagRevisionInput,
+  UpsertPerformerAliasInput,
+  UpsertPerformerAliasResult,
 } from './types.ts';
 
 export type { Config } from './config.ts';
@@ -293,5 +306,61 @@ export class MediaLibraryRemote extends TypertRemoteService {
   @Remote('reconcileIngestion')
   async reconcileIngestion(): Promise<ReconcileIngestionResult> {
     return this.spikeService.reconcileIngestion();
+  }
+
+  /**
+   * Preview deterministic performer-alias matches, pending review items, and normal tag matches for a manifest.
+   */
+  @Remote('previewManifestPerformers')
+  async previewManifestPerformers(input: PreviewManifestPerformersInput): Promise<ManifestPerformerPreview> {
+    return this.spikeService.previewManifestPerformers(input);
+  }
+
+  /**
+   * List explicit performer-alias mappings with remediation and ambiguity metadata.
+   */
+  @Remote('listPerformerAliases')
+  async listPerformerAliases(): Promise<PerformerAliasRecord[]> {
+    return this.spikeService.listPerformerAliases();
+  }
+
+  /**
+   * Create or update a durable performer-alias mapping (normalized source name -> tagId).
+   */
+  @Remote('upsertPerformerAlias')
+  async upsertPerformerAlias(input: UpsertPerformerAliasInput): Promise<UpsertPerformerAliasResult> {
+    return this.spikeService.upsertPerformerAlias(input);
+  }
+
+  /**
+   * Remove a performer-alias mapping by id.
+   */
+  @Remote('deletePerformerAlias')
+  async deletePerformerAlias(input: DeletePerformerAliasInput): Promise<DeletePerformerAliasResult> {
+    return this.spikeService.deletePerformerAlias(input);
+  }
+
+  /**
+   * List pending or historical performer review queue items.
+   */
+  @Remote('listPerformerReviewQueue')
+  async listPerformerReviewQueue(input?: ListPerformerReviewInput): Promise<PerformerReviewItem[]> {
+    return this.spikeService.listPerformerReviewQueue(input);
+  }
+
+  /**
+   * Resolve a performer review queue item (bind existing tag, create performer tag, or skip).
+   */
+  @Remote('resolvePerformerReview')
+  async resolvePerformerReview(input: ResolvePerformerReviewInput): Promise<ResolvePerformerReviewResult> {
+    return this.spikeService.resolvePerformerReview(input);
+  }
+
+  /**
+   * Promote an auto-applied performer-rule media tag association to manual protection.
+   */
+  @Remote('promotePerformerTagToManual')
+  async promotePerformerTagToManual(input: PromotePerformerTagInput): Promise<PromotePerformerTagResult> {
+    return this.spikeService.promotePerformerTagToManual(input);
   }
 }

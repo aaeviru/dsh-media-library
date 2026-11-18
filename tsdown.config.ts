@@ -1,5 +1,5 @@
 import { defineConfig } from 'tsdown';
-import { clientBundle } from '/home/aaevi/projects/deepseek-harness/packages/client/tsdown.client.ts';
+import { clientBundle } from '/home/aaevi/projects/project/deepseek-harness/packages/client/tsdown.client.ts';
 
 export default defineConfig(
   clientBundle(import.meta.dirname, ['lib/types/index.js'], {

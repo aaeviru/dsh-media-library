@@ -89,6 +89,8 @@ const MUTATION_RESULTS: MutationSchemaSpec[] = [
       aliasesConflicting: NUM,
       parentEdgesMigrated: NUM,
       parentEdgesDeduped: NUM,
+      performerAliasesMigrated: `${NUM}.optional()`,
+      performerAliasesDeduped: `${NUM}.optional()`,
       wouldCreateCycle: BOOL,
     },
   },
@@ -106,6 +108,8 @@ const MUTATION_RESULTS: MutationSchemaSpec[] = [
       aliasesMigrated: NUM,
       aliasesDropped: NUM,
       parentEdgesMigrated: NUM,
+      performerAliasesMigrated: `${NUM}.optional()`,
+      performerAliasesDeduped: `${NUM}.optional()`,
     },
   },
 ];
@@ -125,7 +129,7 @@ const MUTATION_SCHEMAS = [
   `let _mediaLibrary_exportMappingReportResult$schema$value\nconst _mediaLibrary_exportMappingReportResult$schema = () => (_mediaLibrary_exportMappingReportResult$schema$value ??= z.object({ ok: ${BOOL}, format: z.enum(['json', 'csv']).readonly(), filename: ${STR}, mimeType: ${STR}, rowCount: ${NUM}, sha256: ${STR}, content: ${STR}, error: ${STR}.optional() }).readonly())`,
   `let _mediaLibrary_opsStatus$schema$value\nconst _mediaLibrary_opsStatus$schema = () => (_mediaLibrary_opsStatus$schema$value ??= z.object({ localDataDir: ${STR}, localDatabasePath: ${STR}, backupDir: ${STR}, nasBackupDir: ${STR}.nullable(), dailyRetentionCount: ${NUM}, preMigrateRetentionCount: ${NUM}, autoDailyBackup: ${BOOL}, lastAutoBackupAt: ${STR}.nullable(), lastBackupSha256: ${STR}.nullable(), degradedState: z.object({ degraded: ${BOOL}, reason: ${STR}.nullable(), schemaVersion: ${NUM}, supportedMaxVersion: ${NUM}, healthOk: ${BOOL}, checkedAt: ${STR} }).readonly(), backups: z.array(z.object({ filename: ${STR}, path: ${STR}, kind: z.enum(['daily', 'pre-migrate']).readonly(), size: ${NUM}, mtimeIso: ${STR} }).readonly()).readonly() }).readonly())`,
   `let _mediaLibrary_ingestionTag$schema$value\nconst _mediaLibrary_ingestionTag$schema = () => (_mediaLibrary_ingestionTag$schema$value ??= z.object({ tagId: ${NUM}.optional(), name: ${STR} }).readonly())`,
-  `let _mediaLibrary_ingestionManifest$schema$value\nconst _mediaLibrary_ingestionManifest$schema = () => (_mediaLibrary_ingestionManifest$schema$value ??= z.object({ id: ${NUM}, sourceId: ${STR}, tempPath: ${STR}, targetRootId: ${STR}, targetRelativePath: ${STR}, filename: ${STR}, title: ${STR}.nullable(), catalogNumber: ${STR}.nullable(), mediaDate: ${STR}.nullable(), tags: z.array(_mediaLibrary_ingestionTag$schema()).readonly(), metadataSource: ${STR}.nullable(), checksumSha256: ${STR}, fileSize: ${NUM}, state: z.enum(['planned', 'reviewed', 'moving', 'indexed', 'failed']).readonly(), reviewDecision: z.enum(['pending', 'approved', 'rejected']).readonly(), lastError: ${STR}.nullable(), indexedMediaId: ${NUM}.nullable(), createdAt: ${STR}, updatedAt: ${STR} }).readonly())`,
+  `let _mediaLibrary_ingestionManifest$schema$value\nconst _mediaLibrary_ingestionManifest$schema = () => (_mediaLibrary_ingestionManifest$schema$value ??= z.object({ id: ${NUM}, sourceId: ${STR}, tempPath: ${STR}, targetRootId: ${STR}, targetRelativePath: ${STR}, filename: ${STR}, title: ${STR}.nullable(), catalogNumber: ${STR}.nullable(), mediaDate: ${STR}.nullable(), actresses: z.array(${STR}).readonly(), tags: z.array(_mediaLibrary_ingestionTag$schema()).readonly(), metadataSource: ${STR}.nullable(), checksumSha256: ${STR}, fileSize: ${NUM}, state: z.enum(['planned', 'reviewed', 'moving', 'indexed', 'failed']).readonly(), reviewDecision: z.enum(['pending', 'approved', 'rejected']).readonly(), lastError: ${STR}.nullable(), indexedMediaId: ${NUM}.nullable(), createdAt: ${STR}, updatedAt: ${STR} }).readonly())`,
   `let _mediaLibrary_ingestionManifestList$schema$value\nconst _mediaLibrary_ingestionManifestList$schema = () => (_mediaLibrary_ingestionManifestList$schema$value ??= z.array(_mediaLibrary_ingestionManifest$schema()).readonly())`,
   `let _mediaLibrary_scanStagingResult$schema$value\nconst _mediaLibrary_scanStagingResult$schema = () => (_mediaLibrary_scanStagingResult$schema$value ??= z.object({ ok: ${BOOL}, stagingDir: ${STR}, targetRootId: ${STR}, targetSubdir: ${STR}, elapsedMs: ${NUM}, files: z.array(z.object({ filename: ${STR}, relativePath: ${STR}, tempPath: ${STR}, targetRelativePath: ${STR}, fileSize: ${NUM}, mtimeIso: ${STR}, catalogNumber: ${STR}.nullable(), manifestId: ${NUM}.nullable(), state: z.enum(['planned', 'reviewed', 'moving', 'indexed', 'failed']).nullable(), reviewDecision: z.enum(['pending', 'approved', 'rejected']).nullable() }).readonly()).readonly(), manifests: _mediaLibrary_ingestionManifestList$schema(), error: ${STR}.optional() }).readonly())`,
   `let _mediaLibrary_fetchIngestionMetadataInput$schema$value\nconst _mediaLibrary_fetchIngestionMetadataInput$schema = () => (_mediaLibrary_fetchIngestionMetadataInput$schema$value ??= z.object({ manifestId: ${NUM}.optional(), tempPath: ${STR}.optional() }).readonly())`,
@@ -136,6 +140,24 @@ const MUTATION_SCHEMAS = [
   `let _mediaLibrary_commitIngestionResult$schema$value\nconst _mediaLibrary_commitIngestionResult$schema = () => (_mediaLibrary_commitIngestionResult$schema$value ??= z.object({ ok: ${BOOL}, code: ${STR}.optional(), message: ${STR}, idempotentReplay: ${BOOL}.optional(), mediaId: ${NUM}.nullable().optional(), warning: ${STR}.nullable().optional(), manifest: _mediaLibrary_ingestionManifest$schema().nullable().optional() }).readonly())`,
   `let _mediaLibrary_reconcileIngestionResult$schema$value\nconst _mediaLibrary_reconcileIngestionResult$schema = () => (_mediaLibrary_reconcileIngestionResult$schema$value ??= z.object({ ok: ${BOOL}, reconciledCount: ${NUM}, copiedNotDeletedFixed: ${NUM}, movedNotIndexedFixed: ${NUM}, indexedButMissingMarked: ${NUM}, errors: z.array(${STR}).readonly(), manifests: _mediaLibrary_ingestionManifestList$schema() }).readonly())`,
   `let _mediaLibrary_ingestionTaskList$schema$value\nconst _mediaLibrary_ingestionTaskList$schema = () => (_mediaLibrary_ingestionTaskList$schema$value ??= z.array(z.object({ id: ${NUM}, targetKey: ${STR}, op: z.enum(['fetch', 'commit', 'reconcile']).readonly(), status: z.enum(['running', 'succeeded', 'failed', 'interrupted']).readonly(), message: ${STR}, startedAt: ${STR}, finishedAt: ${STR}.nullable() }).readonly()).readonly())`,
+  `let _mediaLibrary_performerAliasRecord$schema$value\nconst _mediaLibrary_performerAliasRecord$schema = () => (_mediaLibrary_performerAliasRecord$schema$value ??= z.object({ id: ${NUM}, normalizedName: ${STR}, rawAlias: ${STR}, tagId: ${NUM}, tagName: ${STR}, tagKind: ${STR}, targetArchived: ${BOOL}, needsRemediation: ${BOOL}, policy: z.enum(['auto', 'always_ask']).readonly(), isAmbiguous: ${BOOL}, note: ${STR}, createdAt: ${STR}, updatedAt: ${STR} }).readonly())`,
+  `let _mediaLibrary_performerAliasList$schema$value\nconst _mediaLibrary_performerAliasList$schema = () => (_mediaLibrary_performerAliasList$schema$value ??= z.array(_mediaLibrary_performerAliasRecord$schema()).readonly())`,
+  `let _mediaLibrary_performerCandidateTag$schema$value\nconst _mediaLibrary_performerCandidateTag$schema = () => (_mediaLibrary_performerCandidateTag$schema$value ??= z.object({ id: ${NUM}, name: ${STR}, kind: ${STR} }).readonly())`,
+  `let _mediaLibrary_performerReviewItem$schema$value\nconst _mediaLibrary_performerReviewItem$schema = () => (_mediaLibrary_performerReviewItem$schema$value ??= z.object({ id: ${NUM}, manifestId: ${NUM}.nullable(), manifestFilename: ${STR}.nullable(), mediaId: ${NUM}.nullable(), rawName: ${STR}, normalizedName: ${STR}, reason: z.enum(['unknown', 'ambiguous', 'archived_target']).readonly(), candidateTags: z.array(_mediaLibrary_performerCandidateTag$schema()).readonly(), status: z.enum(['pending', 'resolved', 'skipped']).readonly(), resolutionMode: z.enum(['bind_existing', 'create_performer_tag', 'skip']).nullable(), resolvedTagId: ${NUM}.nullable(), resolvedTagName: ${STR}.nullable(), createdAt: ${STR}, updatedAt: ${STR} }).readonly())`,
+  `let _mediaLibrary_performerReviewList$schema$value\nconst _mediaLibrary_performerReviewList$schema = () => (_mediaLibrary_performerReviewList$schema$value ??= z.array(_mediaLibrary_performerReviewItem$schema()).readonly())`,
+  `let _mediaLibrary_performerPreviewEntry$schema$value\nconst _mediaLibrary_performerPreviewEntry$schema = () => (_mediaLibrary_performerPreviewEntry$schema$value ??= z.object({ rawName: ${STR}, normalizedName: ${STR}, tagId: ${NUM}, tagName: ${STR}, source: z.enum(['performer-rule', 'manual']).readonly(), confidence: ${NUM}.nullable(), resolutionMode: z.enum(['bind_existing', 'create_performer_tag', 'skip']).nullable(), alreadyManual: ${BOOL} }).readonly())`,
+  `let _mediaLibrary_normalTagPreviewEntry$schema$value\nconst _mediaLibrary_normalTagPreviewEntry$schema = () => (_mediaLibrary_normalTagPreviewEntry$schema$value ??= z.object({ rawName: ${STR}, matchedTagId: ${NUM}.nullable(), matchedTagName: ${STR}.nullable(), matchedVia: z.enum(['name', 'alias', 'new']).readonly() }).readonly())`,
+  `let _mediaLibrary_previewManifestPerformersInput$schema$value\nconst _mediaLibrary_previewManifestPerformersInput$schema = () => (_mediaLibrary_previewManifestPerformersInput$schema$value ??= z.object({ manifestId: ${NUM} }).readonly())`,
+  `let _mediaLibrary_manifestPerformerPreview$schema$value\nconst _mediaLibrary_manifestPerformerPreview$schema = () => (_mediaLibrary_manifestPerformerPreview$schema$value ??= z.object({ manifestId: ${NUM}, canCommit: ${BOOL}, autoMatched: z.array(_mediaLibrary_performerPreviewEntry$schema()).readonly(), humanResolved: z.array(_mediaLibrary_performerPreviewEntry$schema()).readonly(), skipped: z.array(${STR}).readonly(), pendingReview: _mediaLibrary_performerReviewList$schema(), normalTags: z.array(_mediaLibrary_normalTagPreviewEntry$schema()).readonly() }).readonly())`,
+  `let _mediaLibrary_upsertPerformerAliasInput$schema$value\nconst _mediaLibrary_upsertPerformerAliasInput$schema = () => (_mediaLibrary_upsertPerformerAliasInput$schema$value ??= z.object({ rawAlias: ${STR}, tagId: ${NUM}, policy: z.enum(['auto', 'always_ask']).readonly().optional(), note: ${STR}.optional() }).readonly())`,
+  `let _mediaLibrary_upsertPerformerAliasResult$schema$value\nconst _mediaLibrary_upsertPerformerAliasResult$schema = () => (_mediaLibrary_upsertPerformerAliasResult$schema$value ??= z.object({ ok: ${BOOL}, code: ${STR}.optional(), message: ${STR}.optional(), alias: _mediaLibrary_performerAliasRecord$schema().nullable().optional() }).readonly())`,
+  `let _mediaLibrary_deletePerformerAliasInput$schema$value\nconst _mediaLibrary_deletePerformerAliasInput$schema = () => (_mediaLibrary_deletePerformerAliasInput$schema$value ??= z.object({ aliasId: ${NUM} }).readonly())`,
+  `let _mediaLibrary_deletePerformerAliasResult$schema$value\nconst _mediaLibrary_deletePerformerAliasResult$schema = () => (_mediaLibrary_deletePerformerAliasResult$schema$value ??= z.object({ ok: ${BOOL}, code: ${STR}.optional(), message: ${STR}.optional() }).readonly())`,
+  `let _mediaLibrary_listPerformerReviewInput$schema$value\nconst _mediaLibrary_listPerformerReviewInput$schema = () => (_mediaLibrary_listPerformerReviewInput$schema$value ??= z.object({ status: z.enum(['pending', 'resolved', 'skipped', 'all']).readonly().optional(), manifestId: ${NUM}.optional() }).readonly().optional())`,
+  `let _mediaLibrary_resolvePerformerReviewInput$schema$value\nconst _mediaLibrary_resolvePerformerReviewInput$schema = () => (_mediaLibrary_resolvePerformerReviewInput$schema$value ??= z.object({ reviewId: ${NUM}, mode: z.enum(['bind_existing', 'create_performer_tag', 'skip']).readonly(), tagId: ${NUM}.optional(), newTagName: ${STR}.optional(), rememberRule: ${BOOL}.optional(), rulePolicy: z.enum(['auto', 'always_ask']).readonly().optional() }).readonly())`,
+  `let _mediaLibrary_resolvePerformerReviewResult$schema$value\nconst _mediaLibrary_resolvePerformerReviewResult$schema = () => (_mediaLibrary_resolvePerformerReviewResult$schema$value ??= z.object({ ok: ${BOOL}, code: ${STR}.optional(), message: ${STR}.optional(), item: _mediaLibrary_performerReviewItem$schema().nullable().optional(), createdTagId: ${NUM}.nullable().optional() }).readonly())`,
+  `let _mediaLibrary_promotePerformerTagInput$schema$value\nconst _mediaLibrary_promotePerformerTagInput$schema = () => (_mediaLibrary_promotePerformerTagInput$schema$value ??= z.object({ mediaId: ${STR}, tagId: ${NUM} }).readonly())`,
+  `let _mediaLibrary_promotePerformerTagResult$schema$value\nconst _mediaLibrary_promotePerformerTagResult$schema = () => (_mediaLibrary_promotePerformerTagResult$schema$value ??= z.object({ ok: ${BOOL}, code: ${STR}.optional(), message: ${STR}.optional(), promoted: ${BOOL}.optional() }).readonly())`,
 ].join('\n\n');
 
 interface MutationMethodSpec {
@@ -163,6 +185,11 @@ const MUTATION_METHODS: MutationMethodSpec[] = [
   { name: 'fetchIngestionMetadata', description: 'Fetch candidate metadata and tags from FC2CMADB/FC2PPVDB for a staged manifest.', inputKey: 'fetchIngestionMetadataInput', inputType: 'FetchIngestionMetadataInput', resultKey: 'fetchedMetadataCandidate', resultType: 'FetchedMetadataCandidate', paramDescription: 'Manifest id.', line: 250 },
   { name: 'reviewIngestion', description: 'Record human review approval/rejection and confirmed tags for a manifest.', inputKey: 'reviewIngestionInput', inputType: 'ReviewIngestionInput', resultKey: 'reviewIngestionResult', resultType: 'ReviewIngestionResult', paramDescription: 'Review decision, metadata and tags.', line: 258 },
   { name: 'commitIngestion', description: 'Execute a reviewed ingestion manifest (move + verify + index + conservative cleanup).', inputKey: 'commitIngestionInput', inputType: 'CommitIngestionInput', resultKey: 'commitIngestionResult', resultType: 'CommitIngestionResult', paramDescription: 'Manifest id.', line: 266 },
+  { name: 'previewManifestPerformers', description: 'Preview deterministic performer-alias matches, pending review items, and normal tag matches for a manifest.', inputKey: 'previewManifestPerformersInput', inputType: 'PreviewManifestPerformersInput', resultKey: 'manifestPerformerPreview', resultType: 'ManifestPerformerPreview', paramDescription: 'Manifest id.', line: 300 },
+  { name: 'upsertPerformerAlias', description: 'Create or update a durable performer-alias mapping (normalized source name -> tagId).', inputKey: 'upsertPerformerAliasInput', inputType: 'UpsertPerformerAliasInput', resultKey: 'upsertPerformerAliasResult', resultType: 'UpsertPerformerAliasResult', paramDescription: 'Raw performer alias, target tagId, and policy.', line: 316 },
+  { name: 'deletePerformerAlias', description: 'Remove a performer-alias mapping by id.', inputKey: 'deletePerformerAliasInput', inputType: 'DeletePerformerAliasInput', resultKey: 'deletePerformerAliasResult', resultType: 'DeletePerformerAliasResult', paramDescription: 'Performer alias id.', line: 324 },
+  { name: 'resolvePerformerReview', description: 'Resolve a performer review queue item (bind existing tag, create performer tag, or skip).', inputKey: 'resolvePerformerReviewInput', inputType: 'ResolvePerformerReviewInput', resultKey: 'resolvePerformerReviewResult', resultType: 'ResolvePerformerReviewResult', paramDescription: 'Review item id, resolution mode, and binding options.', line: 340 },
+  { name: 'promotePerformerTagToManual', description: 'Promote an auto-applied performer-rule media tag association to manual protection.', inputKey: 'promotePerformerTagInput', inputType: 'PromotePerformerTagInput', resultKey: 'promotePerformerTagResult', resultType: 'PromotePerformerTagResult', paramDescription: 'Media id and tag id.', line: 348 },
 ];
 
 function mutationMethodEntry(m: MutationMethodSpec): string {
@@ -521,6 +548,48 @@ const REMOTE_INFO_BODY = `{
       },
       sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 274, column: 3 },
     },
+    'mediaLibrary/listPerformerAliases': {
+      service: 'mediaLibrary',
+      description: 'List explicit performer-alias mappings with remediation and ambiguity metadata.',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-experimental-media-library/types#PerformerAliasRecord[]',
+        create: _mediaLibrary_performerAliasList$schema,
+      },
+      sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 308, column: 3 },
+    },
+    'mediaLibrary/listPerformerReviewQueue': {
+      service: 'mediaLibrary',
+      description: 'List pending or historical performer review queue items.',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'input',
+          description: 'Optional status/manifest filter.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: '@deepseek-ai/dsh-experimental-media-library#mediaLibrary/listPerformerReviewQueue:input',
+            create: _mediaLibrary_listPerformerReviewInput$schema,
+            jsonSchema: { type: 'object' },
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: '@deepseek-ai/dsh-experimental-media-library#mediaLibrary/listPerformerReviewQueue:input',
+            create: _mediaLibrary_listPerformerReviewInput$schema,
+            jsonSchema: { type: 'object' },
+          },
+        },
+      ],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-experimental-media-library/types#PerformerReviewItem[]',
+        create: _mediaLibrary_performerReviewList$schema,
+      },
+      sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 332, column: 3 },
+    },
     'mediaLibrary/getMedia': {
       service: 'mediaLibrary',
       description: 'Get full details for a single media item by its mediaId.',
@@ -768,6 +837,9 @@ import type {
   IngestionManifest,
   IngestionTask,
   ReconcileIngestionResult,
+  PerformerAliasRecord,
+  PerformerReviewItem,
+  ListPerformerReviewInput,
 ${MUTATION_DTS_IMPORTS.map(n => `  ${n},`).join('\n')}
 } from '../src/types.ts'
 
@@ -780,6 +852,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     listIngestionManifests: () => Promise<RemoteResult<IngestionManifest[]>>
     listIngestionTasks: () => Promise<RemoteResult<IngestionTask[]>>
     reconcileIngestion: () => Promise<RemoteResult<ReconcileIngestionResult>>
+    listPerformerAliases: () => Promise<RemoteResult<PerformerAliasRecord[]>>
+    listPerformerReviewQueue: (input?: ListPerformerReviewInput) => Promise<RemoteResult<PerformerReviewItem[]>>
     importTagStudioCopy: (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     listTags: (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
     openMedia: (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
@@ -796,6 +870,8 @@ ${MUTATION_DTS_NAMESPACE}
     'mediaLibrary/listIngestionManifests': () => Promise<RemoteResult<IngestionManifest[]>>
     'mediaLibrary/listIngestionTasks': () => Promise<RemoteResult<IngestionTask[]>>
     'mediaLibrary/reconcileIngestion': () => Promise<RemoteResult<ReconcileIngestionResult>>
+    'mediaLibrary/listPerformerAliases': () => Promise<RemoteResult<PerformerAliasRecord[]>>
+    'mediaLibrary/listPerformerReviewQueue': (input?: ListPerformerReviewInput) => Promise<RemoteResult<PerformerReviewItem[]>>
     'mediaLibrary/importTagStudioCopy': (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     'mediaLibrary/listTags': (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
     'mediaLibrary/openMedia': (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
@@ -817,6 +893,8 @@ export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'mediaLibrary/listIngestionManifests': TypertRemoteMethod<{}, IngestionManifest[]>
   readonly 'mediaLibrary/listIngestionTasks': TypertRemoteMethod<{}, IngestionTask[]>
   readonly 'mediaLibrary/reconcileIngestion': TypertRemoteMethod<{}, ReconcileIngestionResult>
+  readonly 'mediaLibrary/listPerformerAliases': TypertRemoteMethod<{}, PerformerAliasRecord[]>
+  readonly 'mediaLibrary/listPerformerReviewQueue': TypertRemoteMethod<{ readonly input?: ListPerformerReviewInput }, PerformerReviewItem[]>
   readonly 'mediaLibrary/importTagStudioCopy': TypertRemoteMethod<{ readonly input?: ImportTagStudioInput }, ImportTagStudioResult>
   readonly 'mediaLibrary/listTags': TypertRemoteMethod<{ readonly input?: ListTagsInput }, ListTagsResult>
   readonly 'mediaLibrary/openMedia': TypertRemoteMethod<{ readonly mediaId: string }, MediaActionResult>

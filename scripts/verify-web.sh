@@ -8,7 +8,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-HARNESS_DIR="${DSH_HARNESS_DIR:-/home/aaevi/projects/deepseek-harness}"
+if [[ -n "${DSH_HARNESS_DIR:-}" ]]; then
+  HARNESS_DIR="${DSH_HARNESS_DIR}"
+elif [[ -d "/home/aaevi/projects/project/deepseek-harness" ]]; then
+  HARNESS_DIR="/home/aaevi/projects/project/deepseek-harness"
+else
+  HARNESS_DIR="/home/aaevi/projects/deepseek-harness"
+fi
 VERSION="$(node -p "require('$REPO_ROOT/bundle/package.json').version")"
 SHORT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 TGZ="${1:-$REPO_ROOT/dist/dsh-media-library-${VERSION}-${SHORT_SHA}.tgz}"
@@ -101,7 +107,7 @@ node --input-type=module -e '
 import assert from "node:assert/strict";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { chromium } from "/home/aaevi/projects/deepseek-harness/apps/web/node_modules/playwright/index.mjs";
+import { chromium } from "'"${HARNESS_DIR}"'/apps/web/node_modules/playwright/index.mjs";
 
 const url = process.env.TOKEN_URL;
 const fixtureDb = process.env.FIXTURE_DB;
@@ -444,14 +450,17 @@ try {
   await page.click("[data-testid=\"toggle-ops-panel-btn\"]");
   console.log("Issue #6 M3 Ops E2E (verified backup, retention list, JSON/CSV export): PASS");
 
-  // Issue #7 M4 Ingestion E2E: open Pending Ingestion panel, verify empty state & scan button
+  // Issue #7 & #8 M4 Ingestion + Performer Drawer E2E: open Pending Ingestion panel, verify empty state, performer drawer & scan button
   await page.click("[data-testid=\"toggle-ingestion-panel-btn\"]");
   await page.waitForSelector("[data-testid=\"ingestion-panel\"]");
   await page.waitForSelector("[data-testid=\"ingestion-empty\"]");
+  await page.click("[data-testid=\"performer-drawer-btn\"]");
+  await page.waitForSelector("[data-testid=\"performer-drawer\"]");
+  await page.click("[data-testid=\"performer-drawer-btn\"]");
   await page.click("[data-testid=\"ingestion-scan-btn\"]");
   await page.waitForSelector("[data-testid=\"ingestion-error\"]");
   await page.click("[data-testid=\"toggle-ingestion-panel-btn\"]");
-  console.log("Issue #7 M4 Ingestion UI E2E (panel, scan & controlled error surface): PASS");
+  console.log("Issue #7 & #8 M4 Ingestion + Performer Drawer UI E2E: PASS");
 
   // Measure actual 100k result rendering separately from the six-row import.
   // This is a warm Host/UI search; cold Host initialization is measured in B5.

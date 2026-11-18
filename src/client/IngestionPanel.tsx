@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { IngestionManifest, IngestionTask, StagingFileItem } from '../types.ts';
+import type {
+  IngestionManifest,
+  IngestionTask,
+  ManifestPerformerPreview,
+  PerformerAliasRecord,
+  PerformerReviewItem,
+  StagingFileItem,
+} from '../types.ts';
+import { PerformerDrawer, PerformerInlineCard } from './PerformerReviewSection.tsx';
 import { buttonStyle, controlStyle } from './TagManagementPanel.tsx';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
@@ -22,12 +30,14 @@ const sessionCache: {
   selectedKey: string | null;
   dirtyDrafts: Record<string, DraftFields>;
   lastSeenTaskId: number;
+  showPerformerDrawer: boolean;
 } = {
   stagedFiles: [],
   hasScannedOnce: false,
   selectedKey: null,
   dirtyDrafts: {},
   lastSeenTaskId: 0,
+  showPerformerDrawer: false,
 };
 
 interface UnifiedStagingEntry {
@@ -59,11 +69,23 @@ export function IngestionPanel({
   const [stagedFiles, setStagedFiles] = useState<readonly StagingFileItem[]>(() => sessionCache.stagedFiles);
   const [manifests, setManifests] = useState<readonly IngestionManifest[]>([]);
   const [tasks, setTasks] = useState<readonly IngestionTask[]>([]);
+  const [performerAliases, setPerformerAliases] = useState<readonly PerformerAliasRecord[]>([]);
+  const [pendingQueue, setPendingQueue] = useState<readonly PerformerReviewItem[]>([]);
+  const [performerPreview, setPerformerPreview] = useState<ManifestPerformerPreview | null>(null);
+  const [showPerformerDrawer, setShowPerformerDrawerState] = useState<boolean>(() => sessionCache.showPerformerDrawer);
   const [selectedKey, setSelectedKeyState] = useState<string | null>(() => sessionCache.selectedKey);
   const [dirtyDrafts, setDirtyDrafts] = useState<Record<string, DraftFields>>(() => ({ ...sessionCache.dirtyDrafts }));
   const [busyOp, setBusyOp] = useState<BusyOp>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const togglePerformerDrawer = useCallback(() => {
+    setShowPerformerDrawerState((prev) => {
+      const next = !prev;
+      sessionCache.showPerformerDrawer = next;
+      return next;
+    });
+  }, []);
 
   const setSelectedKey = useCallback((next: string | null) => {
     sessionCache.selectedKey = next;
@@ -97,14 +119,22 @@ export function IngestionPanel({
 
   const reloadServerState = useCallback(async () => {
     try {
-      const [mRes, tRes] = await Promise.all([
+      const [mRes, tRes, paRes, pqRes] = await Promise.all([
         mediaLibrary.listIngestionManifests(),
         mediaLibrary.listIngestionTasks(),
+        mediaLibrary.listPerformerAliases(),
+        mediaLibrary.listPerformerReviewQueue({ status: 'pending' }),
       ]);
       if (mRes.ok) {
         setManifests(mRes.value);
       } else {
         setError(mRes.error.message || t('rpcError'));
+      }
+      if (paRes.ok) {
+        setPerformerAliases(paRes.value);
+      }
+      if (pqRes.ok) {
+        setPendingQueue(pqRes.value);
       }
       if (tRes.ok) {
         setTasks(tRes.value);
@@ -212,6 +242,26 @@ export function IngestionPanel({
   }, [stagedFiles, manifests]);
 
   const selected = entries.find((e) => e.key === selectedKey) ?? null;
+  const selectedManifestId = selected?.manifest?.id ?? null;
+
+  const reloadSelectedPreview = useCallback(async () => {
+    if (selectedManifestId === null) {
+      setPerformerPreview(null);
+      return;
+    }
+    try {
+      const res = await mediaLibrary.previewManifestPerformers({ manifestId: selectedManifestId });
+      if (res.ok) {
+        setPerformerPreview(res.value);
+      }
+    } catch {
+      // Ignore transient preview error; commit still enforces server-side gate.
+    }
+  }, [mediaLibrary, selectedManifestId]);
+
+  useEffect(() => {
+    void reloadSelectedPreview();
+  }, [reloadSelectedPreview, manifests, performerAliases, pendingQueue]);
 
   const serverFallback: DraftFields = useMemo(
     () => ({
@@ -222,6 +272,50 @@ export function IngestionPanel({
     [selected],
   );
   const activeDraft = selected ? dirtyDrafts[selected.key] ?? serverFallback : serverFallback;
+
+  const draftTagList = useMemo(
+    () =>
+      activeDraft.tagsText
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    [activeDraft.tagsText],
+  );
+
+  const previewTagByLower = useMemo(() => {
+    const map = new Map<string, { matchedVia: 'name' | 'alias' | 'new'; matchedTagName: string | null }>();
+    for (const entry of performerPreview?.normalTags ?? []) {
+      map.set(entry.rawName.toLowerCase(), {
+        matchedVia: entry.matchedVia,
+        matchedTagName: entry.matchedTagName,
+      });
+    }
+    return map;
+  }, [performerPreview]);
+
+  const removeDraftTag = useCallback(
+    (indexToRemove: number) => {
+      if (!selected) return;
+      const nextList = draftTagList.filter((_, i) => i !== indexToRemove);
+      updateDraft(selected.key, { tagsText: nextList.join(', ') }, serverFallback);
+    },
+    [draftTagList, selected, serverFallback, updateDraft],
+  );
+
+  const handlePerformerChanged = useCallback(
+    (msg: string) => {
+      setError(null);
+      setMessage(msg);
+      void reloadServerState().then(() => reloadSelectedPreview());
+    },
+    [reloadSelectedPreview, reloadServerState],
+  );
+
+  const remediationCount = useMemo(
+    () => performerAliases.filter((a) => a.needsRemediation).length,
+    [performerAliases],
+  );
+  const commitBlockedByPerformer = Boolean(performerPreview && !performerPreview.canCommit);
 
   const handleReconcile = async () => {
     setBusyOp('reconcile');
@@ -370,7 +464,20 @@ export function IngestionPanel({
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
         <strong style={{ fontSize: '14px' }}>{t('ingestionHeading')}</strong>
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            data-testid="performer-drawer-btn"
+            onClick={togglePerformerDrawer}
+            style={{
+              ...buttonStyle,
+              borderColor:
+                pendingQueue.length > 0 || remediationCount > 0 ? 'rgba(245,158,11,0.7)' : undefined,
+            }}
+          >
+            {t('performerDrawerBtn')} ({pendingQueue.length}
+            {remediationCount > 0 ? ` / ⚠${remediationCount}` : ''})
+          </button>
           <button
             type="button"
             data-testid="ingestion-scan-btn"
@@ -391,6 +498,18 @@ export function IngestionPanel({
           </button>
         </div>
       </div>
+
+      {showPerformerDrawer ? (
+        <PerformerDrawer
+          t={t}
+          mediaLibrary={mediaLibrary}
+          aliases={performerAliases}
+          pendingQueue={pendingQueue}
+          disabled={busy || degraded}
+          onChanged={handlePerformerChanged}
+          onError={setError}
+        />
+      ) : null}
 
       {busyBannerText ? (
         <div role="status" data-testid="ingestion-busy" style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(59,130,246,0.5)', background: 'rgba(59,130,246,0.12)' }}>
@@ -477,8 +596,70 @@ export function IngestionPanel({
               style={controlStyle}
             />
           </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          {performerPreview ? (
+            <PerformerInlineCard
+              t={t}
+              preview={performerPreview}
+              mediaLibrary={mediaLibrary}
+              disabled={busy || degraded || selected.manifest?.state === 'indexed'}
+              onChanged={handlePerformerChanged}
+              onError={setError}
+            />
+          ) : null}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <span>{t('ingestionTagsLabel')}</span>
+            {draftTagList.length > 0 ? (
+              <div data-testid="ingestion-tag-preview" style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                {draftTagList.map((tagName, idx) => {
+                  const info = previewTagByLower.get(tagName.toLowerCase());
+                  const matchedVia = info?.matchedVia ?? 'new';
+                  const badgeText =
+                    matchedVia === 'name'
+                      ? t('tagPreviewExisting')
+                      : matchedVia === 'alias'
+                        ? `${t('tagPreviewAlias')}→${info?.matchedTagName ?? ''}`
+                        : `+ ${t('tagPreviewNew')}`;
+                  return (
+                    <span
+                      key={`${tagName}-${idx}`}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        padding: '2px 8px',
+                        borderRadius: '999px',
+                        border:
+                          matchedVia === 'new'
+                            ? '1px dashed rgba(245,158,11,0.65)'
+                            : '1px solid rgba(34,197,94,0.55)',
+                        background:
+                          matchedVia === 'new' ? 'rgba(245,158,11,0.1)' : 'rgba(34,197,94,0.1)',
+                      }}
+                    >
+                      <span>{tagName}</span>
+                      <span style={{ opacity: 0.72, fontSize: '11px' }}>({badgeText})</span>
+                      {selected.manifest?.state !== 'indexed' ? (
+                        <button
+                          type="button"
+                          aria-label={`Remove ${tagName}`}
+                          onClick={() => removeDraftTag(idx)}
+                          style={{
+                            border: 'none',
+                            background: 'transparent',
+                            color: 'inherit',
+                            cursor: 'pointer',
+                            padding: '0 2px',
+                            fontWeight: 700,
+                          }}
+                        >
+                          ×
+                        </button>
+                      ) : null}
+                    </span>
+                  );
+                })}
+              </div>
+            ) : null}
             <input
               type="text"
               data-testid="ingestion-tags-input"
@@ -486,7 +667,21 @@ export function IngestionPanel({
               onChange={(e) => updateDraft(selected.key, { tagsText: e.target.value }, serverFallback)}
               style={controlStyle}
             />
-          </label>
+          </div>
+          {commitBlockedByPerformer ? (
+            <div
+              role="status"
+              data-testid="performer-commit-gate"
+              style={{
+                padding: '6px 10px',
+                borderRadius: '6px',
+                border: '1px solid rgba(245,158,11,0.6)',
+                background: 'rgba(245,158,11,0.12)',
+              }}
+            >
+              ⚠ {t('performerCommitGateHint')}
+            </div>
+          ) : null}
           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
             <button
               type="button"
@@ -500,7 +695,7 @@ export function IngestionPanel({
             <button
               type="button"
               data-testid="ingestion-commit-btn"
-              disabled={busy || degraded || selected.manifest?.state === 'indexed'}
+              disabled={busy || degraded || commitBlockedByPerformer || selected.manifest?.state === 'indexed'}
               onClick={() => void handleMoveAndIndex(selected)}
               style={buttonStyle}
             >

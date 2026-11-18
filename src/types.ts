@@ -305,6 +305,8 @@ export interface MergePreviewSuccess {
   readonly aliasesConflicting: number;
   readonly parentEdgesMigrated: number;
   readonly parentEdgesDeduped: number;
+  readonly performerAliasesMigrated?: number | undefined;
+  readonly performerAliasesDeduped?: number | undefined;
   readonly wouldCreateCycle: boolean;
 }
 
@@ -322,6 +324,8 @@ export interface MergeTagsSuccess {
   readonly aliasesMigrated: number;
   readonly aliasesDropped: number;
   readonly parentEdgesMigrated: number;
+  readonly performerAliasesMigrated?: number | undefined;
+  readonly performerAliasesDeduped?: number | undefined;
 }
 
 export type MergeTagsResult = MergeTagsSuccess | MutationError;
@@ -430,6 +434,7 @@ export interface IngestionManifest {
   readonly title: string | null;
   readonly catalogNumber: string | null;
   readonly mediaDate: string | null;
+  readonly actresses: readonly string[];
   readonly tags: readonly IngestionManifestTag[];
   readonly metadataSource: string | null;
   readonly checksumSha256: string;
@@ -496,7 +501,7 @@ export interface CommitIngestionInput {
 
 export interface CommitIngestionResult {
   readonly ok: boolean;
-  readonly code?: 'REVIEW_REQUIRED' | 'READ_ONLY_DEGRADED' | 'MANIFEST_NOT_FOUND' | 'MOVE_FAILED' | 'INDEX_FAILED' | 'CHECKSUM_MISMATCH' | 'IN_PROGRESS' | MediaActionErrorCode | undefined;
+  readonly code?: 'REVIEW_REQUIRED' | 'PERFORMER_REVIEW_REQUIRED' | 'READ_ONLY_DEGRADED' | 'MANIFEST_NOT_FOUND' | 'MOVE_FAILED' | 'INDEX_FAILED' | 'CHECKSUM_MISMATCH' | 'IN_PROGRESS' | MediaActionErrorCode | undefined;
   readonly message: string;
   readonly idempotentReplay?: boolean | undefined;
   readonly mediaId?: number | null | undefined;
@@ -525,4 +530,142 @@ export interface ReconcileIngestionResult {
   readonly indexedButMissingMarked: number;
   readonly errors: readonly string[];
   readonly manifests: readonly IngestionManifest[];
+}
+
+// ---------------------------------------------------------------------------
+// Issue #8 M4: Performer Alias Resolution & Review Queue
+// ---------------------------------------------------------------------------
+
+export type PerformerAliasPolicy = 'auto' | 'always_ask';
+export type PerformerReviewReason = 'unknown' | 'ambiguous' | 'archived_target';
+export type PerformerReviewStatus = 'pending' | 'resolved' | 'skipped';
+export type PerformerResolutionMode = 'bind_existing' | 'create_performer_tag' | 'skip';
+
+export interface PerformerAliasRecord {
+  readonly id: number;
+  readonly normalizedName: string;
+  readonly rawAlias: string;
+  readonly tagId: number;
+  readonly tagName: string;
+  readonly tagKind: string;
+  readonly targetArchived: boolean;
+  readonly needsRemediation: boolean;
+  readonly policy: PerformerAliasPolicy;
+  readonly isAmbiguous: boolean;
+  readonly note: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface PerformerCandidateTag {
+  readonly id: number;
+  readonly name: string;
+  readonly kind: string;
+}
+
+export interface PerformerReviewItem {
+  readonly id: number;
+  readonly manifestId: number | null;
+  readonly manifestFilename: string | null;
+  readonly mediaId: number | null;
+  readonly rawName: string;
+  readonly normalizedName: string;
+  readonly reason: PerformerReviewReason;
+  readonly candidateTags: readonly PerformerCandidateTag[];
+  readonly status: PerformerReviewStatus;
+  readonly resolutionMode: PerformerResolutionMode | null;
+  readonly resolvedTagId: number | null;
+  readonly resolvedTagName: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface PerformerPreviewEntry {
+  readonly rawName: string;
+  readonly normalizedName: string;
+  readonly tagId: number;
+  readonly tagName: string;
+  readonly source: 'performer-rule' | 'manual';
+  readonly confidence: number | null;
+  readonly resolutionMode: PerformerResolutionMode | null;
+  readonly alreadyManual: boolean;
+}
+
+export interface NormalTagPreviewEntry {
+  readonly rawName: string;
+  readonly matchedTagId: number | null;
+  readonly matchedTagName: string | null;
+  readonly matchedVia: 'name' | 'alias' | 'new';
+}
+
+export interface ManifestPerformerPreview {
+  readonly manifestId: number;
+  readonly canCommit: boolean;
+  readonly autoMatched: readonly PerformerPreviewEntry[];
+  readonly humanResolved: readonly PerformerPreviewEntry[];
+  readonly skipped: readonly string[];
+  readonly pendingReview: readonly PerformerReviewItem[];
+  readonly normalTags: readonly NormalTagPreviewEntry[];
+}
+
+export interface PreviewManifestPerformersInput {
+  readonly manifestId: number;
+}
+
+export interface UpsertPerformerAliasInput {
+  readonly rawAlias: string;
+  readonly tagId: number;
+  readonly policy?: PerformerAliasPolicy | undefined;
+  readonly note?: string | undefined;
+}
+
+export interface UpsertPerformerAliasResult {
+  readonly ok: boolean;
+  readonly code?: MutationErrorCode | undefined;
+  readonly message?: string | undefined;
+  readonly alias?: PerformerAliasRecord | null | undefined;
+}
+
+export interface DeletePerformerAliasInput {
+  readonly aliasId: number;
+}
+
+export interface DeletePerformerAliasResult {
+  readonly ok: boolean;
+  readonly code?: MutationErrorCode | undefined;
+  readonly message?: string | undefined;
+}
+
+export interface ListPerformerReviewInput {
+  readonly status?: PerformerReviewStatus | 'all' | undefined;
+  readonly manifestId?: number | undefined;
+}
+
+export interface ResolvePerformerReviewInput {
+  readonly reviewId: number;
+  readonly mode: PerformerResolutionMode;
+  readonly tagId?: number | undefined;
+  readonly newTagName?: string | undefined;
+  readonly rememberRule?: boolean | undefined;
+  readonly rulePolicy?: PerformerAliasPolicy | undefined;
+}
+
+export interface ResolvePerformerReviewResult {
+  readonly ok: boolean;
+  readonly code?: MutationErrorCode | 'REVIEW_NOT_FOUND' | undefined;
+  readonly message?: string | undefined;
+  readonly item?: PerformerReviewItem | null | undefined;
+  readonly createdTagId?: number | null | undefined;
+}
+
+export interface PromotePerformerTagInput {
+  readonly mediaId: string;
+  readonly tagId: number;
+}
+
+export interface PromotePerformerTagResult {
+  readonly ok: boolean;
+  readonly code?: MutationErrorCode | undefined;
+  readonly message?: string | undefined;
+  readonly promoted?: boolean | undefined;
 }

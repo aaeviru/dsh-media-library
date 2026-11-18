@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
 
-export const CURRENT_SCHEMA_VERSION = 5
+export const CURRENT_SCHEMA_VERSION = 6
 
 export interface SchemaMigration {
   readonly version: number
@@ -355,12 +355,55 @@ export const V5_INGESTION_TASKS_MIGRATION: SchemaMigration = {
   },
 }
 
+export const V6_PERFORMER_ALIASES_MIGRATION: SchemaMigration = {
+  version: 6,
+  description: 'Add performer_aliases, performer_review_queue, and manifest actresses_json (Issue #8)',
+  up(db): void {
+    db.exec(`
+      ALTER TABLE ingestion_manifests ADD COLUMN actresses_json TEXT NOT NULL DEFAULT '[]';
+
+      CREATE TABLE IF NOT EXISTS performer_aliases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        normalized_name TEXT NOT NULL,
+        raw_alias TEXT NOT NULL,
+        tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE RESTRICT,
+        policy TEXT NOT NULL DEFAULT 'auto' CHECK (policy IN ('auto', 'always_ask')),
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(normalized_name, tag_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_performer_aliases_norm ON performer_aliases(normalized_name);
+      CREATE INDEX IF NOT EXISTS idx_performer_aliases_tag ON performer_aliases(tag_id);
+
+      CREATE TABLE IF NOT EXISTS performer_review_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        manifest_id INTEGER REFERENCES ingestion_manifests(id) ON DELETE CASCADE,
+        media_id INTEGER REFERENCES media_files(id) ON DELETE CASCADE,
+        raw_name TEXT NOT NULL,
+        normalized_name TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (reason IN ('unknown', 'ambiguous', 'archived_target')),
+        candidate_tag_ids_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'resolved', 'skipped')),
+        resolution_mode TEXT,
+        resolved_tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(manifest_id, normalized_name)
+      );
+      CREATE INDEX IF NOT EXISTS idx_performer_review_status ON performer_review_queue(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_performer_review_manifest ON performer_review_queue(manifest_id);
+    `)
+  },
+}
+
 export const DEFAULT_MIGRATIONS: readonly SchemaMigration[] = [
   V1_SCHEMA_MIGRATION,
   V2_MEDIA_STATUS_MIGRATION,
   V3_TAG_MANAGEMENT_MIGRATION,
   V4_INGESTION_MANIFESTS_MIGRATION,
   V5_INGESTION_TASKS_MIGRATION,
+  V6_PERFORMER_ALIASES_MIGRATION,
 ]
 
 function ensureSchemaVersionsTable(db: DatabaseSync): void {
@@ -406,7 +449,7 @@ export async function migrateDatabase(
   ensureSchemaVersionsTable(db)
 
   const migrations = [...(options?.migrations ?? DEFAULT_MIGRATIONS)].sort((a, b) => a.version - b.version)
-  const appVersion = options?.appVersion ?? '0.5.5'
+  const appVersion = options?.appVersion ?? '0.6.0'
   const nowFn = options?.now ?? (() => new Date())
 
   const previousVersion = getCurrentSchemaVersion(db)
