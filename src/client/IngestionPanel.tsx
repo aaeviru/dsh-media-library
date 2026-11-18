@@ -280,6 +280,22 @@ export function IngestionPanel({
     return map;
   }, [performerPreview]);
 
+  const sortedTagPills = useMemo(() => {
+    const rank = (via: 'name' | 'alias' | 'new') => (via === 'name' ? 0 : via === 'alias' ? 1 : 2);
+    return draftTagList
+      .map((tagName, idx) => {
+        const info = previewTagByLower.get(tagName.toLowerCase());
+        const matchedVia: 'name' | 'alias' | 'new' = info?.matchedVia ?? 'new';
+        return {
+          tagName,
+          idx,
+          matchedVia,
+          matchedTagName: info?.matchedTagName ?? null,
+        };
+      })
+      .sort((a, b) => rank(a.matchedVia) - rank(b.matchedVia) || a.idx - b.idx);
+  }, [draftTagList, previewTagByLower]);
+
   const removeDraftTag = useCallback(
     (indexToRemove: number) => {
       if (!selected) return;
@@ -615,16 +631,14 @@ export function IngestionPanel({
           ) : null}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             <span>{t('ingestionTagsLabel')}</span>
-            {draftTagList.length > 0 ? (
+            {sortedTagPills.length > 0 ? (
               <div data-testid="ingestion-tag-preview" style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                {draftTagList.map((tagName, idx) => {
-                  const info = previewTagByLower.get(tagName.toLowerCase());
-                  const matchedVia = info?.matchedVia ?? 'new';
+                {sortedTagPills.map(({ tagName, idx, matchedVia, matchedTagName }) => {
                   const badgeText =
                     matchedVia === 'name'
                       ? t('tagPreviewExisting')
                       : matchedVia === 'alias'
-                        ? `${t('tagPreviewAlias')}→${info?.matchedTagName ?? ''}`
+                        ? `${t('tagPreviewAlias')}→${matchedTagName ?? ''}`
                         : `+ ${t('tagPreviewNew')}`;
                   return (
                     <span

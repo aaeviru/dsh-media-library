@@ -449,7 +449,7 @@ export async function migrateDatabase(
   ensureSchemaVersionsTable(db)
 
   const migrations = [...(options?.migrations ?? DEFAULT_MIGRATIONS)].sort((a, b) => a.version - b.version)
-  const appVersion = options?.appVersion ?? '0.6.1'
+  const appVersion = options?.appVersion ?? '0.6.2'
   const nowFn = options?.now ?? (() => new Date())
 
   const previousVersion = getCurrentSchemaVersion(db)
