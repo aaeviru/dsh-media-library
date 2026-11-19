@@ -170,7 +170,11 @@ try {
   await page.fill("[data-testid=\"import-source-input\"]", fixtureDb);
   const tImportStart = performance.now();
   await page.click("[data-testid=\"import-submit-btn\"]");
-  await page.waitForSelector("[data-testid=\"media-results-table\"]", { timeout: 10000 });
+  await page.waitForFunction(() =>
+    document.querySelectorAll("tr[data-testid^=\"media-row-\"]").length === 6 &&
+    !document.querySelector("[data-testid=\"search-submit-btn\"]").disabled,
+    undefined, { timeout: 10000 }
+  );
   const firstResultDisplayMs = performance.now() - tImportStart;
   console.log(`UI first result display (including fixture import): ${firstResultDisplayMs.toFixed(1)}ms; target <1000ms`);
   assert.ok(firstResultDisplayMs < 1000, `Expected UI first result display <1000ms, took ${firstResultDisplayMs.toFixed(1)}ms`);

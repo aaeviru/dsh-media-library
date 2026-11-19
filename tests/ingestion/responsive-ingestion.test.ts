@@ -480,3 +480,25 @@ test('replacing a service within the same Host preserves live task ownership and
   } finally { g.release(); await pending; }
   assert.equal((await pending).ok, true);
 });
+
+test('changing the configured database cannot admit another move while this Host still owns pending I/O', async () => {
+  const g = gate();
+  const f = fixture({ async rename(a, b) { g.enter(); await g.pending; await defaultIngestionFileOps.rename(f.map(a), f.map(b)); } });
+  const first = await f.prepare('first.mp4');
+  const second = await f.prepare('second.mp4');
+  const pending = f.service.commitIngestion({ manifestId: first.id });
+  await g.entered;
+  let competing: ReturnType<MediaLibrarySpikeService['commitIngestion']> | undefined;
+  try {
+    const replacement = new MediaLibrarySpikeService({ baseDir: f.dir, dataDirName: 'other-library', configuredStagingDir: f.staging, configuredUncRoot: '\\\\NAS\\MediaTest', autoDailyBackup: false, ingestionFileOps: f.ops });
+    const review = await replacement.reviewIngestion({ tempPath: second.source, decision: 'approved' });
+    assert.ok(review.manifest);
+    competing = replacement.commitIngestion({ manifestId: review.manifest.id });
+    const result = await Promise.race([competing, new Promise<null>(resolve => setTimeout(() => resolve(null), 500))]);
+    assert.equal(result?.code, 'IN_PROGRESS', 'execution exclusion belongs to the Host, including across dataDir changes');
+    assert.equal(result?.activeTask?.id, (await f.service.listIngestionTasks())[0]!.id);
+    assert.equal((await replacement.reconcileIngestion()).ok, false);
+  } finally { g.release(); await Promise.all([pending, competing]); }
+  assert.equal((await pending).ok, true);
+  assert.equal(fs.existsSync(second.source), true);
+});

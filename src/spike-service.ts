@@ -139,7 +139,11 @@ import {
 // Config/plugin replacement can create a second service while old async I/O is still alive.
 // Keep process-local ownership across module reloads; a true Host restart starts with an empty registry.
 const LIVE_TASKS_KEY = Symbol.for('dsh-media-library.live-ingestion-tasks');
-const hostRuntime = globalThis as typeof globalThis & { [LIVE_TASKS_KEY]?: Map<string, Set<number>> };
+const FILE_EXECUTION_KEY = Symbol.for('dsh-media-library.file-ingestion-execution');
+const hostRuntime = globalThis as typeof globalThis & {
+  [LIVE_TASKS_KEY]?: Map<string, Set<number>>;
+  [FILE_EXECUTION_KEY]?: { databasePath: string; task: IngestionTask };
+};
 const liveIngestionTasks = hostRuntime[LIVE_TASKS_KEY] ??= new Map<string, Set<number>>();
 
 export const DEFAULT_M1_ROOT_ID = 'nas-main';
@@ -518,7 +522,7 @@ export class MediaLibrarySpikeService {
         const mig = await migrateDatabase(db, {
           dbPath,
           backupDir: this.backupDir,
-          appVersion: '0.7.2',
+          appVersion: '0.7.3',
           now: this.now,
         });
         if (!mig.health.ok) {
@@ -579,16 +583,32 @@ export class MediaLibrarySpikeService {
     return this.initialization;
   }
 
-  private retainIngestionTask(taskId: number): void {
+  private retainIngestionTask(db: DatabaseSync, taskId: number): void {
     const ids = liveIngestionTasks.get(this.localDatabasePath) ?? new Set<number>();
     ids.add(taskId);
     liveIngestionTasks.set(this.localDatabasePath, ids);
+    const task = listIngestionTasks(db, 1, this.now).find(t => t.id === taskId);
+    if (task && task.op !== 'fetch') hostRuntime[FILE_EXECUTION_KEY] = { databasePath: this.localDatabasePath, task };
+  }
+
+  private startFileIngestionTask(db: DatabaseSync, targetKey: string, op: 'commit' | 'reconcile', message: string) {
+    const active = hostRuntime[FILE_EXECUTION_KEY];
+    if (active) {
+      const existing = { ...active.task, waitingWarning: this.now().getTime() - Date.parse(active.task.phaseStartedAt) >= 30_000 };
+      return { acquired: false as const, existing };
+    }
+    // No await between process admission, durable acquisition and ownership registration.
+    const lock = startIngestionTask(db, targetKey, op, message, this.now);
+    if (lock.acquired) this.retainIngestionTask(db, lock.taskId);
+    return lock;
   }
 
   private releaseIngestionTask(taskId: number): void {
     const ids = liveIngestionTasks.get(this.localDatabasePath);
     ids?.delete(taskId);
     if (ids?.size === 0) liveIngestionTasks.delete(this.localDatabasePath);
+    const active = hostRuntime[FILE_EXECUTION_KEY];
+    if (active?.databasePath === this.localDatabasePath && active.task.id === taskId) delete hostRuntime[FILE_EXECUTION_KEY];
   }
 
   private async withInitializedDatabase<T>(fn: (db: DatabaseSync) => T): Promise<T> {
@@ -829,7 +849,7 @@ export class MediaLibrarySpikeService {
       return await this.withInitializedDatabase((db) =>
         exportPortableMappingReport(db, {
           format: input.format,
-          appVersion: '0.7.2',
+          appVersion: '0.7.3',
           now: this.now,
         }),
       );
@@ -987,7 +1007,7 @@ export class MediaLibrarySpikeService {
         };
       }
       taskId = lock.taskId;
-      this.retainIngestionTask(taskId);
+      this.retainIngestionTask(db, taskId);
       const res = await fetchMetadataForManifest(db, manifestId, fetcher, this.now);
       finishIngestionTask(
         db,
@@ -1054,7 +1074,7 @@ export class MediaLibrarySpikeService {
     const { roots } = this.getEffectiveRootsAndItems();
     return this.withInitializedDatabase(async (db) => {
       const targetKey = `manifest:${input.manifestId}`;
-      const lock = startIngestionTask(db, targetKey, 'commit', `Moving & indexing manifest #${input.manifestId}...`, this.now);
+      const lock = this.startFileIngestionTask(db, targetKey, 'commit', `Moving & indexing manifest #${input.manifestId}...`);
       if (!lock.acquired) {
         return {
           ok: false,
@@ -1063,13 +1083,15 @@ export class MediaLibrarySpikeService {
           message: `Task #${lock.existing.id}: ` + lock.existing.message || 'Move & index already in progress for this item.',
         };
       }
-      this.retainIngestionTask(lock.taskId);
       try {
         const res = await commitIngestionManifest(db, {
           manifestId: input.manifestId,
           allowCrossDeviceCopy: this.allowCrossDeviceCopy,
           stagingDir: this.ingestionStagingDir(),
-          onPhase: phase => updateIngestionPhase(db, lock.taskId, phase, this.now),
+          onPhase: phase => {
+            updateIngestionPhase(db, lock.taskId, phase, this.now);
+            this.retainIngestionTask(db, lock.taskId);
+          },
           roots,
           fileOps: this.ingestionFileOps,
           now: this.now,
@@ -1100,7 +1122,7 @@ export class MediaLibrarySpikeService {
     }
     const { roots } = this.getEffectiveRootsAndItems();
     return this.withInitializedDatabase(async (db) => {
-      const lock = startIngestionTask(db, 'reconcile:all', 'reconcile', 'Reconciling interrupted ingestion manifests...', this.now);
+      const lock = this.startFileIngestionTask(db, 'reconcile:all', 'reconcile', 'Reconciling interrupted ingestion manifests...');
       if (!lock.acquired) {
         return {
           ok: false,
@@ -1113,12 +1135,14 @@ export class MediaLibrarySpikeService {
           manifests: listIngestionManifests(db),
         };
       }
-      this.retainIngestionTask(lock.taskId);
       try {
         const res = await reconcileIngestionManifests(db, {
           roots,
           stagingDir: this.ingestionStagingDir(),
-          onPhase: phase => updateIngestionPhase(db, lock.taskId, phase, this.now),
+          onPhase: phase => {
+            updateIngestionPhase(db, lock.taskId, phase, this.now);
+            this.retainIngestionTask(db, lock.taskId);
+          },
           fileOps: this.ingestionFileOps,
           now: this.now,
         });
