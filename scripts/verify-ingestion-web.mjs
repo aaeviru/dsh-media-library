@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 /** Real cold-installed Host/Remote/UI; only the external rename boundary is held by the test preload. */
 export async function verifyIngestionWeb(page) {
@@ -9,8 +10,57 @@ export async function verifyIngestionWeb(page) {
   fs.mkdirSync(staging);
   fs.writeFileSync(path.join(staging, 'issue30-slow.mp4'), 'non-production video fixture');
   fs.writeFileSync(path.join(staging, 'issue30-other.mp4'), 'another fixture');
+  fs.writeFileSync(path.join(staging, 'issue39-switch.mp4'), 'switch fixture');
   await page.click('[data-testid="toggle-ingestion-panel-btn"]');
   await page.click('[data-testid="ingestion-scan-btn"]');
+
+  // Issue #39 B1 & B2: select an unmanifested file (key `f:<tempPath>`), switch away while
+  // the Host creates its manifest with unsorted tags (new before existing), then switch back
+  // and verify selection stays active and `ingestion-tags-input` matches the sorted pill order.
+  await page.getByTestId('ingestion-file-issue39-switch.mp4').click();
+  await page.getByTestId('ingestion-detail').waitFor();
+  await page.getByTestId('toggle-ingestion-panel-btn').click();
+  const db39 = new DatabaseSync(path.join(process.env.DSH_HOME, 'media-library/library.sqlite3'));
+  try {
+    const existingTag = db39.prepare('SELECT id, name FROM tags WHERE archived_at IS NULL ORDER BY id ASC LIMIT 1').get();
+    const switchTemp = path.join(staging, 'issue39-switch.mp4');
+    const nowIso = new Date().toISOString();
+    db39.prepare(`
+      INSERT INTO ingestion_manifests (
+        source_id, temp_path, target_root_id, target_relative_path, filename,
+        title, catalog_number, media_date, tags_json, metadata_source,
+        checksum_sha256, file_size, state, review_decision, created_at, updated_at
+      ) VALUES (?, ?, 'nas-main', 'ingested/issue39-switch.mp4', 'issue39-switch.mp4',
+        'Issue 39 Survived Switch', 'ISSUE-39', '2026-11-20', ?, 'https://fc2cmadb.com/test',
+        '', 14, 'planned', 'pending', ?, ?)
+    `).run(
+      'staging:ingested/issue39-switch.mp4:14',
+      switchTemp,
+      JSON.stringify([{ name: 'BrandNewTag39' }, { name: existingTag.name }]),
+      nowIso,
+      nowIso,
+    );
+    await page.getByTestId('toggle-ingestion-panel-btn').click();
+    await page.waitForFunction(() =>
+      document.querySelector('[data-testid="ingestion-title-input"]')?.value === 'Issue 39 Survived Switch'
+    );
+    const expectedTags = `${existingTag.name}, BrandNewTag39`;
+    await page.waitForFunction(
+      (expected) => document.querySelector('[data-testid="ingestion-tags-input"]')?.value === expected,
+      expectedTags,
+      { timeout: 5000 },
+    );
+    const inputVal = await page.getByTestId('ingestion-tags-input').inputValue();
+    assert.equal(
+      inputVal,
+      expectedTags,
+      `Expected ingestion-tags-input to sort existing tag before new tag, got: ${inputVal}`,
+    );
+  } finally {
+    db39.close();
+  }
+  console.log('Issue #39 cold-install E2E: selection survives f:<tempPath> -> m:<id> across panel switch and tag input matches sorted pill order: PASS');
+
   await page.getByTestId('ingestion-file-issue30-slow.mp4').click();
   await page.getByTestId('ingestion-title-input').fill('Issue 30 controlled rename');
   const requested = page.waitForRequest('**/api/mediaLibrary/commitIngestion');
