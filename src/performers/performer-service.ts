@@ -1,3 +1,5 @@
+import { normalizePerformerName } from '../types.ts';
+export { normalizePerformerName } from '../types.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import {
   abort,
@@ -29,20 +31,6 @@ import type {
   UpsertPerformerAliasInput,
   UpsertPerformerAliasResult,
 } from '../types.ts';
-
-/**
- * Deterministic normalization for performer names (`Issue #8 B1`):
- * - NFKC (normalizes fullwidth/halfwidth Latin, halfwidth Katakana, composed/decomposed Unicode)
- * - Strips control characters, collapses all whitespace (including fullwidth U+3000), trims, and case-folds.
- */
-export function normalizePerformerName(raw: string): string {
-  return raw
-    .normalize('NFKC')
-    .replace(/[\u0000-\u001f\u007f]/g, ' ')
-    .replace(/[\s\u3000]+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
 
 interface AliasRuleRow {
   readonly id: number;

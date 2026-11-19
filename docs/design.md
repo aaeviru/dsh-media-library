@@ -212,6 +212,8 @@ legacy_ids(source_type, source_id, entity_type, entity_id)
 
 ### M4：自动入库与演员关联
 
+- Host 响应性、串行执行、默认禁止复制及恢复边界见 [ADR 0003](adr/0003-responsive-host-and-serialized-ingestion.md)；#22 的日常耗时日志与 #37 的排队功能另行交付。
+
 - 定义 ingestion inbox：消费 DSH Downloader/现有脚本产生的 manifest，而不是猜目录状态。
 - manifest 至少含 source ID、临时路径、目标 root/relative path、标题、番号、日期、演员、校验和。
 - 先“计划/预览”，经人工确认后移动；移动与 DB 入库用可恢复状态机（planned → moving → indexed → failed），不能假装跨 SMB 文件移动和 SQLite 是一个原子事务。

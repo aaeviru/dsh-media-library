@@ -4,6 +4,8 @@
 - **Date**: 2026-11-17
 - **Refs**: [Issue #7](https://github.com/aaeviru/dsh-media-library/issues/7), [Issue #7 Contract](https://github.com/aaeviru/dsh-media-library/issues/7#issuecomment-6922757618)
 
+Decision 3's automatic EXDEV copy fallback is superseded by [ADR 0003](0003-responsive-host-and-serialized-ingestion.md): copying now requires explicit Host opt-in, and existing-target reuse/recovery follows its bounded comparison and metadata-only completed-move rules. The original performance statements below are historical rationale, not measured guarantees for every SMB server.
+
 ## Context
 
 In the initial Issue #7 implementation, `scanStagingFiles` walked the NAS `temp` directory synchronously, computed a full SHA-256 over SMB for every multi-GB video file, and persisted a `planned` row in `ingestion_manifests` for every scanned file. In real desktop testing over SMB, this froze the DSH Host process and created stale `planned` rows whenever files were renamed or removed externally in `temp`.

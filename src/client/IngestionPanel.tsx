@@ -14,7 +14,7 @@ import type { MediaLibraryNamespace } from './namespace.ts';
 
 type Translate = (key: MediaLibraryKey) => string;
 
-type BusyOp = null | 'scan' | 'reconcile' | 'fetch' | 'play' | 'approve' | 'reject' | 'commit';
+type BusyOp = null | 'scan' | 'fetch' | 'play' | 'approve';
 
 interface DraftFields {
   title: string;
@@ -76,6 +76,7 @@ export function IngestionPanel({
   const [showPerformerDrawer, setShowPerformerDrawerState] = useState<boolean>(() => sessionCache.showPerformerDrawer);
   const [selectedKey, setSelectedKeyState] = useState<string | null>(() => sessionCache.selectedKey);
   const [dirtyDrafts, setDirtyDrafts] = useState<Record<string, DraftFields>>(() => ({ ...sessionCache.dirtyDrafts }));
+  const [executing, setExecuting] = useState<{ op: 'commit' | 'reconcile'; key: string | null } | null>(null);
   const [busyOp, setBusyOp] = useState<BusyOp>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -113,10 +114,15 @@ export function IngestionPanel({
   }, []);
 
   const runningHostTask = useMemo(
-    () => tasks.find((task) => task.status === 'running') ?? null,
+    () => tasks.find(task => task.status === 'running' && task.op !== 'fetch') ?? tasks.find(task => task.status === 'running') ?? null,
     [tasks],
   );
-  const busy = busyOp !== null || runningHostTask !== null;
+  const busy = busyOp !== null;
+  const executionBusy = executing !== null || tasks.some(task => task.status === 'running' && task.op !== 'fetch');
+  const frozenManifests = manifests.filter(m => tasks.some(task => task.status === 'running' &&
+    (task.targetKey === `manifest:${m.id}` || (task.op === 'reconcile' && ['moving', 'failed', 'indexed'].includes(m.state)))));
+  const frozenManifestIds = frozenManifests.map(m => m.id);
+  const frozenPerformerNames = frozenManifests.flatMap(m => m.actresses);
 
   const reloadServerState = useCallback(async () => {
     try {
@@ -194,14 +200,13 @@ export function IngestionPanel({
     }
   }, [reloadServerState, runScan]);
 
-  // Poll Host task table while any task is still running across tab switches.
+  // Discover tasks started here or in another connection, including before the long RPC returns.
   useEffect(() => {
-    if (!runningHostTask) return;
     const timer = setInterval(() => {
       void reloadServerState();
     }, 1200);
     return () => clearInterval(timer);
-  }, [runningHostTask, reloadServerState]);
+  }, [reloadServerState]);
 
   const entries = useMemo<UnifiedStagingEntry[]>(() => {
     const byManifestId = new Map<number, IngestionManifest>();
@@ -225,8 +230,15 @@ export function IngestionPanel({
         manifest: matched,
       });
     }
+    for (const m of frozenManifests) {
+      if (!list.some(entry => entry.manifest?.id === m.id)) list.push({
+        key: `m:${m.id}`, filename: m.filename, relativePath: m.filename,
+        tempPath: m.tempPath, targetRelativePath: m.targetRelativePath,
+        catalogNumber: m.catalogNumber, fileSize: m.fileSize, manifest: m,
+      });
+    }
     return list;
-  }, [stagedFiles, manifests]);
+  }, [stagedFiles, manifests, tasks]);
 
   const selected = entries.find((e) => e.key === selectedKey) ?? null;
   const selectedManifestId = selected?.manifest?.id ?? null;
@@ -258,6 +270,8 @@ export function IngestionPanel({
     }),
     [selected],
   );
+  const selectedFrozen = Boolean(selected && (executing?.key === selected.key ||
+    (selected.manifest && frozenManifestIds.includes(selected.manifest.id))));
   const activeDraft = selected ? dirtyDrafts[selected.key] ?? serverFallback : serverFallback;
 
   const draftTagList = useMemo(
@@ -321,7 +335,7 @@ export function IngestionPanel({
   const commitBlockedByPerformer = Boolean(performerPreview && !performerPreview.canCommit);
 
   const handleReconcile = async () => {
-    setBusyOp('reconcile');
+    setExecuting({ op: 'reconcile', key: null });
     setMessage(null);
     setError(null);
     try {
@@ -343,7 +357,7 @@ export function IngestionPanel({
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusyOp(null);
+      setExecuting(null);
     }
   };
 
@@ -402,37 +416,48 @@ export function IngestionPanel({
     }
   };
 
+  const approveEntry = async (entry: UnifiedStagingEntry): Promise<IngestionManifest | null> => {
+    const result = await mediaLibrary.reviewIngestion({
+      manifestId: entry.manifest?.id, tempPath: entry.manifest ? undefined : entry.tempPath,
+      decision: 'approved', title: activeDraft.title, mediaDate: activeDraft.mediaDate,
+      newTagNames: activeDraft.tagsText.split(',').map(s => s.trim()).filter(Boolean),
+    });
+    if (!result.ok) {
+      setError(result.error.message || t('rpcError'));
+      return null;
+    }
+    const manifest = result.value.manifest;
+    if (!result.value.ok || !manifest) {
+      setError(result.value.message ?? result.value.code ?? 'Review failed');
+      return null;
+    }
+    clearDraft(entry.key);
+    clearDraft(`m:${manifest.id}`);
+    setSelectedKey(`m:${manifest.id}`);
+    return manifest;
+  };
+
+  const handleApprove = async (entry: UnifiedStagingEntry) => {
+    setBusyOp('approve');
+    setError(null);
+    try {
+      if (await approveEntry(entry)) setMessage(t('ingestionApproveBtn'));
+      await reloadServerState();
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusyOp(null); }
+  };
+
   const handleMoveAndIndex = async (entry: UnifiedStagingEntry) => {
-    setBusyOp('commit');
+    setExecuting({ op: 'commit', key: entry.key });
     setMessage(null);
     setError(null);
     try {
-      const tagNames = activeDraft.tagsText
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const reviewRes = await mediaLibrary.reviewIngestion({
-        manifestId: entry.manifest?.id,
-        tempPath: entry.manifest ? undefined : entry.tempPath,
-        decision: 'approved',
-        title: activeDraft.title,
-        mediaDate: activeDraft.mediaDate,
-        newTagNames: tagNames,
-      });
-      if (!reviewRes.ok) {
-        setError(reviewRes.error.message || t('rpcError'));
-        return;
-      }
-      if (!reviewRes.value.ok || !reviewRes.value.manifest) {
-        setError(reviewRes.value.message ?? reviewRes.value.code ?? 'Review failed');
+      const approvedManifest = await approveEntry(entry);
+      if (!approvedManifest) {
         await reloadServerState();
         return;
       }
-
-      const approvedManifest = reviewRes.value.manifest;
-      clearDraft(entry.key);
-      clearDraft(`m:${approvedManifest.id}`);
-      setSelectedKey(`m:${approvedManifest.id}`);
+      setExecuting({ op: 'commit', key: `m:${approvedManifest.id}` });
 
       const commitRes = await mediaLibrary.commitIngestion({ manifestId: approvedManifest.id });
       if (!commitRes.ok) {
@@ -451,26 +476,16 @@ export function IngestionPanel({
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusyOp(null);
+      setExecuting(null);
     }
   };
 
-  const busyBannerText =
-    busyOp === 'scan'
-      ? t('ingestionScanningBtn')
-      : busyOp === 'reconcile'
-        ? t('ingestionReconcilingBtn')
-        : busyOp === 'fetch'
-          ? t('ingestionFetchingBtn')
-          : busyOp === 'approve'
-            ? t('ingestionApprovingBtn')
-            : busyOp === 'commit'
-              ? t('ingestionCommittingBtn')
-              : busyOp === 'reject'
-                ? t('ingestionRejectBtn')
-                : runningHostTask
-                  ? runningHostTask.message || `${runningHostTask.op} running...`
-                  : null;
+  const busyBannerText = runningHostTask
+    ? `#${runningHostTask.id} · ${t(`ingestionPhase_${runningHostTask.phase}`)} · ${runningHostTask.message}`
+    : executing ? t(executing.op === 'commit' ? 'ingestionCommittingBtn' : 'ingestionReconcilingBtn')
+      : busyOp === 'scan' ? t('ingestionScanningBtn')
+        : busyOp === 'fetch' ? t('ingestionFetchingBtn')
+          : busyOp === 'approve' ? t('ingestionApprovingBtn') : null;
 
   return (
     <section
@@ -513,11 +528,11 @@ export function IngestionPanel({
           <button
             type="button"
             data-testid="ingestion-reconcile-btn"
-            disabled={busy || degraded}
+            disabled={busy || executionBusy || degraded}
             onClick={() => void handleReconcile()}
             style={buttonStyle}
           >
-            {busyOp === 'reconcile' ? t('ingestionReconcilingBtn') : t('ingestionReconcileBtn')}
+            {executing?.op === 'reconcile' ? t('ingestionReconcilingBtn') : t('ingestionReconcileBtn')}
           </button>
         </div>
       </div>
@@ -529,6 +544,8 @@ export function IngestionPanel({
           aliases={performerAliases}
           pendingQueue={pendingQueue}
           disabled={busy || degraded}
+          frozenManifestIds={frozenManifestIds}
+          frozenPerformerNames={frozenPerformerNames}
           onChanged={handlePerformerChanged}
           onError={setError}
         />
@@ -538,6 +555,10 @@ export function IngestionPanel({
         <div role="status" data-testid="ingestion-busy" style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(59,130,246,0.5)', background: 'rgba(59,130,246,0.12)' }}>
           {busyBannerText}
         </div>
+      ) : null}
+
+      {runningHostTask?.waitingWarning ? (
+        <div role="status" data-testid="ingestion-waiting-warning">{t('ingestionWaitingWarning')}</div>
       ) : null}
 
       {message ? (
@@ -603,6 +624,7 @@ export function IngestionPanel({
             <input
               type="text"
               data-testid="ingestion-title-input"
+              disabled={selectedFrozen || degraded}
               value={activeDraft.title}
               onChange={(e) => updateDraft(selected.key, { title: e.target.value }, serverFallback)}
               style={controlStyle}
@@ -613,6 +635,7 @@ export function IngestionPanel({
             <input
               type="text"
               data-testid="ingestion-date-input"
+              disabled={selectedFrozen || degraded}
               placeholder="YYYY-MM-DD"
               value={activeDraft.mediaDate}
               onChange={(e) => updateDraft(selected.key, { mediaDate: e.target.value }, serverFallback)}
@@ -624,7 +647,7 @@ export function IngestionPanel({
               t={t}
               preview={performerPreview}
               mediaLibrary={mediaLibrary}
-              disabled={busy || degraded || selected.manifest?.state === 'indexed'}
+              disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
               onChanged={handlePerformerChanged}
               onError={setError}
             />
@@ -662,6 +685,7 @@ export function IngestionPanel({
                       {selected.manifest?.state !== 'indexed' ? (
                         <button
                           type="button"
+                          disabled={selectedFrozen || degraded}
                           aria-label={`Remove ${tagName}`}
                           onClick={() => removeDraftTag(idx)}
                           style={{
@@ -684,6 +708,7 @@ export function IngestionPanel({
             <input
               type="text"
               data-testid="ingestion-tags-input"
+              disabled={selectedFrozen || degraded}
               value={activeDraft.tagsText}
               onChange={(e) => updateDraft(selected.key, { tagsText: e.target.value }, serverFallback)}
               style={controlStyle}
@@ -707,7 +732,7 @@ export function IngestionPanel({
             <button
               type="button"
               data-testid="ingestion-play-btn"
-              disabled={busy}
+              disabled={busy || selectedFrozen}
               onClick={() => void handlePlay(selected)}
               style={buttonStyle}
             >
@@ -716,20 +741,25 @@ export function IngestionPanel({
             <button
               type="button"
               data-testid="ingestion-fetch-btn"
-              disabled={busy || degraded || selected.manifest?.state === 'indexed'}
+              disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
               onClick={() => void handleFetch(selected)}
               style={buttonStyle}
             >
               {busyOp === 'fetch' ? t('ingestionFetchingBtn') : t('ingestionFetchBtn')}
             </button>
+            <button type="button" data-testid="ingestion-approve-btn"
+              disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
+              onClick={() => void handleApprove(selected)} style={buttonStyle}>
+              {t('ingestionApproveBtn')}
+            </button>
             <button
               type="button"
               data-testid="ingestion-commit-btn"
-              disabled={busy || degraded || commitBlockedByPerformer || selected.manifest?.state === 'indexed'}
+              disabled={busy || executionBusy || selectedFrozen || degraded || commitBlockedByPerformer || selected.manifest?.state === 'indexed'}
               onClick={() => void handleMoveAndIndex(selected)}
               style={buttonStyle}
             >
-              {busyOp === 'commit' ? t('ingestionCommittingBtn') : t('ingestionCommitBtn')}
+              {executing?.op === 'commit' ? t('ingestionCommittingBtn') : t('ingestionCommitBtn')}
             </button>
           </div>
         </div>

@@ -10,6 +10,7 @@ import type {
   FetchedMetadataCandidate,
   IngestionManifest,
   IngestionManifestTag,
+  IngestionPhase,
   IngestionReviewDecision,
   IngestionState,
   IngestionTask,
@@ -28,37 +29,44 @@ import { type MetadataFetcher, parseFc2Code } from './metadata-fetcher.ts';
 
 const VIDEO_EXTENSIONS = new Set(['.avi', '.mkv', '.mp4', '.mov', '.wmv', '.m4v', '.ts']);
 
+/** Async production I/O; synchronous fixture adapters remain supported. */
 export interface IngestionFileOps {
-  exists(filePath: string): boolean;
-  statSize(filePath: string): number;
-  sha256(filePath: string): string;
-  ensureDir(dirPath: string): void;
-  rename(srcPath: string, destPath: string): void;
-  copyFile(srcPath: string, destPath: string): void;
-  removeFile(filePath: string): void;
+  exists(filePath: string): boolean | Promise<boolean>;
+  statSize(filePath: string): number | Promise<number>;
+  sha256(filePath: string): string | Promise<string>;
+  readRange(filePath: string, offset: number, length: number): Buffer | Promise<Buffer>;
+  ensureDir(dirPath: string): void | Promise<void>;
+  rename(srcPath: string, destPath: string): void | Promise<void>;
+  copyFile(srcPath: string, destPath: string): void | Promise<void>;
+  removeFile(filePath: string): void | Promise<void>;
 }
 
 export const defaultIngestionFileOps: IngestionFileOps = {
-  exists: (p) => fs.existsSync(p),
-  statSize: (p) => fs.statSync(p).size,
-  sha256: (p) => {
-    const hash = crypto.createHash('sha256');
-    const fd = fs.openSync(p, 'r');
-    try {
-      const buf = Buffer.allocUnsafe(65536);
-      let bytesRead = 0;
-      while ((bytesRead = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
-        hash.update(buf.subarray(0, bytesRead));
-      }
-      return hash.digest('hex');
-    } finally {
-      fs.closeSync(fd);
+  exists: async p => {
+    try { await fsp.stat(p); return true; }
+    catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw err;
     }
   },
-  ensureDir: (d) => fs.mkdirSync(d, { recursive: true }),
-  rename: (src, dest) => fs.renameSync(src, dest),
-  copyFile: (src, dest) => fs.copyFileSync(src, dest),
-  removeFile: (p) => fs.rmSync(p, { force: true }),
+  statSize: async p => (await fsp.stat(p)).size,
+  sha256: async p => {
+    const hash = crypto.createHash('sha256');
+    for await (const chunk of fs.createReadStream(p)) hash.update(chunk);
+    return hash.digest('hex');
+  },
+  readRange: async (p, offset, length) => {
+    const handle = await fsp.open(p, 'r');
+    try {
+      const buffer = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, offset);
+      return buffer.subarray(0, bytesRead);
+    } finally { await handle.close(); }
+  },
+  ensureDir: async d => { await fsp.mkdir(d, { recursive: true }); },
+  rename: (src, dest) => fsp.rename(src, dest),
+  copyFile: (src, dest) => fsp.copyFile(src, dest, fs.constants.COPYFILE_EXCL),
+  removeFile: p => fsp.rm(p, { force: true }),
 };
 
 function mapManifestRow(row: Record<string, unknown>): IngestionManifest {
@@ -349,24 +357,67 @@ export async function scanStagingDirectory(
   };
 }
 
+/** Both paths are Host owned/validated before any external I/O. */
+export function validateStagingPath(stagingDir: string, source: string): void {
+  const api = stagingDir.startsWith('\\\\') || /^[a-zA-Z]:[\\/]/.test(stagingDir) ? path.win32 : path;
+  const base = api.resolve(stagingDir);
+  const relative = api.relative(base, api.resolve(source));
+  if (!relative || relative === '..' || relative.startsWith(`..${api.sep}`) || api.isAbsolute(relative) || source.includes('\0')
+      || !VIDEO_EXTENSIONS.has(api.extname(source).toLowerCase())) {
+    throw new Error('PATH_TRAVERSAL_REJECTED: source must be a video inside the Host staging directory.');
+  }
+}
+
+/** Compare at most three MiB per file; merge small/overlapping ranges. */
+async function checkExistingTarget(fileOps: IngestionFileOps, source: string, destination: string, size: number): Promise<void> {
+  try {
+    if (await fileOps.statSize(source) !== size) throw new Error('Source size changed');
+    const length = Math.min(1024 * 1024, size);
+    const starts = [0, Math.floor((size - length) / 2), size - length];
+    const ranges: Array<{ start: number; end: number }> = [];
+    for (const start of starts) {
+      const last = ranges.at(-1);
+      if (last && start <= last.end) last.end = Math.max(last.end, start + length);
+      else ranges.push({ start, end: start + length });
+    }
+    for (const { start, end } of ranges) {
+      if (end === start) continue;
+      const a = await fileOps.readRange(source, start, end - start);
+      const b = await fileOps.readRange(destination, start, end - start);
+      if (a.length !== end - start || b.length !== end - start || !a.equals(b)) throw new Error('Sample mismatch or short read');
+    }
+  } catch {
+    throw new Error('EXISTING_TARGET_INCOMPLETE: quick check failed; source retained. Check the destination and recopy manually if needed.');
+  }
+}
+
+function validateManifestPaths(manifest: IngestionManifest, stagingDir?: string): void {
+  if (stagingDir) validateStagingPath(stagingDir, manifest.tempPath);
+  if (path.win32.basename(manifest.targetRelativePath) !== manifest.filename || path.win32.basename(manifest.tempPath) !== manifest.filename) {
+    throw new Error('PATH_TRAVERSAL_REJECTED: recorded source and destination filenames must match.');
+  }
+}
+
 /**
  * Lazily persist an `ingestion_manifests` row only when the user actually acts on a staged file
  * (fetch metadata or review/approve), using lightweight path + size identity.
  */
-export function ensureManifestForStagingFile(
+export async function ensureManifestForStagingFile(
   db: DatabaseSync,
   options: {
     readonly tempPath: string;
     readonly targetRootId: string;
     readonly targetSubdir: string;
     readonly roots: readonly MediaRootConfig[];
+    readonly stagingDir?: string | undefined;
     readonly fileOps?: IngestionFileOps | undefined;
     readonly now?: (() => Date) | undefined;
   },
-): IngestionManifest {
+): Promise<IngestionManifest> {
   const fileOps = options.fileOps ?? defaultIngestionFileOps;
   const now = (options.now ?? (() => new Date()))().toISOString();
   const tempPath = options.tempPath;
+  if (options.stagingDir) validateStagingPath(options.stagingDir, tempPath);
   const filename = path.win32.basename(tempPath);
   const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
   const targetRel = cleanSubdir ? `${cleanSubdir}/${filename}` : filename;
@@ -384,10 +435,10 @@ export function ensureManifestForStagingFile(
     ).run(activeRoot.rootId, activeRoot.label, activeRoot.canonicalUncRoot, activeRoot.enabled ? 1 : 0, now);
   }
 
-  if (!fileOps.exists(tempPath)) {
+  if (!(await fileOps.exists(tempPath))) {
     throw new Error(`Staging file not found: ${tempPath}`);
   }
-  const fileSize = fileOps.statSize(tempPath);
+  const fileSize = (await fileOps.statSize(tempPath));
   const sourceId = `staging:${targetRel.toLowerCase()}:${fileSize}`;
 
   const existing = db
@@ -662,6 +713,8 @@ function indexManifestIntoDatabase(
         mediaId = Number(info.lastInsertRowid);
       }
 
+      const performerPreview = evaluateManifestPerformers(conn, manifest.id, { now: () => new Date(ts) });
+      if (performerPreview.pendingReview.length) throw new Error('PERFORMER_REVIEW_REQUIRED: performer tags changed during execution.');
       const normalTagIds: number[] = [];
       for (const tagEntry of manifest.tags) {
         let resolvedTagId = tagEntry.tagId;
@@ -687,6 +740,8 @@ function indexManifestIntoDatabase(
             }
           }
         }
+        const activeTag = conn.prepare('SELECT id FROM tags WHERE id = ? AND archived_at IS NULL').get(resolvedTagId);
+        if (!activeTag) throw new Error('TAG_ARCHIVED: reviewed tag is no longer active.');
         normalTagIds.push(resolvedTagId);
         conn
           .prepare(
@@ -699,7 +754,6 @@ function indexManifestIntoDatabase(
       // Apply performer-alias associations (`Issue #8 B4` Option B):
       // - Auto-matched rules -> `source='performer-rule', confidence=1.0` (never overwriting `manual`).
       // - Human-resolved queue items -> `source='manual', confidence=NULL`.
-      const performerPreview = evaluateManifestPerformers(conn, manifest.id, { now: () => new Date(ts) });
       const autoPerformerTagIds: number[] = [];
       for (const entry of performerPreview.autoMatched) {
         autoPerformerTagIds.push(entry.tagId);
@@ -759,15 +813,18 @@ function indexManifestIntoDatabase(
  * Execute reviewed ingestion manifest (`B4`, `B5`):
  * `reviewed -> moving -> same-share rename (or EXDEV copy+sha256 fallback) -> SQLite index -> indexed`.
  */
-export function commitIngestionManifest(
+export async function commitIngestionManifest(
   db: DatabaseSync,
   options: {
     readonly manifestId: number;
     readonly roots: readonly MediaRootConfig[];
+    readonly stagingDir?: string | undefined;
+    readonly onPhase?: ((phase: IngestionPhase) => void) | undefined;
     readonly fileOps?: IngestionFileOps | undefined;
+    readonly allowCrossDeviceCopy?: boolean | undefined;
     readonly now?: (() => Date) | undefined;
   },
-): CommitIngestionResult {
+): Promise<CommitIngestionResult> {
   const fileOps = options.fileOps ?? defaultIngestionFileOps;
   const nowFn = options.now ?? (() => new Date());
   const ts = nowFn().toISOString();
@@ -855,31 +912,41 @@ export function commitIngestionManifest(
   const destPath = resolution.resolvedUncPath;
   let usedCopyFallback = false;
   try {
-    const destAlreadyPresent = fileOps.exists(destPath) && fileOps.statSize(destPath) === manifest.fileSize;
+    validateManifestPaths(manifest, options.stagingDir);
+    options.onPhase?.('validation');
+    const destAlreadyPresent = (await fileOps.exists(destPath)) && (await fileOps.statSize(destPath)) === manifest.fileSize;
     if (!destAlreadyPresent) {
-      if (!fileOps.exists(manifest.tempPath)) {
+      if (!(await fileOps.exists(manifest.tempPath))) {
         throw new Error(`Staging file missing: ${manifest.tempPath}`);
       }
-      if (fileOps.exists(destPath)) {
+      if ((await fileOps.exists(destPath))) {
         throw new Error(`Destination exists with different size: ${destPath}`);
       }
+      if (await fileOps.statSize(manifest.tempPath) !== manifest.fileSize) throw new Error('Staging file size changed since review.');
       const destDir = destPath.startsWith('\\\\') ? path.win32.dirname(destPath) : path.dirname(destPath);
-      fileOps.ensureDir(destDir);
+      await fileOps.ensureDir(destDir);
 
       try {
-        // Prefer same-NAS server-side rename (instantaneous, zero desktop NIC round-trip).
-        fileOps.rename(manifest.tempPath, destPath);
+        // Attempt rename without claiming how the SMB server implements the operation.
+        options.onPhase?.('rename');
+        await fileOps.rename(manifest.tempPath, destPath);
       } catch (renameErr) {
         const errno = (renameErr as NodeJS.ErrnoException)?.code;
         if (errno !== 'EXDEV') {
           throw renameErr;
         }
+        if (!options.allowCrossDeviceCopy) {
+          throw new Error('Cross-device copy is disabled. Keep the source and enable Host allowCrossDeviceCopy only if copying is intended.');
+        }
         // Cross-volume fallback: compute SHA-256, copy, verify size + SHA-256, then remove source after DB commit.
         usedCopyFallback = true;
-        const srcHash = manifest.checksumSha256 || fileOps.sha256(manifest.tempPath);
-        fileOps.copyFile(manifest.tempPath, destPath);
-        const copiedSize = fileOps.statSize(destPath);
-        const copiedHash = fileOps.sha256(destPath);
+        options.onPhase?.('hash');
+        const srcHash = await fileOps.sha256(manifest.tempPath);
+        options.onPhase?.('copy');
+        await fileOps.copyFile(manifest.tempPath, destPath);
+        options.onPhase?.('hash');
+        const copiedSize = (await fileOps.statSize(destPath));
+        const copiedHash = (await fileOps.sha256(destPath));
         if (copiedSize !== manifest.fileSize || copiedHash !== srcHash) {
           throw new Error(
             `CHECKSUM_MISMATCH: expected ${srcHash} (${manifest.fileSize}B), got ${copiedHash} (${copiedSize}B)`,
@@ -888,10 +955,13 @@ export function commitIngestionManifest(
         db.prepare(`UPDATE ingestion_manifests SET checksum_sha256 = ? WHERE id = ?`).run(srcHash, manifest.id);
       }
 
-      if (!fileOps.exists(destPath) || fileOps.statSize(destPath) !== manifest.fileSize) {
+      options.onPhase?.('validation');
+      if (!(await fileOps.exists(destPath)) || (await fileOps.statSize(destPath)) !== manifest.fileSize) {
         throw new Error(`Destination verification failed after move: ${destPath}`);
       }
-    } else if (fileOps.exists(manifest.tempPath)) {
+    } else if ((await fileOps.exists(manifest.tempPath))) {
+      options.onPhase?.('quick_check');
+      await checkExistingTarget(fileOps, manifest.tempPath, destPath, manifest.fileSize);
       usedCopyFallback = true;
     }
   } catch (err) {
@@ -912,6 +982,7 @@ export function commitIngestionManifest(
 
   let mediaId: number;
   try {
+    options.onPhase?.('index');
     const freshManifest = getIngestionManifestById(db, manifest.id)!;
     mediaId = indexManifestIntoDatabase(db, freshManifest, nowFn().toISOString());
   } catch (err) {
@@ -930,9 +1001,10 @@ export function commitIngestionManifest(
   }
 
   let warning: string | null = null;
-  if (usedCopyFallback && fileOps.exists(manifest.tempPath)) {
+  if (usedCopyFallback) {
+    options.onPhase?.('cleanup');
     try {
-      fileOps.removeFile(manifest.tempPath);
+      if (await fileOps.exists(manifest.tempPath)) await fileOps.removeFile(manifest.tempPath);
     } catch (rmErr) {
       warning = `copied-not-deleted: indexed media #${mediaId}, but failed to remove temp file (${rmErr instanceof Error ? rmErr.message : String(rmErr)})`;
       db.prepare(`UPDATE ingestion_manifests SET last_error = ?, updated_at = ? WHERE id = ?`).run(
@@ -959,14 +1031,16 @@ export function commitIngestionManifest(
  * - `moved-not-indexed`: verified destination exists without DB row -> finish DB indexing & delete temp.
  * - `indexed-but-missing`: indexed row whose destination file disappeared -> mark media `missing` and record error.
  */
-export function reconcileIngestionManifests(
+export async function reconcileIngestionManifests(
   db: DatabaseSync,
   options: {
     readonly roots: readonly MediaRootConfig[];
+    readonly stagingDir?: string | undefined;
+    readonly onPhase?: ((phase: IngestionPhase) => void) | undefined;
     readonly fileOps?: IngestionFileOps | undefined;
     readonly now?: (() => Date) | undefined;
   },
-): ReconcileIngestionResult {
+): Promise<ReconcileIngestionResult> {
   const fileOps = options.fileOps ?? defaultIngestionFileOps;
   const nowFn = options.now ?? (() => new Date());
   const candidates = listIngestionManifests(db, { limit: 500 }).filter(
@@ -979,52 +1053,46 @@ export function reconcileIngestionManifests(
   const errors: string[] = [];
 
   for (const m of candidates) {
-    const resolution = resolveAllowlistedUncPath(options.roots, m.targetRootId, m.targetRelativePath);
-    if (!resolution.ok) {
-      errors.push(`Manifest #${m.id}: ${resolution.message}`);
-      continue;
-    }
-    const destPath = resolution.resolvedUncPath;
-    const destExists = fileOps.exists(destPath);
-    const destValid =
-      destExists &&
-      fileOps.statSize(destPath) === m.fileSize &&
-      (!m.checksumSha256 || fileOps.sha256(destPath) === m.checksumSha256);
-
-    if (m.state === 'indexed' && m.indexedMediaId !== null) {
-      if (!destExists) {
+    try {
+      validateManifestPaths(m, options.stagingDir);
+      const resolution = resolveAllowlistedUncPath(options.roots, m.targetRootId, m.targetRelativePath);
+      if (!resolution.ok) throw new Error(resolution.message);
+      if (m.reviewDecision !== 'approved') throw new Error('REVIEW_REQUIRED: recovery requires human approval.');
+      options.onPhase?.('validation');
+      const destPath = resolution.resolvedUncPath;
+      const destExists = await fileOps.exists(destPath);
+      if (m.state === 'indexed' && m.indexedMediaId !== null && !destExists) {
         db.prepare(`UPDATE media_files SET status = 'missing' WHERE id = ?`).run(m.indexedMediaId);
         db.prepare(`UPDATE ingestion_manifests SET last_error = ?, updated_at = ? WHERE id = ?`).run(
-          `INDEXED_BUT_MISSING: destination missing at ${m.targetRelativePath}`,
-          nowFn().toISOString(),
-          m.id,
-        );
+          'INDEXED_BUT_MISSING: destination missing.', nowFn().toISOString(), m.id);
         indexedButMissingMarked += 1;
-      } else if (destValid && fileOps.exists(m.tempPath)) {
-        try {
-          fileOps.removeFile(m.tempPath);
-          db.prepare(`UPDATE ingestion_manifests SET last_error = NULL, updated_at = ? WHERE id = ?`).run(
-            nowFn().toISOString(),
-            m.id,
-          );
-          copiedNotDeletedFixed += 1;
-        } catch (err) {
-          errors.push(`Manifest #${m.id} cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
+        continue;
       }
-      continue;
-    }
-
-    if ((m.state === 'moving' || m.state === 'failed') && m.reviewDecision === 'approved' && destValid) {
-      try {
+      if (!destExists || await fileOps.statSize(destPath) !== m.fileSize) {
+        throw new Error('Destination missing or size mismatched; recovery remains unresolved.');
+      }
+      const sourceExists = await fileOps.exists(m.tempPath);
+      if (sourceExists) {
+        options.onPhase?.('quick_check');
+        await checkExistingTarget(fileOps, m.tempPath, destPath, m.fileSize);
+      }
+      // An absent source after an approved completed move needs only catalog registration.
+      const alreadyIndexed = m.state === 'indexed' && m.indexedMediaId !== null;
+      if (!alreadyIndexed) {
+        options.onPhase?.('index');
         indexManifestIntoDatabase(db, m, nowFn().toISOString());
-        if (fileOps.exists(m.tempPath)) {
-          fileOps.removeFile(m.tempPath);
-        }
         movedNotIndexedFixed += 1;
-      } catch (err) {
-        errors.push(`Manifest #${m.id} index recovery failed: ${err instanceof Error ? err.message : String(err)}`);
       }
+      if (sourceExists) {
+        options.onPhase?.('cleanup');
+        await fileOps.removeFile(m.tempPath);
+        db.prepare(`UPDATE ingestion_manifests SET last_error = NULL, updated_at = ? WHERE id = ?`).run(nowFn().toISOString(), m.id);
+        if (alreadyIndexed) copiedNotDeletedFixed += 1;
+      }
+    } catch (err) {
+      const message = `Manifest #${m.id}: ${err instanceof Error ? err.message : String(err)}`;
+      errors.push(message);
+      db.prepare('UPDATE ingestion_manifests SET last_error = ?, updated_at = ? WHERE id = ?').run(message, nowFn().toISOString(), m.id);
     }
   }
 
@@ -1039,9 +1107,34 @@ export function reconcileIngestionManifests(
   };
 }
 
-function mapTaskRow(row: Record<string, unknown>): IngestionTask {
+export function listFrozenIngestionManifests(db: DatabaseSync): IngestionManifest[] {
+  const rows = db.prepare(`SELECT m.* FROM ingestion_manifests m WHERE EXISTS (
+    SELECT 1 FROM ingestion_tasks t WHERE t.status = 'running' AND
+    (t.target_key = 'manifest:' || m.id OR (t.op = 'reconcile' AND m.state IN ('moving', 'failed', 'indexed'))))`)
+    .all() as Array<Record<string, unknown>>;
+  return rows.map(mapManifestRow);
+}
+
+/** Locate the task that freezes this reviewed Manifest; unrelated preparation stays available. */
+export function findManifestTask(db: DatabaseSync, manifestId: number): IngestionTask | null {
+  const row = db.prepare(`SELECT * FROM ingestion_tasks WHERE status = 'running' AND
+    (target_key = ? OR (op = 'reconcile' AND EXISTS
+      (SELECT 1 FROM ingestion_manifests WHERE id = ? AND state IN ('moving', 'failed', 'indexed'))))
+    ORDER BY id DESC LIMIT 1`).get(`manifest:${manifestId}`, manifestId) as Record<string, unknown> | undefined;
+  return row ? mapTaskRow(row) : null;
+}
+
+export function updateIngestionPhase(db: DatabaseSync, taskId: number, phase: IngestionPhase, now: () => Date): void {
+  db.prepare(`UPDATE ingestion_tasks SET phase = ?, phase_started_at = ?
+    WHERE id = ? AND status = 'running' AND phase <> ?`).run(phase, now().toISOString(), taskId, phase);
+}
+
+function mapTaskRow(row: Record<string, unknown>, now = new Date()): IngestionTask {
   return {
     id: Number(row.id),
+    phase: String(row.phase ?? 'validation') as IngestionPhase,
+    phaseStartedAt: String(row.phase_started_at ?? row.started_at),
+    waitingWarning: row.status === 'running' && now.getTime() - Date.parse(String(row.phase_started_at ?? row.started_at)) >= 30_000,
     targetKey: String(row.target_key),
     op: String(row.op) as IngestionTaskOp,
     status: String(row.status) as IngestionTaskStatus,
@@ -1051,17 +1144,21 @@ function mapTaskRow(row: Record<string, unknown>): IngestionTask {
   };
 }
 
-export function listIngestionTasks(db: DatabaseSync, limit = 20): IngestionTask[] {
+export function listIngestionTasks(db: DatabaseSync, limit = 20, now: () => Date = () => new Date()): IngestionTask[] {
   const safeLimit = Math.min(Math.max(Number(limit), 1), 100);
   const rows = db
     .prepare('SELECT * FROM ingestion_tasks ORDER BY id DESC LIMIT ?')
     .all(safeLimit) as Array<Record<string, unknown>>;
-  return rows.map(mapTaskRow);
+  const tasks = rows.map(row => mapTaskRow(row, now()));
+  // Active work must remain discoverable even after many newer preparation tasks.
+  const active = db.prepare("SELECT * FROM ingestion_tasks WHERE status = 'running' ORDER BY id DESC").all() as Array<Record<string, unknown>>;
+  return [...active.map(row => mapTaskRow(row, now())), ...tasks.filter(t => t.status !== 'running')];
 }
 
 export function markInterruptedIngestionTasks(
   db: DatabaseSync,
   now: () => Date = () => new Date(),
+  liveTaskIds: readonly number[] = [],
 ): number {
   const exists = db
     .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingestion_tasks'")
@@ -1074,9 +1171,9 @@ export function markInterruptedIngestionTasks(
        SET status = 'interrupted',
            message = CASE WHEN message = '' THEN 'Host restarted while task was running; run Reconcile.' ELSE message || ' (interrupted by Host restart)' END,
            finished_at = ?
-       WHERE status = 'running'`,
+       WHERE status = 'running'${liveTaskIds.length ? ` AND id NOT IN (${liveTaskIds.map(() => '?').join(',')})` : ''}`,
     )
-    .run(ts);
+    .run(ts, ...liveTaskIds);
   return Number(info.changes);
 }
 
@@ -1091,18 +1188,24 @@ export function startIngestionTask(
   db.exec('BEGIN IMMEDIATE;');
   try {
     const running = db
-      .prepare("SELECT * FROM ingestion_tasks WHERE target_key = ? AND status = 'running' ORDER BY id DESC LIMIT 1")
-      .get(targetKey) as Record<string, unknown> | undefined;
+      .prepare(`SELECT * FROM ingestion_tasks WHERE status = 'running' AND
+        (target_key = ? OR (? IN ('commit', 'reconcile') AND op IN ('commit', 'reconcile'))
+         OR (? = 'reconcile' AND op = 'fetch' AND target_key IN
+             (SELECT 'manifest:' || id FROM ingestion_manifests WHERE state IN ('moving', 'failed', 'indexed')))
+         OR (? = 'fetch' AND op = 'reconcile' AND ? IN
+             (SELECT 'manifest:' || id FROM ingestion_manifests WHERE state IN ('moving', 'failed', 'indexed'))))
+        ORDER BY id DESC LIMIT 1`)
+      .get(targetKey, op, op, op, targetKey) as Record<string, unknown> | undefined;
     if (running) {
       db.exec('COMMIT;');
-      return { acquired: false, existing: mapTaskRow(running) };
+      return { acquired: false, existing: mapTaskRow(running, now()) };
     }
     const info = db
       .prepare(
-        `INSERT INTO ingestion_tasks (target_key, op, status, message, started_at, finished_at)
-         VALUES (?, ?, 'running', ?, ?, NULL)`,
+        `INSERT INTO ingestion_tasks (target_key, op, status, message, started_at, finished_at, phase_started_at)
+         VALUES (?, ?, 'running', ?, ?, NULL, ?)`,
       )
-      .run(targetKey, op, message, ts);
+      .run(targetKey, op, message, ts, ts);
     db.exec('COMMIT;');
     return { acquired: true, taskId: Number(info.lastInsertRowid) };
   } catch (err) {

@@ -11,6 +11,7 @@ export interface Config {
   preMigrateRetentionCount: number;
   autoDailyBackup: boolean;
   stagingDir: Volatile<string>;
+  allowCrossDeviceCopy: boolean;
   ingestionTargetSubdir: Volatile<string>;
   cmadbBaseUrl: string;
   ppvdbBaseUrl: string;
@@ -55,6 +56,9 @@ export const Config = Schema.object({
     .default('')
     .description('Staging temp folder holding video files awaiting metadata lookup, review, and ingestion.')
     .volatile(),
+  allowCrossDeviceCopy: Schema.boolean()
+    .default(false)
+    .description('Allow media copy only when rename fails with EXDEV; verified before source cleanup. Disabled by default.'),
   ingestionTargetSubdir: Schema.string()
     .default('ingested')
     .description('Fixed target subdirectory under uncRoot where reviewed files are moved (keeping original filename).')

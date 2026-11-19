@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
 
-export const CURRENT_SCHEMA_VERSION = 6
+export const CURRENT_SCHEMA_VERSION = 7
 
 export interface SchemaMigration {
   readonly version: number
@@ -397,6 +397,18 @@ export const V6_PERFORMER_ALIASES_MIGRATION: SchemaMigration = {
   },
 }
 
+export const V7_INGESTION_PROGRESS_MIGRATION: SchemaMigration = {
+  version: 7,
+  description: 'Persist ingestion phase independently of task outcome (Issue #30)',
+  up(db): void {
+    db.exec(`
+      ALTER TABLE ingestion_tasks ADD COLUMN phase TEXT NOT NULL DEFAULT 'validation';
+      ALTER TABLE ingestion_tasks ADD COLUMN phase_started_at TEXT;
+      UPDATE ingestion_tasks SET phase_started_at = started_at;
+    `)
+  },
+}
+
 export const DEFAULT_MIGRATIONS: readonly SchemaMigration[] = [
   V1_SCHEMA_MIGRATION,
   V2_MEDIA_STATUS_MIGRATION,
@@ -404,6 +416,7 @@ export const DEFAULT_MIGRATIONS: readonly SchemaMigration[] = [
   V4_INGESTION_MANIFESTS_MIGRATION,
   V5_INGESTION_TASKS_MIGRATION,
   V6_PERFORMER_ALIASES_MIGRATION,
+  V7_INGESTION_PROGRESS_MIGRATION,
 ]
 
 function ensureSchemaVersionsTable(db: DatabaseSync): void {
@@ -449,7 +462,7 @@ export async function migrateDatabase(
   ensureSchemaVersionsTable(db)
 
   const migrations = [...(options?.migrations ?? DEFAULT_MIGRATIONS)].sort((a, b) => a.version - b.version)
-  const appVersion = options?.appVersion ?? '0.6.2'
+  const appVersion = options?.appVersion ?? '0.7.3'
   const nowFn = options?.now ?? (() => new Date())
 
   const previousVersion = getCurrentSchemaVersion(db)

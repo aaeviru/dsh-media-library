@@ -44,6 +44,7 @@ export PATH="$HARNESS_DIR/node_modules/.bin:$PATH"
 export FIXTURE_DB="$WORK/fixture/ts_library.sqlite"
 
 export VERIFY_REPO_ROOT="$REPO_ROOT"
+export VERIFY_WORK="$WORK"
 node --experimental-strip-types --input-type=module -e '
 const { createM2ImportTagStudioFixture } = await import(
   `${process.env.VERIFY_REPO_ROOT}/src/inventory/fixture-builder.ts`
@@ -60,8 +61,35 @@ if grep -q '"link:' "$DSH_HOME/profiles/web/package.json"; then
   exit 1
 fi
 
+# Test-only external filesystem boundary: hold one fixture rename without changing the installed plugin.
+node --input-type=module -e '
+import fs from "node:fs";
+import path from "node:path";
+const work = process.env.VERIFY_WORK;
+fs.writeFileSync(path.join(process.env.DSH_HOME, "profiles/web/cordis.patch.yml"),
+  "- id: media-library\n  config: " + JSON.stringify({ stagingDir: path.join(work, "staging"), autoDailyBackup: false }) + "\n");
+fs.writeFileSync(path.join(work, "slow-rename.mjs"), `
+import fs from "node:fs/promises";
+import path from "node:path";
+const work = process.env.VERIFY_WORK;
+process.chdir(work);
+const rename = fs.rename;
+fs.rename = async (source, destination) => {
+  if (source === path.join(work, "staging/issue30-slow.mp4")) {
+    await fs.writeFile(path.join(work, "rename-entered"), "entered");
+    for (;;) {
+      try { await fs.stat(path.join(work, "rename-release")); break; }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+  return rename(source, destination);
+};
+`);
+'
+
 echo "==> [Web 2/3] Starting dsh web on port $PORT and verifying boot payload + client bundle route..."
-node --import tsx/esm apps/cli/src/bin.ts web --port "$PORT" --no-open > "$WORK/web.log" 2>&1 &
+node --import tsx/esm --import "$WORK/slow-rename.mjs" "$HARNESS_DIR/apps/cli/src/bin.ts" web --port "$PORT" --no-open > "$WORK/web.log" 2>&1 &
 WEB_PID=$!
 
 for _ in $(seq 1 40); do
@@ -142,7 +170,11 @@ try {
   await page.fill("[data-testid=\"import-source-input\"]", fixtureDb);
   const tImportStart = performance.now();
   await page.click("[data-testid=\"import-submit-btn\"]");
-  await page.waitForSelector("[data-testid=\"media-results-table\"]", { timeout: 10000 });
+  await page.waitForFunction(() =>
+    document.querySelectorAll("tr[data-testid^=\"media-row-\"]").length === 6 &&
+    !document.querySelector("[data-testid=\"search-submit-btn\"]").disabled,
+    undefined, { timeout: 10000 }
+  );
   const firstResultDisplayMs = performance.now() - tImportStart;
   console.log(`UI first result display (including fixture import): ${firstResultDisplayMs.toFixed(1)}ms; target <1000ms`);
   assert.ok(firstResultDisplayMs < 1000, `Expected UI first result display <1000ms, took ${firstResultDisplayMs.toFixed(1)}ms`);
@@ -462,17 +494,23 @@ try {
   await page.click("[data-testid=\"toggle-ingestion-panel-btn\"]");
   console.log("Issue #7 & #8 M4 Ingestion + Performer Drawer UI E2E: PASS");
 
+  const { verifyIngestionWeb } = await import(`${process.env.VERIFY_REPO_ROOT}/scripts/verify-ingestion-web.mjs`);
+  await verifyIngestionWeb(page);
+
   // Measure actual 100k result rendering separately from the six-row import.
   // This is a warm Host/UI search; cold Host initialization is measured in B5.
   const benchDb = new DatabaseSync(path.join(process.env.DSH_HOME, "media-library/library.sqlite3"));
   try {
     benchDb.exec("PRAGMA foreign_keys = ON; BEGIN IMMEDIATE;");
     const root = benchDb.prepare("SELECT id FROM media_roots LIMIT 1").get();
+    const existingMedia = benchDb.prepare("SELECT COUNT(*) AS count, MAX(id) AS maxId FROM media_files").get();
+    const benchStart = Number(existingMedia.maxId) + 1;
+    const benchEnd = benchStart + 100000 - Number(existingMedia.count) - 1;
     benchDb.prepare(`
-      WITH RECURSIVE seq(n) AS (SELECT 1060 UNION ALL SELECT n + 1 FROM seq WHERE n < 100993)
+      WITH RECURSIVE seq(n) AS (SELECT ? UNION ALL SELECT n + 1 FROM seq WHERE n < ?)
       INSERT INTO media_files(id, root_id, relative_path, filename, extension, catalog_number, media_date)
       SELECT n, ?, printf(?, n), printf(?, n), ?, printf(?, n % 9000), CASE WHEN n % 5 = 0 THEN NULL ELSE ? END FROM seq
-    `).run(root.id, "bench/video_%d.mkv", "video_%d.mkv", "mkv", "ABP-%04d", "2026-01-01");
+    `).run(benchStart, benchEnd, root.id, "bench/video_%d.mkv", "video_%d.mkv", "mkv", "ABP-%04d", "2026-01-01");
     benchDb.prepare(`
       WITH RECURSIVE seq(n) AS (SELECT 10000 UNION ALL SELECT n + 1 FROM seq WHERE n < 10249)
       INSERT INTO tags(id, name, normalized_name, created_at, updated_at)

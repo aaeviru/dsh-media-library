@@ -79,6 +79,7 @@ export class MediaLibraryRemote extends TypertRemoteService {
       configuredTagStudioCopyPath: () => config.tagstudioCopyPath.get(),
       configuredNasBackupDir: () => config.nasBackupDir.get(),
       configuredStagingDir: () => config.stagingDir.get(),
+      allowCrossDeviceCopy: config.allowCrossDeviceCopy,
       configuredTargetSubdir: () => config.ingestionTargetSubdir.get(),
       cmadbBaseUrl: config.cmadbBaseUrl,
       ppvdbBaseUrl: config.ppvdbBaseUrl,

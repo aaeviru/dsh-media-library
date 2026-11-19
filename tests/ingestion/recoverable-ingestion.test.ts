@@ -48,6 +48,7 @@ function setupEnv(tmpDir: string) {
     exists: (p) => defaultIngestionFileOps.exists(mapPath(p)),
     statSize: (p) => defaultIngestionFileOps.statSize(mapPath(p)),
     sha256: (p) => defaultIngestionFileOps.sha256(mapPath(p)),
+    readRange: (p, offset, length) => defaultIngestionFileOps.readRange(mapPath(p), offset, length),
     ensureDir: (d) => defaultIngestionFileOps.ensureDir(mapPath(d)),
     rename: (src, dest) => defaultIngestionFileOps.rename(mapPath(src), mapPath(dest)),
     copyFile: (src, dest) => defaultIngestionFileOps.copyFile(mapPath(src), mapPath(dest)),
@@ -67,7 +68,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
       const db = new DatabaseSync(dbPath);
       try {
         const mig = await migrateDatabase(db, { dbPath, appVersion: '0.6.0' });
-        assert.equal(mig.currentVersion, 6);
+        assert.equal(mig.currentVersion, 7);
 
         const dryRun = await previewStagingPlan({
           stagingDir: tempDir,
@@ -266,21 +267,21 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         await migrateDatabase(db, { dbPath, appVersion: '0.5.0' });
 
         // Manifest is created lazily only when user acts on fileA.
-        const mA = ensureManifestForStagingFile(db, {
+        const mA = await ensureManifestForStagingFile(db, {
           tempPath: fileA,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,
           fileOps,
         });
-        const mB = ensureManifestForStagingFile(db, {
+        const mB = await ensureManifestForStagingFile(db, {
           tempPath: fileB,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,
           fileOps,
         });
-        const mC = ensureManifestForStagingFile(db, {
+        const mC = await ensureManifestForStagingFile(db, {
           tempPath: fileC,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
@@ -289,7 +290,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         });
 
         // B4: Commit before review must fail with REVIEW_REQUIRED.
-        const unreviewed = commitIngestionManifest(db, { manifestId: mA.id, roots, fileOps });
+        const unreviewed = await commitIngestionManifest(db, { manifestId: mA.id, roots, fileOps });
         assert.equal(unreviewed.ok, false);
         assert.equal(unreviewed.code, 'REVIEW_REQUIRED');
 
@@ -311,13 +312,13 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         assert.equal(reviewedA.manifest?.state, 'reviewed');
 
         // Same-share instant rename for mA:
-        const commitA = commitIngestionManifest(db, { manifestId: mA.id, roots, fileOps });
+        const commitA = await commitIngestionManifest(db, { manifestId: mA.id, roots, fileOps });
         assert.equal(commitA.ok, true);
         assert.equal(fs.existsSync(path.join(targetDir, 'FC2-PPV-4545625.mp4')), true);
         assert.equal(fs.existsSync(fileA), false);
 
         // Idempotent replay of completed manifest does NOT duplicate media or tags.
-        const replayA = commitIngestionManifest(db, { manifestId: mA.id, roots, fileOps });
+        const replayA = await commitIngestionManifest(db, { manifestId: mA.id, roots, fileOps });
         assert.equal(replayA.ok, true);
         assert.equal(replayA.idempotentReplay, true);
         assert.equal(replayA.mediaId, commitA.mediaId);
@@ -336,12 +337,12 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
             throw new Error('EPERM: simulated unlink crash');
           },
         };
-        const commitC = commitIngestionManifest(db, { manifestId: mC.id, roots, fileOps: exdevFailUnlinkOps });
+        const commitC = await commitIngestionManifest(db, { manifestId: mC.id, roots, allowCrossDeviceCopy: true, fileOps: exdevFailUnlinkOps });
         assert.equal(commitC.ok, true);
         assert.match(commitC.warning ?? '', /copied-not-deleted/);
         assert.equal(fs.existsSync(fileC), true);
 
-        const rec1 = reconcileIngestionManifests(db, { roots, fileOps });
+        const rec1 = await reconcileIngestionManifests(db, { roots, fileOps });
         assert.equal(rec1.copiedNotDeletedFixed, 1);
         assert.equal(fs.existsSync(fileC), false);
 
@@ -351,14 +352,14 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         fs.mkdirSync(targetDir, { recursive: true });
         fs.copyFileSync(fileB, path.join(targetDir, 'FC2-PPV-9999999.mkv'));
 
-        const rec2 = reconcileIngestionManifests(db, { roots, fileOps });
+        const rec2 = await reconcileIngestionManifests(db, { roots, fileOps });
         assert.equal(rec2.movedNotIndexedFixed, 1);
         assert.equal(fs.existsSync(fileB), false);
         assert.equal(Number((db.prepare('SELECT COUNT(*) AS c FROM media_files').get() as { c: number }).c), 3);
 
         // Crash point 3: indexed-but-missing (destination file disappears after indexing).
         fs.rmSync(path.join(targetDir, 'FC2-PPV-9999999.mkv'));
-        const rec3 = reconcileIngestionManifests(db, { roots, fileOps });
+        const rec3 = await reconcileIngestionManifests(db, { roots, fileOps });
         assert.equal(rec3.indexedButMissingMarked, 1);
         const statusRow = db.prepare('SELECT status FROM media_files WHERE filename = ?').get('FC2-PPV-9999999.mkv') as { status: string };
         assert.equal(statusRow.status, 'missing');
@@ -452,7 +453,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         const versionRow = dbAfter
           .prepare(`SELECT MAX(version) AS v FROM schema_versions`)
           .get() as { v: number };
-        assert.equal(versionRow.v, 6);
+        assert.equal(versionRow.v, 7);
       } finally {
         dbAfter.close();
       }
@@ -547,7 +548,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
           }),
         });
 
-        const ensured = ensureManifestForStagingFile(db, {
+        const ensured = await ensureManifestForStagingFile(db, {
           tempPath: sampleFile,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
@@ -569,7 +570,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         });
         assert.equal(reviewed.ok, true);
 
-        const committed = commitIngestionManifest(db, {
+        const committed = await commitIngestionManifest(db, {
           manifestId: fetched.manifest.id,
           roots,
           fileOps,

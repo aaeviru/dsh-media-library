@@ -1,3 +1,4 @@
+import { normalizePerformerName } from '../types.ts';
 import { useEffect, useState } from 'react';
 import type {
   ManifestPerformerPreview,
@@ -491,6 +492,8 @@ export function PerformerDrawer({
   aliases,
   pendingQueue,
   disabled,
+  frozenManifestIds = [],
+  frozenPerformerNames = [],
   onChanged,
   onError,
 }: {
@@ -499,9 +502,13 @@ export function PerformerDrawer({
   aliases: readonly PerformerAliasRecord[];
   pendingQueue: readonly PerformerReviewItem[];
   disabled: boolean;
+  frozenManifestIds?: readonly number[];
+  frozenPerformerNames?: readonly string[];
   onChanged: (msg: string) => void;
   onError: (msg: string) => void;
 }) {
+  const aliasFrozen = (name: string) => frozenPerformerNames.some(n =>
+    normalizePerformerName(n) === normalizePerformerName(name));
   const handleTogglePolicy = async (alias: PerformerAliasRecord) => {
     const nextPolicy = alias.policy === 'always_ask' ? 'auto' : 'always_ask';
     const res = await mediaLibrary.upsertPerformerAlias({
@@ -560,7 +567,7 @@ export function PerformerDrawer({
               t={t}
               target={toPendingTarget(t, item)}
               mediaLibrary={mediaLibrary}
-              disabled={disabled}
+              disabled={disabled || (item.manifestId !== null && frozenManifestIds.includes(item.manifestId))}
               onResolved={onChanged}
               onError={onError}
             />
@@ -602,7 +609,7 @@ export function PerformerDrawer({
                 <span style={{ display: 'inline-flex', gap: '6px' }}>
                   <button
                     type="button"
-                    disabled={disabled || a.needsRemediation}
+                    disabled={disabled || aliasFrozen(a.rawAlias) || a.needsRemediation}
                     onClick={() => void handleTogglePolicy(a)}
                     style={{ ...buttonStyle, padding: '2px 8px' }}
                   >
@@ -610,7 +617,7 @@ export function PerformerDrawer({
                   </button>
                   <button
                     type="button"
-                    disabled={disabled}
+                    disabled={disabled || aliasFrozen(a.rawAlias)}
                     onClick={() => void handleDeleteAlias(a)}
                     style={{ ...buttonStyle, padding: '2px 8px' }}
                   >
