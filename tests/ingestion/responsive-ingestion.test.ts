@@ -363,7 +363,20 @@ test('tag changes during a move are revalidated at indexing; failed indexing rem
   await f.service.reviewIngestion({ manifestId: item.id, decision: 'approved', tagIds: [tag.tagId] });
   const commit = f.service.commitIngestion({ manifestId: item.id });
   await g.entered;
-  try { assert.equal((await f.service.archiveTag({ tagId: tag.tagId, expectedRevision: tag.revision })).ok, true); }
+  try {
+    const unrelatedA = await f.service.createTag({ name: 'Unrelated A' });
+    const unrelatedB = await f.service.createTag({ name: 'Unrelated B' });
+    assert.equal(unrelatedA.ok && unrelatedB.ok, true);
+    if (!unrelatedA.ok || !unrelatedB.ok) return;
+    const blocked = await f.service.mergeTags({ sourceTagId: tag.tagId, targetTagId: unrelatedA.tagId,
+      expectedSourceRevision: tag.revision, expectedTargetRevision: unrelatedA.revision });
+    assert.equal(blocked.ok, false);
+    if (!blocked.ok) assert.equal(blocked.code, 'IN_PROGRESS');
+    const allowed = await f.service.mergeTags({ sourceTagId: unrelatedA.tagId, targetTagId: unrelatedB.tagId,
+      expectedSourceRevision: unrelatedA.revision, expectedTargetRevision: unrelatedB.revision });
+    assert.equal(allowed.ok, true);
+    assert.equal((await f.service.archiveTag({ tagId: tag.tagId, expectedRevision: tag.revision })).ok, true);
+  }
   finally { g.release(); await commit; }
   const result = await commit;
   assert.equal(result.code, 'INDEX_FAILED');
@@ -436,7 +449,34 @@ test('executing performer decisions and their alias rules are frozen, while unre
     const sameNameSkip = await f.service.resolvePerformerReview({ manifestId: other.id, rawName: 'Performer A', mode: 'skip', rememberRule: true });
     assert.equal(sameNameSkip.ok, true, 'skip changes only the other Manifest, never the remembered alias');
     assert.equal((await f.service.listPerformerAliases())[0]!.policy, 'auto');
+    const another = await f.service.createTag({ name: 'Another performer' });
+    assert.equal(another.ok, true);
+    if (!another.ok) return;
+    const current = (await f.service.listTags({})).tags.find(t => t.id === alias.tagId)!;
+    const merge = await f.service.mergeTags({ sourceTagId: alias.tagId, targetTagId: another.tagId,
+      expectedSourceRevision: current.revision, expectedTargetRevision: another.revision });
+    assert.equal(merge.ok, false, 'tag merge must not rewrite the executing performer decision');
+    if (!merge.ok) assert.equal(merge.code, 'IN_PROGRESS');
+
   } finally { g.release(); await pending; }
   assert.equal((await pending).ok, true);
   assert.deepEqual((await f.service.searchMedia({})).items[0]!.tags.map(t => t.id), [alias.tagId]);
+});
+
+test('replacing a service within the same Host preserves live task ownership and global exclusion', async () => {
+  const g = gate();
+  const f = fixture({ async rename(a, b) { g.enter(); await g.pending; await defaultIngestionFileOps.rename(f.map(a), f.map(b)); } });
+  const first = await f.prepare('first.mp4');
+  const second = await f.prepare('second.mp4');
+  const pending = f.service.commitIngestion({ manifestId: first.id });
+  await g.entered;
+  try {
+    const replacement = new MediaLibrarySpikeService({ baseDir: f.dir, configuredStagingDir: f.staging, configuredUncRoot: '\\\\NAS\\MediaTest', autoDailyBackup: false, ingestionFileOps: f.ops });
+    const tasks = await replacement.listIngestionTasks();
+    assert.equal(tasks[0]?.status, 'running', 'constructing a new service is not a Host process restart');
+    assert.equal((await replacement.commitIngestion({ manifestId: second.id })).code, 'IN_PROGRESS');
+    assert.equal((await replacement.reconcileIngestion()).ok, false);
+    assert.equal(fs.existsSync(second.source), true);
+  } finally { g.release(); await pending; }
+  assert.equal((await pending).ok, true);
 });

@@ -1,3 +1,4 @@
+import { normalizeLabel } from './mutations/transaction.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,6 +33,7 @@ import {
   fetchMetadataForManifest,
   finishIngestionTask,
   findManifestTask,
+  listFrozenIngestionManifests,
   updateIngestionPhase,
   type IngestionFileOps,
   listIngestionManifests,
@@ -133,6 +135,12 @@ import {
   normalizeCanonicalUncRoot,
   resolveAllowlistedUncPath,
 } from './unc-path.ts';
+
+// Config/plugin replacement can create a second service while old async I/O is still alive.
+// Keep process-local ownership across module reloads; a true Host restart starts with an empty registry.
+const LIVE_TASKS_KEY = Symbol.for('dsh-media-library.live-ingestion-tasks');
+const hostRuntime = globalThis as typeof globalThis & { [LIVE_TASKS_KEY]?: Map<string, Set<number>> };
+const liveIngestionTasks = hostRuntime[LIVE_TASKS_KEY] ??= new Map<string, Set<number>>();
 
 export const DEFAULT_M1_ROOT_ID = 'nas-main';
 
@@ -510,7 +518,7 @@ export class MediaLibrarySpikeService {
         const mig = await migrateDatabase(db, {
           dbPath,
           backupDir: this.backupDir,
-          appVersion: '0.7.1',
+          appVersion: '0.7.2',
           now: this.now,
         });
         if (!mig.health.ok) {
@@ -534,7 +542,7 @@ export class MediaLibrarySpikeService {
           checkedAt,
         };
 
-        markInterruptedIngestionTasks(db, this.now);
+        markInterruptedIngestionTasks(db, this.now, [...(liveIngestionTasks.get(this.localDatabasePath) ?? [])]);
 
         if (this.autoDailyBackup) {
           await maybeRunDailyAutoBackup({
@@ -569,6 +577,18 @@ export class MediaLibrarySpikeService {
       }
     })();
     return this.initialization;
+  }
+
+  private retainIngestionTask(taskId: number): void {
+    const ids = liveIngestionTasks.get(this.localDatabasePath) ?? new Set<number>();
+    ids.add(taskId);
+    liveIngestionTasks.set(this.localDatabasePath, ids);
+  }
+
+  private releaseIngestionTask(taskId: number): void {
+    const ids = liveIngestionTasks.get(this.localDatabasePath);
+    ids?.delete(taskId);
+    if (ids?.size === 0) liveIngestionTasks.delete(this.localDatabasePath);
   }
 
   private async withInitializedDatabase<T>(fn: (db: DatabaseSync) => T): Promise<T> {
@@ -758,7 +778,11 @@ export class MediaLibrarySpikeService {
   }
 
   async mergeTags(input: MergeTagsInput): Promise<MergeTagsResult> {
-    return this.withWritableDatabase((db) => mergeTags(db, input));
+    return this.withWritableDatabase((db) => {
+      const active = this.tagReferenceTask(db, input);
+      if (active) return { ok: false, code: 'IN_PROGRESS' as const, message: `Task #${active.id} freezes references to these tags until it finishes.`, failures: [] };
+      return mergeTags(db, input);
+    });
   }
 
   async archiveTag(input: TagRevisionInput): Promise<TagMutationResult> {
@@ -805,7 +829,7 @@ export class MediaLibrarySpikeService {
       return await this.withInitializedDatabase((db) =>
         exportPortableMappingReport(db, {
           format: input.format,
-          appVersion: '0.7.1',
+          appVersion: '0.7.2',
           now: this.now,
         }),
       );
@@ -963,6 +987,7 @@ export class MediaLibrarySpikeService {
         };
       }
       taskId = lock.taskId;
+      this.retainIngestionTask(taskId);
       const res = await fetchMetadataForManifest(db, manifestId, fetcher, this.now);
       finishIngestionTask(
         db,
@@ -978,6 +1003,7 @@ export class MediaLibrarySpikeService {
       }
       throw err;
     } finally {
+      if (taskId !== null) this.releaseIngestionTask(taskId);
       db.close();
     }
   }
@@ -1037,6 +1063,7 @@ export class MediaLibrarySpikeService {
           message: `Task #${lock.existing.id}: ` + lock.existing.message || 'Move & index already in progress for this item.',
         };
       }
+      this.retainIngestionTask(lock.taskId);
       try {
         const res = await commitIngestionManifest(db, {
           manifestId: input.manifestId,
@@ -1052,6 +1079,8 @@ export class MediaLibrarySpikeService {
       } catch (err) {
         finishIngestionTask(db, lock.taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
         throw err;
+      } finally {
+        this.releaseIngestionTask(lock.taskId);
       }
     });
   }
@@ -1084,6 +1113,7 @@ export class MediaLibrarySpikeService {
           manifests: listIngestionManifests(db),
         };
       }
+      this.retainIngestionTask(lock.taskId);
       try {
         const res = await reconcileIngestionManifests(db, {
           roots,
@@ -1103,6 +1133,8 @@ export class MediaLibrarySpikeService {
       } catch (err) {
         finishIngestionTask(db, lock.taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
         throw err;
+      } finally {
+        this.releaseIngestionTask(lock.taskId);
       }
     });
   }
@@ -1222,17 +1254,28 @@ export class MediaLibrarySpikeService {
     return this.withInitializedDatabase((db) => listPerformerAliases(db));
   }
 
+  private tagReferenceTask(db: DatabaseSync, input: MergeTagsInput): IngestionTask | null {
+    const ids = [input.sourceTagId, input.targetTagId];
+    const tagNames = db.prepare(`SELECT normalized_name AS name FROM tags WHERE id IN (?, ?)
+      UNION SELECT normalized_alias AS name FROM tag_aliases WHERE tag_id IN (?, ?)`)
+      .all(...ids, ...ids) as Array<{ name: string }>;
+    const names = new Set(tagNames.map(row => row.name));
+    const aliases = db.prepare('SELECT normalized_name FROM performer_aliases WHERE tag_id IN (?, ?)')
+      .all(...ids) as Array<{ normalized_name: string }>;
+    for (const manifest of listFrozenIngestionManifests(db)) {
+      const normalTag = manifest.tags.some(tag => (tag.tagId !== undefined && ids.includes(tag.tagId)) || names.has(normalizeLabel(tag.name)));
+      const performerRule = manifest.actresses.some(name => aliases.some(alias => alias.normalized_name === normalizePerformerName(name)));
+      const performerDecision = db.prepare(`SELECT 1 FROM performer_review_queue
+        WHERE manifest_id = ? AND resolved_tag_id IN (?, ?) AND status = 'resolved' LIMIT 1`).get(manifest.id, ...ids);
+      if (normalTag || performerRule || performerDecision) return findManifestTask(db, manifest.id);
+    }
+    return null;
+  }
+
   private performerRuleTask(db: DatabaseSync, rawName: string): IngestionTask | null {
     const name = normalizePerformerName(rawName);
-    const rows = db.prepare(`SELECT m.id, m.actresses_json FROM ingestion_manifests m WHERE EXISTS (
-      SELECT 1 FROM ingestion_tasks t WHERE t.status = 'running' AND
-      (t.target_key = 'manifest:' || m.id OR (t.op = 'reconcile' AND m.state IN ('moving', 'failed', 'indexed'))))`)
-      .all() as Array<{ id: number; actresses_json: string }>;
-    for (const row of rows) {
-      const actresses: unknown = JSON.parse(row.actresses_json);
-      if (Array.isArray(actresses) && actresses.some(a => typeof a === 'string' && normalizePerformerName(a) === name)) {
-        return findManifestTask(db, Number(row.id));
-      }
+    for (const manifest of listFrozenIngestionManifests(db)) {
+      if (manifest.actresses.some(a => normalizePerformerName(a) === name)) return findManifestTask(db, manifest.id);
     }
     return null;
   }

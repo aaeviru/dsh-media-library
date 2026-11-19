@@ -553,6 +553,20 @@ export type PerformerReviewReason = 'unknown' | 'ambiguous' | 'archived_target';
 export type PerformerReviewStatus = 'pending' | 'resolved' | 'skipped';
 export type PerformerResolutionMode = 'bind_existing' | 'create_performer_tag' | 'skip';
 
+/**
+ * Deterministic normalization for performer names (`Issue #8 B1`):
+ * - NFKC (normalizes fullwidth/halfwidth Latin, halfwidth Katakana, composed/decomposed Unicode)
+ * - Strips control characters, collapses all whitespace (including fullwidth U+3000), trims, and case-folds.
+ */
+export function normalizePerformerName(raw: string): string {
+  return raw
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[\s\u3000]+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 export interface PerformerAliasRecord {
   readonly id: number;
   readonly normalizedName: string;

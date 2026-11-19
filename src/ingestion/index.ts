@@ -17,6 +17,7 @@ export {
   fetchMetadataForManifest,
   finishIngestionTask,
   findManifestTask,
+  listFrozenIngestionManifests,
   updateIngestionPhase,
   validateStagingPath,
   getIngestionManifestById,

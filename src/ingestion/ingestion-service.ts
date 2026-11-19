@@ -713,8 +713,8 @@ function indexManifestIntoDatabase(
         mediaId = Number(info.lastInsertRowid);
       }
 
-      const performerGate = evaluateManifestPerformers(conn, manifest.id, { now: () => new Date(ts) });
-      if (performerGate.pendingReview.length) throw new Error('PERFORMER_REVIEW_REQUIRED: performer tags changed during execution.');
+      const performerPreview = evaluateManifestPerformers(conn, manifest.id, { now: () => new Date(ts) });
+      if (performerPreview.pendingReview.length) throw new Error('PERFORMER_REVIEW_REQUIRED: performer tags changed during execution.');
       const normalTagIds: number[] = [];
       for (const tagEntry of manifest.tags) {
         let resolvedTagId = tagEntry.tagId;
@@ -754,7 +754,6 @@ function indexManifestIntoDatabase(
       // Apply performer-alias associations (`Issue #8 B4` Option B):
       // - Auto-matched rules -> `source='performer-rule', confidence=1.0` (never overwriting `manual`).
       // - Human-resolved queue items -> `source='manual', confidence=NULL`.
-      const performerPreview = evaluateManifestPerformers(conn, manifest.id, { now: () => new Date(ts) });
       const autoPerformerTagIds: number[] = [];
       for (const entry of performerPreview.autoMatched) {
         autoPerformerTagIds.push(entry.tagId);
@@ -1108,6 +1107,14 @@ export async function reconcileIngestionManifests(
   };
 }
 
+export function listFrozenIngestionManifests(db: DatabaseSync): IngestionManifest[] {
+  const rows = db.prepare(`SELECT m.* FROM ingestion_manifests m WHERE EXISTS (
+    SELECT 1 FROM ingestion_tasks t WHERE t.status = 'running' AND
+    (t.target_key = 'manifest:' || m.id OR (t.op = 'reconcile' AND m.state IN ('moving', 'failed', 'indexed'))))`)
+    .all() as Array<Record<string, unknown>>;
+  return rows.map(mapManifestRow);
+}
+
 /** Locate the task that freezes this reviewed Manifest; unrelated preparation stays available. */
 export function findManifestTask(db: DatabaseSync, manifestId: number): IngestionTask | null {
   const row = db.prepare(`SELECT * FROM ingestion_tasks WHERE status = 'running' AND
@@ -1151,6 +1158,7 @@ export function listIngestionTasks(db: DatabaseSync, limit = 20, now: () => Date
 export function markInterruptedIngestionTasks(
   db: DatabaseSync,
   now: () => Date = () => new Date(),
+  liveTaskIds: readonly number[] = [],
 ): number {
   const exists = db
     .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingestion_tasks'")
@@ -1163,9 +1171,9 @@ export function markInterruptedIngestionTasks(
        SET status = 'interrupted',
            message = CASE WHEN message = '' THEN 'Host restarted while task was running; run Reconcile.' ELSE message || ' (interrupted by Host restart)' END,
            finished_at = ?
-       WHERE status = 'running'`,
+       WHERE status = 'running'${liveTaskIds.length ? ` AND id NOT IN (${liveTaskIds.map(() => '?').join(',')})` : ''}`,
     )
-    .run(ts);
+    .run(ts, ...liveTaskIds);
   return Number(info.changes);
 }
 

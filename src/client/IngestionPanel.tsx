@@ -416,25 +416,32 @@ export function IngestionPanel({
     }
   };
 
+  const approveEntry = async (entry: UnifiedStagingEntry): Promise<IngestionManifest | null> => {
+    const result = await mediaLibrary.reviewIngestion({
+      manifestId: entry.manifest?.id, tempPath: entry.manifest ? undefined : entry.tempPath,
+      decision: 'approved', title: activeDraft.title, mediaDate: activeDraft.mediaDate,
+      newTagNames: activeDraft.tagsText.split(',').map(s => s.trim()).filter(Boolean),
+    });
+    if (!result.ok) {
+      setError(result.error.message || t('rpcError'));
+      return null;
+    }
+    const manifest = result.value.manifest;
+    if (!result.value.ok || !manifest) {
+      setError(result.value.message ?? result.value.code ?? 'Review failed');
+      return null;
+    }
+    clearDraft(entry.key);
+    clearDraft(`m:${manifest.id}`);
+    setSelectedKey(`m:${manifest.id}`);
+    return manifest;
+  };
+
   const handleApprove = async (entry: UnifiedStagingEntry) => {
     setBusyOp('approve');
     setError(null);
     try {
-      const result = await mediaLibrary.reviewIngestion({
-        manifestId: entry.manifest?.id, tempPath: entry.manifest ? undefined : entry.tempPath,
-        decision: 'approved', title: activeDraft.title, mediaDate: activeDraft.mediaDate,
-        newTagNames: activeDraft.tagsText.split(',').map(s => s.trim()).filter(Boolean),
-      });
-      if (!result.ok) setError(result.error.message || t('rpcError'));
-      else if (!result.value.ok) setError(result.value.message ?? 'Review failed');
-      else {
-        clearDraft(entry.key);
-        if (result.value.manifest) {
-          clearDraft(`m:${result.value.manifest.id}`);
-          setSelectedKey(`m:${result.value.manifest.id}`);
-        }
-        setMessage(t('ingestionApproveBtn'));
-      }
+      if (await approveEntry(entry)) setMessage(t('ingestionApproveBtn'));
       await reloadServerState();
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setBusyOp(null); }
@@ -445,33 +452,12 @@ export function IngestionPanel({
     setMessage(null);
     setError(null);
     try {
-      const tagNames = activeDraft.tagsText
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const reviewRes = await mediaLibrary.reviewIngestion({
-        manifestId: entry.manifest?.id,
-        tempPath: entry.manifest ? undefined : entry.tempPath,
-        decision: 'approved',
-        title: activeDraft.title,
-        mediaDate: activeDraft.mediaDate,
-        newTagNames: tagNames,
-      });
-      if (!reviewRes.ok) {
-        setError(reviewRes.error.message || t('rpcError'));
-        return;
-      }
-      if (!reviewRes.value.ok || !reviewRes.value.manifest) {
-        setError(reviewRes.value.message ?? reviewRes.value.code ?? 'Review failed');
+      const approvedManifest = await approveEntry(entry);
+      if (!approvedManifest) {
         await reloadServerState();
         return;
       }
-
-      const approvedManifest = reviewRes.value.manifest;
       setExecuting({ op: 'commit', key: `m:${approvedManifest.id}` });
-      clearDraft(entry.key);
-      clearDraft(`m:${approvedManifest.id}`);
-      setSelectedKey(`m:${approvedManifest.id}`);
 
       const commitRes = await mediaLibrary.commitIngestion({ manifestId: approvedManifest.id });
       if (!commitRes.ok) {

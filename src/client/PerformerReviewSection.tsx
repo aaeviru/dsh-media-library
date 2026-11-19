@@ -1,3 +1,4 @@
+import { normalizePerformerName } from '../types.ts';
 import { useEffect, useState } from 'react';
 import type {
   ManifestPerformerPreview,
@@ -507,7 +508,7 @@ export function PerformerDrawer({
   onError: (msg: string) => void;
 }) {
   const aliasFrozen = (name: string) => frozenPerformerNames.some(n =>
-    n.normalize('NFKC').trim().toLowerCase() === name.normalize('NFKC').trim().toLowerCase());
+    normalizePerformerName(n) === normalizePerformerName(name));
   const handleTogglePolicy = async (alias: PerformerAliasRecord) => {
     const nextPolicy = alias.policy === 'always_ask' ? 'auto' : 'always_ask';
     const res = await mediaLibrary.upsertPerformerAlias({
