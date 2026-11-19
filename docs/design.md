@@ -1,6 +1,6 @@
 # `dsh-media-library` 设计提案
 
-> 状态：设计草案；未修改 TagStudio、NAS 或任何生产数据，也未提交代码。  
+> 状态：历史设计基线（M1–M4 已落地，当前版本 `v0.7.3` / schema `v7`；后续演进与运维细节以 [docs/adr/](adr/) 与 [docs/operations-and-recovery.md](operations-and-recovery.md) 为准）。
 > 调研基线（2026-11-11）：DSH `fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159`、`dsh-downloader` `d1c44670ef17578b8cd7f0464f20a44bc9b58a02`、`dsh-plugin-docs` `920baf5538fcaa1e9d7e833d077ab39a664171d7`、TagStudio `873de7e5bbeabb8d7103811e9e5bedbabf041b32`。
 
 ## 1. 结论

@@ -1,6 +1,6 @@
 # ADR 0003: Responsive Host and Serialized Ingestion
 
-- **Status**: Accepted design (user decisions, 2026-11-19); implementation tracked by Issue #30.
+- **Status**: Implemented (PR [#38](https://github.com/aaeviru/dsh-media-library/pull/38), `v0.7.3`); accepted design (user decisions, 2026-11-19).
 - **Refs**: [#30](https://github.com/aaeviru/dsh-media-library/issues/30), [#22](https://github.com/aaeviru/dsh-media-library/issues/22), [#37](https://github.com/aaeviru/dsh-media-library/issues/37), [ADR 0002](0002-staging-scan-and-move.md).
 
 ## Context

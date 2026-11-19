@@ -226,5 +226,5 @@ gh issue list --repo aaeviru/dsh-media-library --state all --label "area/<domain
 
 ## 6. Agent 工作边界与并行 Worktree
 
-- **Worktree 隔离**：多个 Agent 或并行任务写入本仓库时，每个任务分支必须使用独立的 Git Worktree（例如 `/tmp/dsh-media-library-<issue>` 或平级 `worktree-<issue>`），主工作树 `/home/aaevi/projects/dsh-media-library` 保持在干净的 `main` 基线用于只读核对与规划。
+- **Worktree 隔离**：多个 Agent 或并行任务写入本仓库时，每个任务分支必须使用独立的 Git Worktree（例如 `/tmp/dsh-media-library-<issue>` 或平级 `worktree-<issue>`），主工作树 `/home/aaevi/projects/project/dsh-media-library` 保持在干净的 `main` 基线用于只读核对与规划。
 - **分支清理**：PR 合并后，先将主工作树 `main` fast-forward 到最新 `origin/main`，确认提交已包含且无未提交工作后，立即移除对应的临时 Worktree 与本地分支。

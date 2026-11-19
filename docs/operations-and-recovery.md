@@ -26,7 +26,7 @@
 1. Stop DSH Desktop / disable `@deepseek-ai/dsh-experimental-media-library`.
 2. Choose a verified `.sqlite3` backup from `%DSH_HOME%/media-library/backups/` (or `nasBackupDir`).
 3. Copy or restore it to `%DSH_HOME%/media-library/library.sqlite3` (and remove any stale `-wal`/`-shm` sidecars if present).
-4. If rolling back a schema upgrade (e.g., `v3 -> v2`), restore the matching `pre-migrate-*` backup **and** reinstall the matching `.tgz` plugin version (`0.2.0` for v2, `0.3.0`/`0.4.0` for v3).
+4. If rolling back a schema upgrade (e.g., `v7 -> v6` or `v3 -> v2`), restore the matching `pre-migrate-*` backup **and** reinstall the matching `.tgz` plugin version (`0.2.x` for v2, `0.3.x`/`0.4.x` for v3, `0.5.0` for v4, `0.5.1+` for v5, `0.6.x` for v6, `0.7.x` for v7).
 5. Start DSH Desktop and open **Backup & Ops** to confirm `healthOk: true` and expected row counts.
 
 ## 5. Read-Only Degraded Mode
@@ -34,4 +34,4 @@
 If startup detects a failed migration, a failed integrity check, or a database `schemaVersion` newer than the installed plugin supports:
 - Host enters `READ_ONLY_DEGRADED`.
 - Search, diagnostics, backup creation, and portable **JSON / CSV mapping report export** remain available.
-- All mutating RPCs (`createTag`, `renameTag`, `addAlias`, `removeAlias`, `setMediaTags`, `mergeTags`, `archiveTag`, `restoreTag`, `importTagStudioCopy`) are blocked with `READ_ONLY_DEGRADED` until the database is restored or the plugin is upgraded.
+- All mutating RPCs (`createTag`, `renameTag`, `addAlias`, `removeAlias`, `setMediaTags`, `mergeTags`, `archiveTag`, `restoreTag`, `importTagStudioCopy`, `scanStagingFiles`, `fetchIngestionMetadata`, `reviewIngestion`, `commitIngestion`, `reconcileIngestion`, `upsertPerformerAlias`, `deletePerformerAlias`, `resolvePerformerReview`, `promotePerformerTagToManual`) are blocked with `READ_ONLY_DEGRADED` until the database is restored or the plugin is upgraded.
