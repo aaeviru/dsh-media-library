@@ -31,6 +31,8 @@ import {
   ensureManifestForStagingFile,
   fetchMetadataForManifest,
   finishIngestionTask,
+  findManifestTask,
+  updateIngestionPhase,
   type IngestionFileOps,
   listIngestionManifests,
   listIngestionTasks,
@@ -58,6 +60,7 @@ import {
   evaluateManifestPerformers,
   listPerformerAliases,
   listPerformerReviewQueue,
+  normalizePerformerName,
   promotePerformerTagToManual,
   resolvePerformerReview,
   upsertPerformerAlias,
@@ -222,6 +225,7 @@ export interface SpikeServiceOptions {
   readonly configuredCmadbCookie?: string | (() => string) | undefined;
   readonly configuredPpvdbCookie?: string | (() => string) | undefined;
   readonly metadataFetcher?: MetadataFetcher | undefined;
+  readonly allowCrossDeviceCopy?: boolean | undefined;
   readonly ingestionFileOps?: IngestionFileOps | undefined;
   readonly backupRetentionCount?: number | undefined;
   readonly preMigrateRetentionCount?: number | undefined;
@@ -376,6 +380,7 @@ export class MediaLibrarySpikeService {
   private configuredCmadbCookie: string | (() => string);
   private configuredPpvdbCookie: string | (() => string);
   private readonly explicitFetcher: MetadataFetcher | undefined;
+  private readonly allowCrossDeviceCopy: boolean;
   private readonly ingestionFileOps: IngestionFileOps;
   private readonly backupRetentionCount: number;
   private readonly preMigrateRetentionCount: number;
@@ -414,6 +419,7 @@ export class MediaLibrarySpikeService {
     this.configuredCmadbCookie = options.configuredCmadbCookie ?? '';
     this.configuredPpvdbCookie = options.configuredPpvdbCookie ?? '';
     this.explicitFetcher = options.metadataFetcher;
+    this.allowCrossDeviceCopy = options.allowCrossDeviceCopy ?? false;
     this.ingestionFileOps = options.ingestionFileOps ?? defaultIngestionFileOps;
     this.backupRetentionCount = Math.max(1, options.backupRetentionCount ?? DEFAULT_DAILY_BACKUP_RETENTION);
     this.preMigrateRetentionCount = Math.max(1, options.preMigrateRetentionCount ?? DEFAULT_PRE_MIGRATE_BACKUP_RETENTION);
@@ -504,7 +510,7 @@ export class MediaLibrarySpikeService {
         const mig = await migrateDatabase(db, {
           dbPath,
           backupDir: this.backupDir,
-          appVersion: '0.6.2',
+          appVersion: '0.7.1',
           now: this.now,
         });
         if (!mig.health.ok) {
@@ -569,7 +575,7 @@ export class MediaLibrarySpikeService {
     await this.initialize();
     const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
     try {
-      return fn(db);
+      return await fn(db);
     } finally {
       db.close();
     }
@@ -582,7 +588,7 @@ export class MediaLibrarySpikeService {
     }
     const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
     try {
-      return fn(db);
+      return await fn(db);
     } finally {
       db.close();
     }
@@ -799,7 +805,7 @@ export class MediaLibrarySpikeService {
       return await this.withInitializedDatabase((db) =>
         exportPortableMappingReport(db, {
           format: input.format,
-          appVersion: '0.6.2',
+          appVersion: '0.7.1',
           now: this.now,
         }),
       );
@@ -875,7 +881,17 @@ export class MediaLibrarySpikeService {
   }
 
   async listIngestionTasks(): Promise<IngestionTask[]> {
-    return this.withInitializedDatabase((db) => listIngestionTasks(db));
+    return this.withInitializedDatabase((db) => listIngestionTasks(db, 20, this.now));
+  }
+
+  private ingestionStagingDir(): string {
+    const { roots } = this.getEffectiveRootsAndItems();
+    const configured = this.readStringSetting(this.configuredStagingDir).trim();
+    const root = roots.find(r => r.rootId === DEFAULT_M1_ROOT_ID && r.enabled);
+    if (!configured && (!root || root.canonicalUncRoot.toLowerCase() === '\\\\nas\\mediatest')) {
+      throw new Error('Staging directory is not configured.');
+    }
+    return configured || path.win32.join(root!.canonicalUncRoot, 'temp');
   }
 
   async fetchIngestionMetadata(input: FetchIngestionMetadataInput): Promise<FetchedMetadataCandidate> {
@@ -903,8 +919,9 @@ export class MediaLibrarySpikeService {
     try {
       let manifestId = input.manifestId;
       if (!manifestId && input.tempPath) {
-        const created = ensureManifestForStagingFile(db, {
+        const created = await ensureManifestForStagingFile(db, {
           tempPath: input.tempPath,
+          stagingDir: this.ingestionStagingDir(),
           targetRootId: DEFAULT_M1_ROOT_ID,
           targetSubdir,
           roots,
@@ -976,11 +993,12 @@ export class MediaLibrarySpikeService {
     }
     const { roots } = this.getEffectiveRootsAndItems();
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
-    return this.withInitializedDatabase((db) => {
+    return this.withInitializedDatabase(async (db) => {
       let manifestId = input.manifestId;
       if (!manifestId && input.tempPath) {
-        const created = ensureManifestForStagingFile(db, {
+        const created = await ensureManifestForStagingFile(db, {
           tempPath: input.tempPath,
+          stagingDir: this.ingestionStagingDir(),
           targetRootId: DEFAULT_M1_ROOT_ID,
           targetSubdir,
           roots,
@@ -992,6 +1010,8 @@ export class MediaLibrarySpikeService {
       if (!manifestId) {
         return { ok: false, code: 'INVALID_INPUT', message: 'Either manifestId or tempPath is required.' };
       }
+      const active = findManifestTask(db, manifestId);
+      if (active) return { ok: false, code: 'IN_PROGRESS', message: `Task #${active.id} freezes this Manifest until it finishes.` };
       return reviewIngestionManifest(db, { ...input, manifestId }, this.now);
     });
   }
@@ -1006,24 +1026,28 @@ export class MediaLibrarySpikeService {
       };
     }
     const { roots } = this.getEffectiveRootsAndItems();
-    return this.withInitializedDatabase((db) => {
+    return this.withInitializedDatabase(async (db) => {
       const targetKey = `manifest:${input.manifestId}`;
       const lock = startIngestionTask(db, targetKey, 'commit', `Moving & indexing manifest #${input.manifestId}...`, this.now);
       if (!lock.acquired) {
         return {
           ok: false,
           code: 'IN_PROGRESS',
-          message: lock.existing.message || 'Move & index already in progress for this item.',
+          activeTask: lock.existing,
+          message: `Task #${lock.existing.id}: ` + lock.existing.message || 'Move & index already in progress for this item.',
         };
       }
       try {
-        const res = commitIngestionManifest(db, {
+        const res = await commitIngestionManifest(db, {
           manifestId: input.manifestId,
+          allowCrossDeviceCopy: this.allowCrossDeviceCopy,
+          stagingDir: this.ingestionStagingDir(),
+          onPhase: phase => updateIngestionPhase(db, lock.taskId, phase, this.now),
           roots,
           fileOps: this.ingestionFileOps,
           now: this.now,
         });
-        finishIngestionTask(db, lock.taskId, res.ok ? 'succeeded' : 'failed', res.message, this.now);
+        finishIngestionTask(db, lock.taskId, res.ok ? 'succeeded' : 'failed', res.message + (res.warning ? ` (${res.warning})` : ''), this.now);
         return res;
       } catch (err) {
         finishIngestionTask(db, lock.taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
@@ -1046,7 +1070,7 @@ export class MediaLibrarySpikeService {
       };
     }
     const { roots } = this.getEffectiveRootsAndItems();
-    return this.withInitializedDatabase((db) => {
+    return this.withInitializedDatabase(async (db) => {
       const lock = startIngestionTask(db, 'reconcile:all', 'reconcile', 'Reconciling interrupted ingestion manifests...', this.now);
       if (!lock.acquired) {
         return {
@@ -1055,13 +1079,16 @@ export class MediaLibrarySpikeService {
           copiedNotDeletedFixed: 0,
           movedNotIndexedFixed: 0,
           indexedButMissingMarked: 0,
-          errors: [lock.existing.message || 'Reconcile already in progress.'],
+          activeTask: lock.existing,
+          errors: [`Task #${lock.existing.id}: ` + lock.existing.message || 'Reconcile already in progress.'],
           manifests: listIngestionManifests(db),
         };
       }
       try {
-        const res = reconcileIngestionManifests(db, {
+        const res = await reconcileIngestionManifests(db, {
           roots,
+          stagingDir: this.ingestionStagingDir(),
+          onPhase: phase => updateIngestionPhase(db, lock.taskId, phase, this.now),
           fileOps: this.ingestionFileOps,
           now: this.now,
         });
@@ -1195,6 +1222,21 @@ export class MediaLibrarySpikeService {
     return this.withInitializedDatabase((db) => listPerformerAliases(db));
   }
 
+  private performerRuleTask(db: DatabaseSync, rawName: string): IngestionTask | null {
+    const name = normalizePerformerName(rawName);
+    const rows = db.prepare(`SELECT m.id, m.actresses_json FROM ingestion_manifests m WHERE EXISTS (
+      SELECT 1 FROM ingestion_tasks t WHERE t.status = 'running' AND
+      (t.target_key = 'manifest:' || m.id OR (t.op = 'reconcile' AND m.state IN ('moving', 'failed', 'indexed'))))`)
+      .all() as Array<{ id: number; actresses_json: string }>;
+    for (const row of rows) {
+      const actresses: unknown = JSON.parse(row.actresses_json);
+      if (Array.isArray(actresses) && actresses.some(a => typeof a === 'string' && normalizePerformerName(a) === name)) {
+        return findManifestTask(db, Number(row.id));
+      }
+    }
+    return null;
+  }
+
   async upsertPerformerAlias(input: UpsertPerformerAliasInput): Promise<UpsertPerformerAliasResult> {
     await this.initialize();
     if (this.degradedState.degraded) {
@@ -1204,7 +1246,11 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
-    return this.withInitializedDatabase((db) => upsertPerformerAlias(db, input, { now: this.now }));
+    return this.withInitializedDatabase((db) => {
+      const active = this.performerRuleTask(db, input.rawAlias);
+      if (active) return { ok: false, code: 'IN_PROGRESS', message: `Task #${active.id} freezes this performer input.` };
+      return upsertPerformerAlias(db, input, { now: this.now });
+    });
   }
 
   async deletePerformerAlias(input: DeletePerformerAliasInput): Promise<DeletePerformerAliasResult> {
@@ -1216,7 +1262,12 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
-    return this.withInitializedDatabase((db) => deletePerformerAlias(db, input, { now: this.now }));
+    return this.withInitializedDatabase((db) => {
+      const alias = db.prepare('SELECT raw_alias FROM performer_aliases WHERE id = ?').get(input.aliasId) as { raw_alias: string } | undefined;
+      const active = alias ? this.performerRuleTask(db, alias.raw_alias) : null;
+      if (active) return { ok: false, code: 'IN_PROGRESS', message: `Task #${active.id} freezes this performer input.` };
+      return deletePerformerAlias(db, input, { now: this.now });
+    });
   }
 
   async listPerformerReviewQueue(input?: ListPerformerReviewInput): Promise<PerformerReviewItem[]> {
@@ -1233,7 +1284,15 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
-    return this.withInitializedDatabase((db) => resolvePerformerReview(db, input, { now: this.now }));
+    return this.withInitializedDatabase((db) => {
+      const review = input.reviewId ? db.prepare('SELECT manifest_id, raw_name FROM performer_review_queue WHERE id = ?').get(input.reviewId) as { manifest_id: number; raw_name: string } | undefined : undefined;
+      const manifestId = review?.manifest_id ?? input.manifestId;
+      const active = manifestId ? findManifestTask(db, manifestId) : null;
+      // Remembering an alias can also affect another executing Manifest.
+      const ruleTask = input.rememberRule && input.mode !== 'skip' ? this.performerRuleTask(db, review?.raw_name ?? input.rawName ?? '') : null;
+      if (active || ruleTask) return { ok: false, code: 'IN_PROGRESS', message: `Task #${(active ?? ruleTask)!.id} freezes this performer input.` };
+      return resolvePerformerReview(db, input, { now: this.now });
+    });
   }
 
   async promotePerformerTagToManual(input: PromotePerformerTagInput): Promise<PromotePerformerTagResult> {

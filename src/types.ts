@@ -195,6 +195,7 @@ export interface ImportTagStudioResult {
 }
 
 export type MutationErrorCode =
+  | 'IN_PROGRESS'
   | 'INVALID_INPUT'
   | 'TAG_NOT_FOUND'
   | 'MEDIA_NOT_FOUND'
@@ -504,6 +505,7 @@ export interface OpenStagingFileInput {
 }
 
 export interface CommitIngestionResult {
+  readonly activeTask?: IngestionTask | undefined;
   readonly ok: boolean;
   readonly code?: 'REVIEW_REQUIRED' | 'PERFORMER_REVIEW_REQUIRED' | 'READ_ONLY_DEGRADED' | 'MANIFEST_NOT_FOUND' | 'MOVE_FAILED' | 'INDEX_FAILED' | 'CHECKSUM_MISMATCH' | 'IN_PROGRESS' | MediaActionErrorCode | undefined;
   readonly message: string;
@@ -516,7 +518,12 @@ export interface CommitIngestionResult {
 export type IngestionTaskOp = 'fetch' | 'commit' | 'reconcile';
 export type IngestionTaskStatus = 'running' | 'succeeded' | 'failed' | 'interrupted';
 
+export type IngestionPhase = 'validation' | 'rename' | 'copy' | 'hash' | 'quick_check' | 'index' | 'cleanup';
+
 export interface IngestionTask {
+  readonly phase: IngestionPhase;
+  readonly phaseStartedAt: string;
+  readonly waitingWarning: boolean;
   readonly id: number;
   readonly targetKey: string;
   readonly op: IngestionTaskOp;
@@ -527,6 +534,7 @@ export interface IngestionTask {
 }
 
 export interface ReconcileIngestionResult {
+  readonly activeTask?: IngestionTask | undefined;
   readonly ok: boolean;
   readonly reconciledCount: number;
   readonly copiedNotDeletedFixed: number;

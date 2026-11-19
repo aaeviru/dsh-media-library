@@ -55,6 +55,7 @@ function setupEnv(tmpDir: string) {
     exists: (p) => defaultIngestionFileOps.exists(mapUncToLocal(p)),
     statSize: (p) => defaultIngestionFileOps.statSize(mapUncToLocal(p)),
     sha256: (p) => defaultIngestionFileOps.sha256(mapUncToLocal(p)),
+    readRange: (p, offset, length) => defaultIngestionFileOps.readRange(mapUncToLocal(p), offset, length),
     ensureDir: (p) => defaultIngestionFileOps.ensureDir(mapUncToLocal(p)),
     rename: (src, dst) => defaultIngestionFileOps.rename(mapUncToLocal(src), mapUncToLocal(dst)),
     copyFile: (src, dst) => defaultIngestionFileOps.copyFile(mapUncToLocal(src), mapUncToLocal(dst)),
@@ -135,7 +136,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         upsertPerformerAlias(db, { rawAlias: 'ここあ', tagId: cocoaB.tagId });
 
         // 1) Manifest 1 has: known stage-name ('new stage name'), ambiguous ('ここあ'), and unknown ('新人ちゃん')
-        const m1 = ensureManifestForStagingFile(db, {
+        const m1 = await ensureManifestForStagingFile(db, {
           tempPath: file1,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
@@ -174,7 +175,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
 
         // Policy 1: approve normal review, then commit must FAIL with PERFORMER_REVIEW_REQUIRED
         reviewIngestionManifest(db, { manifestId: m1.id, decision: 'approved', newTagNames: ['巨乳'] });
-        const blockedCommit = commitIngestionManifest(db, { manifestId: m1.id, roots, fileOps });
+        const blockedCommit = await commitIngestionManifest(db, { manifestId: m1.id, roots, fileOps });
         assert.equal(blockedCommit.ok, false);
         assert.equal(blockedCommit.code, 'PERFORMER_REVIEW_REQUIRED');
         assert.equal(fs.existsSync(file1), true, 'Staging file must NOT move while performer review is pending');
@@ -221,7 +222,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         const previewReady = evaluateManifestPerformers(db, m1.id);
         assert.equal(previewReady.canCommit, true);
         assert.equal(previewReady.humanResolved.length, 2);
-        const committed1 = commitIngestionManifest(db, { manifestId: m1.id, roots, fileOps });
+        const committed1 = await commitIngestionManifest(db, { manifestId: m1.id, roots, fileOps });
         assert.equal(committed1.ok, true);
         assert.ok(committed1.mediaId);
 
@@ -263,12 +264,12 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         }
 
         // Re-commit is idempotent
-        const replay1 = commitIngestionManifest(db, { manifestId: m1.id, roots, fileOps });
+        const replay1 = await commitIngestionManifest(db, { manifestId: m1.id, roots, fileOps });
         assert.equal(replay1.ok, true);
         assert.equal(replay1.idempotentReplay, true);
 
         // 2) Durable reuse on later manifest (file2): '新人ちゃん' now auto-matches deterministically!
-        const m2 = ensureManifestForStagingFile(db, {
+        const m2 = await ensureManifestForStagingFile(db, {
           tempPath: file2,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
@@ -283,7 +284,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         assert.equal(preview2.autoMatched[0]!.source, 'performer-rule');
 
         reviewIngestionManifest(db, { manifestId: m2.id, decision: 'approved', newTagNames: ['巨乳'] });
-        const committed2 = commitIngestionManifest(db, { manifestId: m2.id, roots, fileOps });
+        const committed2 = await commitIngestionManifest(db, { manifestId: m2.id, roots, fileOps });
         assert.equal(committed2.ok, true);
         assert.ok(committed2.mediaId);
 
@@ -305,7 +306,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         assert.equal(soloTag.ok, true);
         if (!soloTag.ok) return;
         upsertPerformerAlias(db, { rawAlias: 'みな', tagId: soloTag.tagId, policy: 'always_ask' });
-        const m3 = ensureManifestForStagingFile(db, {
+        const m3 = await ensureManifestForStagingFile(db, {
           tempPath: file3,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
@@ -403,7 +404,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         assert.equal(aliasC?.targetArchived, true);
         assert.equal(aliasC?.needsRemediation, true);
 
-        const m = ensureManifestForStagingFile(db, {
+        const m = await ensureManifestForStagingFile(db, {
           tempPath: sampleFile,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
@@ -452,7 +453,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
       const dbAfter = new DatabaseSync(dbPath);
       try {
         const vRow = dbAfter.prepare('SELECT MAX(version) AS v FROM schema_versions').get() as { v: number };
-        assert.equal(vRow.v, 6);
+        assert.equal(vRow.v, 7);
         const cols = dbAfter.prepare('PRAGMA table_info(ingestion_manifests)').all() as Array<{ name: string }>;
         assert.ok(cols.some((c) => c.name === 'actresses_json'));
       } finally {
