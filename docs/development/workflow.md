@@ -7,6 +7,7 @@
 - **职责分离**：Issue 定义任务边界与业务裁决；PR 承载实现；验证脚本与实机测试提供技术证据；Critic 提供独立审查证据；**人类拥有唯一业务裁决权与合入决定权**。
 - **短分支与单向推进**：所有变更从最新 `main` 派生短期分支并通过 PR 返回；Agent 不直接推送 `main`，也不自行合并 PR。一个 Issue 原则上对应一个主要 PR，不引入 `develop`、`release` 等长期分支。
 - **诚实标记验证边界**：自动检查只能证明其覆盖的条件。Linux 下的单元测试、匿名 SQLite fixture 测试或 Mock 测试通过，不能替代 Windows DSH Desktop + 真实 NAS SMB + PotPlayer/Explorer 的端到端验收。
+- **客户端 UI 导航指针**：改动 `src/client/` 前先读 [docs/ui-guidelines.md](../ui-guidelines.md)（复用 DSH `--dsw-*` Token、CSS Modules 与 `@deepseek-ai/dsh-client-ui-primitives`，不引入第三方 UI 库或硬编码颜色）。
 - **项目红线（不可违反的不变量）**：
   1. **只读源数据**：严禁修改生产或副本 TagStudio 数据库（`ts_library.sqlite`），导入前后必须校验源库 SHA-256 不变。
   2. **存储位置**：SQLite 数据库必须位于 Windows 本机 DSH 数据目录（如 `%DSH_HOME%/media-library/library.sqlite3`），严禁将在线写入的 SQLite 放在 SMB 共享、插件包目录或 `node_modules` 中。
@@ -127,7 +128,7 @@
 
 <最小文件树、流程图或差异摘要>
 
-Refs #<ID>（若完成该 Issue 全部交付且包含所需实机验收，才使用 Closes #<ID>）
+Closes #<ID> | Refs #<ID>（二选一，禁止原样保留：完成该 Issue 全部交付且无合并后遗留跟进项时写 Closes #<ID>，纯 UI/文档或不涉及 SMB 的 Issue 其 windows_smb_e2e 标 N/A 不阻塞 Closes；仅多 PR 部分交付或合并后仍需追踪实机验收/后续任务时写 Refs #<ID>）
 
 ## Implementation
 
