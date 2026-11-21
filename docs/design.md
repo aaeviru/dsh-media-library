@@ -216,6 +216,8 @@ legacy_ids(source_type, source_id, entity_type, entity_id)
 
 - 定义 ingestion inbox：消费 DSH Downloader/现有脚本产生的 manifest，而不是猜目录状态。
 - manifest 至少含 source ID、临时路径、目标 root/relative path、标题、番号、日期、演员、校验和。
+- 未入库 manifest（`state !== 'indexed'`）按大小写无关的 `filename` 与暂存文件绑定：修改 `stagingDir` 或将暂存文件移至新暂存目录后，`scanStagingDirectory` 与 `ensureManifestForStagingFile` 自动复用该 manifest 并更新 `temp_path` / `target_relative_path` / `file_size` / `source_id`，保留已抓取元数据、演员队列裁决与审核状态（Issue #45 B1）。
+- `scanStagingDirectory` 扫描成功时，自动清理 `stagingDir` 中已不存在对应文件的未入库 manifest（级联清理 `performer_review_queue`），但保留正在运行的冻结任务与目标文件已落盘的 `moved-not-indexed` 待对账记录（Issue #45 B2）。
 - 先“计划/预览”，经人工确认后移动；移动与 DB 入库用可恢复状态机（planned → moving → indexed → failed），不能假装跨 SMB 文件移动和 SQLite 是一个原子事务。
 - `performer_aliases(normalized_name → tag_id)` 规则先生成建议；歧义或新演员进入人工队列。确认后写 `media_tags(source='performer-rule')`。
 - 只有出现多 Windows 客户端/后台 NAS ingestion 的真实需求时，才评估 NAS API；保持当前 Repository 接口，使 UI/Remote 不变。
