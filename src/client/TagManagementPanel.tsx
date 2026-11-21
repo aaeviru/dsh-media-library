@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type {
   MergePreviewSuccess,
   MutationError,
@@ -7,6 +7,8 @@ import type {
 } from '../types.ts';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
+import { cx } from './ui/primitives.ts';
+import css from './ui/styles.module.css';
 
 type Translate = (key: MediaLibraryKey) => string;
 
@@ -27,21 +29,6 @@ export function describeMutationError(t: Translate, error: MutationError): strin
   const label = key ? t(key) : t('errGeneric');
   return `[${error.code}] ${label} — ${error.message}`;
 }
-
-export const controlStyle: CSSProperties = {
-  padding: '5px 10px',
-  borderRadius: '6px',
-  border: '1px solid rgba(128,128,128,0.35)',
-  background: 'transparent',
-  color: 'inherit',
-  fontSize: '12px',
-};
-
-export const buttonStyle: CSSProperties = {
-  ...controlStyle,
-  cursor: 'pointer',
-  fontWeight: 600,
-};
 
 export function TagManagementPanel({
   t,
@@ -227,20 +214,10 @@ export function TagManagementPanel({
   const mergeCandidates = tags.filter((tag) => !tag.archived && tag.id !== selectedId);
 
   return (
-    <section
-      data-testid="tag-management-panel"
-      style={{
-        padding: '14px 16px',
-        borderRadius: '8px',
-        border: '1px solid rgba(128,128,128,0.28)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '12px',
-      }}
-    >
-      <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 600 }}>{t('tagMgmtHeading')}</h3>
+    <section data-testid="tag-management-panel" className={css.panel}>
+      <h3 className={css.sectionTitle}>{t('tagMgmtHeading')}</h3>
 
-      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+      <div className={css.row}>
         <input
           type="text"
           data-testid="tagmgmt-create-input"
@@ -250,53 +227,45 @@ export function TagManagementPanel({
             if (e.key === 'Enter' && !busy) void handleCreate();
           }}
           placeholder={t('tagMgmtCreatePlaceholder')}
-          style={{ ...controlStyle, flex: '1 1 220px' }}
+          className={cx(css.control, css.controlFlex)}
         />
         <button
           type="button"
           data-testid="tagmgmt-create-btn"
           disabled={busy || !createName.trim()}
           onClick={() => void handleCreate()}
-          style={buttonStyle}
+          className={cx(css.btn, css.btnPrimary)}
         >
           {t('tagMgmtCreateBtn')}
         </button>
       </div>
 
       {busy ? (
-        <div data-testid="tagmgmt-busy" style={{ fontSize: '12px', opacity: 0.8 }}>
+        <div data-testid="tagmgmt-busy" className={css.muted}>
           {t('tagMgmtBusy')}
         </div>
       ) : null}
       {message ? (
-        <div
-          role="status"
-          data-testid="tagmgmt-message"
-          style={{ ...controlStyle, border: '1px solid rgba(34,197,94,0.45)' }}
-        >
+        <div role="status" data-testid="tagmgmt-message" className={cx(css.banner, css.bannerSuccess)}>
           {message}
         </div>
       ) : null}
       {error ? (
-        <div
-          role="alert"
-          data-testid="tagmgmt-error"
-          style={{ ...controlStyle, border: '1px solid rgba(239,68,68,0.5)', background: 'rgba(239,68,68,0.1)' }}
-        >
+        <div role="alert" data-testid="tagmgmt-error" className={cx(css.banner, css.bannerDanger)}>
           {error}
         </div>
       ) : null}
 
-      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+      <div className={css.row}>
         <input
           type="text"
           data-testid="tagmgmt-filter-input"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={t('tagMgmtFilterPlaceholder')}
-          style={{ ...controlStyle, flex: '1 1 220px' }}
+          className={cx(css.control, css.controlFlex)}
         />
-        <label style={{ fontSize: '12px', display: 'flex', gap: '4px', alignItems: 'center' }}>
+        <label className={css.checkboxLabel}>
           <input
             type="checkbox"
             data-testid="tagmgmt-show-archived"
@@ -308,21 +277,15 @@ export function TagManagementPanel({
       </div>
 
       {!loaded ? (
-        <div data-testid="tagmgmt-loading" style={{ fontSize: '12px', opacity: 0.8 }}>
+        <div data-testid="tagmgmt-loading" className={css.muted}>
           {t('tagMgmtLoading')}
         </div>
       ) : tags.length === 0 ? (
-        <div
-          data-testid="tagmgmt-empty"
-          style={{ padding: '14px', border: '1px dashed rgba(128,128,128,0.3)', borderRadius: '8px', fontSize: '12px' }}
-        >
+        <div data-testid="tagmgmt-empty" className={css.emptyBox}>
           {t('tagMgmtEmpty')}
         </div>
       ) : (
-        <ul
-          data-testid="tagmgmt-list"
-          style={{ listStyle: 'none', margin: 0, padding: 0, maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}
-        >
+        <ul data-testid="tagmgmt-list" className={css.scrollList}>
           {tags.map((tag) => (
             <li key={tag.id}>
               <button
@@ -330,23 +293,20 @@ export function TagManagementPanel({
                 data-testid={`tagmgmt-row-${tag.id}`}
                 aria-pressed={tag.id === selectedId}
                 onClick={() => setSelectedId(tag.id)}
-                style={{
-                  ...controlStyle,
-                  width: '100%',
-                  textAlign: 'left',
-                  cursor: 'pointer',
-                  background: tag.id === selectedId ? 'rgba(59,130,246,0.16)' : 'transparent',
-                  opacity: tag.archived ? 0.6 : 1,
-                }}
+                className={cx(
+                  css.listRowBtn,
+                  tag.id === selectedId && css.listRowBtnSelected,
+                  tag.archived && css.listRowArchived,
+                )}
               >
                 <strong>{tag.name}</strong>
                 {tag.aliases.length > 0 ? <span> ({tag.aliases.join(', ')})</span> : null}{' '}
-                <span style={{ opacity: 0.65 }}>
+                <span className={css.mutedSm}>
                   [{tag.mediaCount}] · r{tag.revision}
                 </span>
                 {tag.archived ? (
-                  <span data-testid={`tagmgmt-archived-badge-${tag.id}`} style={{ marginLeft: '6px' }}>
-                    {t('tagMgmtArchivedBadge')}
+                  <span data-testid={`tagmgmt-archived-badge-${tag.id}`} className={css.mutedSm}>
+                    {' '}{t('tagMgmtArchivedBadge')}
                   </span>
                 ) : null}
               </button>
@@ -356,30 +316,28 @@ export function TagManagementPanel({
       )}
 
       {selected ? (
-        <div
-          data-testid="tagmgmt-detail"
-          style={{ display: 'flex', flexDirection: 'column', gap: '10px', paddingTop: '8px', borderTop: '1px solid rgba(128,128,128,0.25)' }}
-        >
-          <div style={{ fontSize: '13px' }}>
-            <strong>{t('tagMgmtSelectedHeading')}:</strong> <span data-testid="tagmgmt-selected-name">{selected.name}</span>{' '}
+        <div data-testid="tagmgmt-detail" className={cx(css.stackMd, css.dividerTop)}>
+          <div>
+            <strong>{t('tagMgmtSelectedHeading')}:</strong>{' '}
+            <span data-testid="tagmgmt-selected-name">{selected.name}</span>{' '}
             <code data-testid="tagmgmt-selected-revision">r{selected.revision}</code>
           </div>
 
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <div className={css.row}>
             <input
               type="text"
               data-testid="tagmgmt-rename-input"
               value={renameValue}
               disabled={selected.archived}
               onChange={(e) => setRenameValue(e.target.value)}
-              style={{ ...controlStyle, flex: '1 1 220px' }}
+              className={cx(css.control, css.controlFlex)}
             />
             <button
               type="button"
               data-testid="tagmgmt-rename-btn"
               disabled={busy || selected.archived || !renameValue.trim()}
               onClick={() => void handleRename()}
-              style={buttonStyle}
+              className={css.btn}
             >
               {t('tagMgmtRenameBtn')}
             </button>
@@ -389,7 +347,7 @@ export function TagManagementPanel({
                 data-testid="tagmgmt-restore-btn"
                 disabled={busy}
                 onClick={() => void handleRestore()}
-                style={buttonStyle}
+                className={css.btn}
               >
                 {t('tagMgmtRestoreBtn')}
               </button>
@@ -399,22 +357,22 @@ export function TagManagementPanel({
                 data-testid="tagmgmt-archive-btn"
                 disabled={busy}
                 onClick={() => void handleArchive()}
-                style={buttonStyle}
+                className={css.btn}
               >
                 {t('tagMgmtArchiveBtn')}
               </button>
             )}
           </div>
 
-          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+          <div className={css.rowTight}>
             {selected.aliases.length === 0 ? (
-              <span style={{ fontSize: '12px', opacity: 0.7 }}>{t('tagMgmtNoAliases')}</span>
+              <span className={css.muted}>{t('tagMgmtNoAliases')}</span>
             ) : (
               selected.aliases.map((alias, index) => (
                 <span
                   key={`${alias}-${index}`}
                   data-testid={`tagmgmt-alias-${index}`}
-                  style={{ ...controlStyle, borderRadius: '999px', padding: '2px 8px' }}
+                  className={cx(css.pillChip, css.pillChipStatic)}
                 >
                   {alias}{' '}
                   <button
@@ -423,7 +381,7 @@ export function TagManagementPanel({
                     data-testid={`tagmgmt-alias-remove-${index}`}
                     disabled={busy}
                     onClick={() => void handleRemoveAlias(alias)}
-                    style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer' }}
+                    className={css.chipRemoveBtn}
                   >
                     ×
                   </button>
@@ -431,7 +389,7 @@ export function TagManagementPanel({
               ))
             )}
           </div>
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <div className={css.row}>
             <input
               type="text"
               data-testid="tagmgmt-alias-input"
@@ -442,23 +400,24 @@ export function TagManagementPanel({
                 if (e.key === 'Enter' && !busy && aliasValue.trim()) void handleAddAlias();
               }}
               placeholder={t('tagMgmtAliasPlaceholder')}
-              style={{ ...controlStyle, flex: '1 1 220px' }}
+              className={cx(css.control, css.controlFlex)}
             />
             <button
               type="button"
               data-testid="tagmgmt-alias-add-btn"
               disabled={busy || selected.archived || !aliasValue.trim()}
               onClick={() => void handleAddAlias()}
-              style={buttonStyle}
+              className={css.btn}
             >
               {t('tagMgmtAddAliasBtn')}
             </button>
           </div>
 
           {!selected.archived ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <strong style={{ fontSize: '12px' }}>{t('tagMgmtMergeHeading')}</strong>
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <div className={css.stack}>
+              <strong>{t('tagMgmtMergeHeading')}</strong>
+              <div className={css.row}>
+                {/* Legacy merge source <select> scheduled for TagPicker replacement in Stage 2 (Issue #42 B6) */}
                 <select
                   data-testid="tagmgmt-merge-source-select"
                   aria-label={t('tagMgmtMergeSourceLabel')}
@@ -467,13 +426,11 @@ export function TagManagementPanel({
                     setMergeSourceId(e.target.value ? Number(e.target.value) : null);
                     setPreview(null);
                   }}
-                  style={{ ...controlStyle, flex: '1 1 220px', colorScheme: 'light dark' }}
+                  className={cx(css.control, css.controlFlex)}
                 >
-                  <option value="" style={{ color: '#111827', backgroundColor: '#ffffff' }}>
-                    {t('tagMgmtMergePickSource')}
-                  </option>
+                  <option value="">{t('tagMgmtMergePickSource')}</option>
                   {mergeCandidates.map((tag) => (
-                    <option key={tag.id} value={tag.id} style={{ color: '#111827', backgroundColor: '#ffffff' }}>
+                    <option key={tag.id} value={tag.id}>
                       {tag.name} (#{tag.id})
                     </option>
                   ))}
@@ -483,16 +440,13 @@ export function TagManagementPanel({
                   data-testid="tagmgmt-merge-preview-btn"
                   disabled={busy || mergeSourceId === null}
                   onClick={() => void handlePreview()}
-                  style={buttonStyle}
+                  className={css.btn}
                 >
                   {t('tagMgmtMergePreviewBtn')}
                 </button>
               </div>
               {preview ? (
-                <div
-                  data-testid="tagmgmt-merge-preview"
-                  style={{ ...controlStyle, display: 'flex', flexDirection: 'column', gap: '4px' }}
-                >
+                <div data-testid="tagmgmt-merge-preview" className={cx(css.panelCompact, css.stackSm)}>
                   <div>
                     {t('tagMgmtPreviewAffected')}: <code data-testid="preview-affected">{preview.affectedMedia}</code>
                   </div>
@@ -500,7 +454,8 @@ export function TagManagementPanel({
                     {t('tagMgmtPreviewDeduped')}: <code data-testid="preview-deduped">{preview.dedupedMedia}</code>
                   </div>
                   <div>
-                    {t('tagMgmtPreviewAliasesMigrated')}: <code data-testid="preview-aliases-migrated">{preview.aliasesMigrated}</code>
+                    {t('tagMgmtPreviewAliasesMigrated')}:{' '}
+                    <code data-testid="preview-aliases-migrated">{preview.aliasesMigrated}</code>
                   </div>
                   <div>
                     {t('tagMgmtPreviewAliasesConflicting')}:{' '}
@@ -510,17 +465,17 @@ export function TagManagementPanel({
                     {t('tagMgmtPreviewEdges')}: <code data-testid="preview-edges">{preview.parentEdgesMigrated}</code>
                   </div>
                   {preview.wouldCreateCycle ? (
-                    <div role="alert" data-testid="preview-cycle-warning">
+                    <div role="alert" data-testid="preview-cycle-warning" className={cx(css.banner, css.bannerDanger)}>
                       {t('errMergeCycle')}
                     </div>
                   ) : null}
-                  <div style={{ display: 'flex', gap: '8px' }}>
+                  <div className={css.row}>
                     <button
                       type="button"
                       data-testid="tagmgmt-merge-confirm-btn"
                       disabled={busy || preview.wouldCreateCycle}
                       onClick={() => void handleMergeConfirm()}
-                      style={buttonStyle}
+                      className={cx(css.btn, css.btnPrimary)}
                     >
                       {t('tagMgmtMergeConfirmBtn')}
                     </button>
@@ -528,7 +483,7 @@ export function TagManagementPanel({
                       type="button"
                       data-testid="tagmgmt-merge-cancel-btn"
                       onClick={() => setPreview(null)}
-                      style={buttonStyle}
+                      className={css.btn}
                     >
                       {t('tagMgmtMergeCancelBtn')}
                     </button>
@@ -539,7 +494,7 @@ export function TagManagementPanel({
           ) : null}
         </div>
       ) : tags.length > 0 ? (
-        <div style={{ fontSize: '12px', opacity: 0.7 }}>{t('tagMgmtNoSelection')}</div>
+        <div className={css.muted}>{t('tagMgmtNoSelection')}</div>
       ) : null}
     </section>
   );

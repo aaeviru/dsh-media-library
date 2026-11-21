@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MediaSearchItem, TagSummary } from '../types.ts';
-import { buttonStyle, controlStyle, describeMutationError } from './TagManagementPanel.tsx';
+import { describeMutationError } from './TagManagementPanel.tsx';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
+import { cx } from './ui/primitives.ts';
+import css from './ui/styles.module.css';
 
 type Translate = (key: MediaLibraryKey) => string;
 
@@ -14,8 +16,8 @@ function normalizeKey(value: string): string {
 
 /**
  * Batch add/remove of tags on the rows selected in search results (`B3`/`B7`).
- * Uses a unified combobox with explicit popover contrast, quick-add common tags,
- * one-click removal of assigned tags, and inline "Create & add" when no exact match exists.
+ * Collapses to a compact hint when no rows are selected (Issue #42 B4), and expands
+ * with a DSH-themed combobox, quick-add tags, one-click removal, and inline "Create & add".
  */
 export function BatchTagBar({
   t,
@@ -197,23 +199,37 @@ export function BatchTagBar({
     }
   };
 
+  if (count === 0) {
+    return (
+      <div data-testid="batch-tag-bar" className={css.stackSm}>
+        <div data-testid="batch-tag-bar-compact" className={css.batchBarCompact}>
+          <span className={css.muted}>{t('batchCompactHint')}</span>
+          <strong data-testid="batch-selected-count" className={css.mutedSm}>
+            0 {t('batchSelectedCount')}
+          </strong>
+        </div>
+        {message ? (
+          <div role="status" data-testid="batch-result-banner" className={cx(css.banner, css.bannerSuccess)}>
+            {message}
+          </div>
+        ) : null}
+        {error ? (
+          <div role="alert" data-testid="batch-error-banner" className={cx(css.banner, css.bannerDanger)}>
+            {error}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
-    <div
-      data-testid="batch-tag-bar"
-      style={{
-        ...controlStyle,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px',
-        padding: '10px 12px',
-      }}
-    >
-      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+    <div data-testid="batch-tag-bar" className={cx(css.panelCompact, css.batchBarActive)}>
+      <div className={css.row}>
         <strong data-testid="batch-selected-count">
           {count} {t('batchSelectedCount')}
         </strong>
 
-        <div ref={comboboxRef} style={{ position: 'relative', flex: '1 1 260px', minWidth: '220px' }}>
+        <div ref={comboboxRef} className={css.comboboxWrap}>
           <input
             type="text"
             role="combobox"
@@ -239,31 +255,10 @@ export function BatchTagBar({
               }
             }}
             placeholder={t('batchTagPlaceholder')}
-            style={{ ...controlStyle, width: '100%', boxSizing: 'border-box' }}
+            className={cx(css.control, css.controlFull)}
           />
           {dropdownOpen ? (
-            <div
-              role="listbox"
-              data-testid="batch-tag-dropdown"
-              style={{
-                position: 'absolute',
-                top: 'calc(100% + 4px)',
-                left: 0,
-                right: 0,
-                zIndex: 9998,
-                maxHeight: '240px',
-                overflowY: 'auto',
-                borderRadius: '8px',
-                border: '1px solid rgba(128,128,128,0.45)',
-                background: '#1e1e22',
-                color: '#f4f4f6',
-                boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
-                padding: '4px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '2px',
-              }}
-            >
+            <div role="listbox" data-testid="batch-tag-dropdown" className={css.dropdownMenu}>
               {trimmedQuery && !hasExactMatch ? (
                 <button
                   type="button"
@@ -272,30 +267,16 @@ export function BatchTagBar({
                   disabled={busy}
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => void handleCreateAndAdd()}
-                  style={{
-                    textAlign: 'left',
-                    padding: '6px 8px',
-                    borderRadius: '6px',
-                    border: 'none',
-                    background: 'rgba(59,130,246,0.22)',
-                    color: '#93c5fd',
-                    cursor: busy ? 'not-allowed' : 'pointer',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                  }}
+                  className={css.dropdownCreateItem}
                 >
                   + {t('batchCreateAndAdd')} “{trimmedQuery}”
                 </button>
               ) : null}
 
               {candidates.length === 0 && !trimmedQuery ? (
-                <div style={{ padding: '6px 8px', fontSize: '12px', color: '#9ca3af' }}>
-                  {t('batchNoMatch')}
-                </div>
+                <div className={css.mutedSm}>{t('batchNoMatch')}</div>
               ) : candidates.length === 0 && hasExactMatch ? (
-                <div style={{ padding: '6px 8px', fontSize: '12px', color: '#9ca3af' }}>
-                  {t('batchNoMatch')}
-                </div>
+                <div className={css.mutedSm}>{t('batchNoMatch')}</div>
               ) : (
                 candidates.map((tag) => {
                   const isSelected = tag.id === tagId;
@@ -316,29 +297,15 @@ export function BatchTagBar({
                           setDropdownOpen(false);
                         }
                       }}
-                      style={{
-                        textAlign: 'left',
-                        padding: '6px 8px',
-                        borderRadius: '6px',
-                        border: 'none',
-                        background: isSelected ? 'rgba(59,130,246,0.25)' : 'transparent',
-                        color: '#f4f4f6',
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        gap: '8px',
-                      }}
+                      className={cx(css.dropdownItem, isSelected && css.dropdownItemSelected)}
                     >
                       <span>
                         {tag.name}
                         {tag.aliases.length > 0 ? (
-                          <span style={{ color: '#9ca3af', marginLeft: '6px' }}>
-                            ({tag.aliases.join(', ')})
-                          </span>
+                          <span className={css.mutedSm}> ({tag.aliases.join(', ')})</span>
                         ) : null}
                       </span>
-                      <span style={{ color: '#9ca3af', whiteSpace: 'nowrap' }}>[{tag.mediaCount}]</span>
+                      <span className={cx(css.mutedSm, css.tdNowrap)}>[{tag.mediaCount}]</span>
                     </button>
                   );
                 })
@@ -354,7 +321,7 @@ export function BatchTagBar({
           onClick={() => {
             if (tagId !== null) void applyTagId('add', tagId);
           }}
-          style={buttonStyle}
+          className={cx(css.btn, css.btnPrimary)}
         >
           {busy ? t('batchBusy') : t('batchAddBtn')}
         </button>
@@ -365,7 +332,7 @@ export function BatchTagBar({
           onClick={() => {
             if (tagId !== null) void applyTagId('remove', tagId);
           }}
-          style={buttonStyle}
+          className={css.btn}
         >
           {t('batchRemoveBtn')}
         </button>
@@ -374,15 +341,15 @@ export function BatchTagBar({
           data-testid="batch-clear-btn"
           disabled={busy || count === 0}
           onClick={onClearSelection}
-          style={buttonStyle}
+          className={css.btn}
         >
           {t('batchClear')}
         </button>
       </div>
 
       {quickTags.length > 0 ? (
-        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
-          <span style={{ fontSize: '11px', opacity: 0.78 }}>{t('batchQuickTags')}</span>
+        <div className={css.rowTight}>
+          <span className={css.mutedSm}>{t('batchQuickTags')}</span>
           {quickTags.map((tag) => (
             <button
               key={tag.id}
@@ -390,16 +357,7 @@ export function BatchTagBar({
               data-testid={`batch-quick-tag-${tag.id}`}
               disabled={!canApply}
               onClick={() => void applyTagId('add', tag.id)}
-              style={{
-                padding: '2px 8px',
-                borderRadius: '999px',
-                border: '1px solid rgba(128,128,128,0.35)',
-                background: 'transparent',
-                color: 'inherit',
-                cursor: canApply ? 'pointer' : 'not-allowed',
-                opacity: canApply ? 1 : 0.55,
-                fontSize: '11px',
-              }}
+              className={css.pillChip}
             >
               + {tag.name} ({tag.mediaCount})
             </button>
@@ -408,8 +366,8 @@ export function BatchTagBar({
       ) : null}
 
       {assignedTags.length > 0 ? (
-        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
-          <span style={{ fontSize: '11px', opacity: 0.78 }}>{t('batchAssignedTags')}</span>
+        <div className={css.rowTight}>
+          <span className={css.mutedSm}>{t('batchAssignedTags')}</span>
           {assignedTags.map((tag) => (
             <button
               key={tag.id}
@@ -417,15 +375,7 @@ export function BatchTagBar({
               data-testid={`batch-assigned-tag-${tag.id}`}
               disabled={!canApply}
               onClick={() => void applyTagId('remove', tag.id)}
-              style={{
-                padding: '2px 8px',
-                borderRadius: '999px',
-                border: '1px solid rgba(239,68,68,0.45)',
-                background: 'rgba(239,68,68,0.1)',
-                color: 'inherit',
-                cursor: canApply ? 'pointer' : 'not-allowed',
-                fontSize: '11px',
-              }}
+              className={cx(css.pillChip, css.pillChipDanger)}
             >
               {tag.name}
               {count > 1 ? ` (${tag.itemCount})` : ''} ×
@@ -435,17 +385,17 @@ export function BatchTagBar({
       ) : null}
 
       {tooMany ? (
-        <div role="alert" data-testid="batch-too-large" style={{ fontSize: '12px' }}>
+        <div role="alert" data-testid="batch-too-large" className={cx(css.banner, css.bannerDanger)}>
           {t('errBatchTooLarge')} ({MAX_BATCH_MEDIA})
         </div>
       ) : null}
       {message ? (
-        <div role="status" data-testid="batch-result-banner" style={{ fontSize: '12px' }}>
+        <div role="status" data-testid="batch-result-banner" className={cx(css.banner, css.bannerSuccess)}>
           {message}
         </div>
       ) : null}
       {error ? (
-        <div role="alert" data-testid="batch-error-banner" style={{ fontSize: '12px', border: '1px solid rgba(239,68,68,0.5)', padding: '6px', borderRadius: '6px' }}>
+        <div role="alert" data-testid="batch-error-banner" className={cx(css.banner, css.bannerDanger)}>
           {error}
         </div>
       ) : null}

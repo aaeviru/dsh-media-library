@@ -303,6 +303,7 @@ try {
   const bodyText = await page.locator("body").innerText();
   assert.ok(bodyText.includes("m1-missing-file") && bodyText.includes("FILE_NOT_FOUND"), "Expected M1 spike result for m1-missing-file");
   assert.deepEqual(errors, []);
+  await page.click("[data-testid=\"tab-library-btn\"]");
 
   // Add anonymous rows to the isolated destination DB to exercise actual UI pagination.
   const db = new DatabaseSync(path.join(process.env.DSH_HOME, "media-library/library.sqlite3"));
@@ -416,6 +417,17 @@ try {
   await page.click("[data-testid=\"tagmgmt-create-btn\"]");
   await page.waitForFunction(() => document.querySelector("[data-testid=\"tagmgmt-selected-name\"]")?.textContent === "M3_Source_B");
 
+  // Issue #42 B5: verify unsaved draft in Tag Management survives switching to Library tab and back
+  await page.fill("[data-testid=\"tagmgmt-create-input\"]", "DraftSurvivesTabSwitch");
+  await page.click("[data-testid=\"tab-library-btn\"]");
+
+  // Issue #42 B1/B2/B4: verify plugin CSS Modules injected, compact BatchTagBar when 0 selected, and no hardcoded #1e1e22
+  const hasPluginCss = await page.evaluate(() =>
+    document.querySelectorAll("style[data-plugin-css]").length > 0
+  );
+  assert.equal(hasPluginCss, true, "Expected tsdown CSS Modules <style data-plugin-css> to be injected");
+  await page.waitForSelector("[data-testid=\"batch-tag-bar-compact\"]");
+
   await page.click("[data-testid=\"search-reset-btn\"]");
   await page.waitForFunction(() => document.querySelectorAll("input[data-testid^=\"select-media-checkbox-\"]").length >= 2);
 
@@ -426,6 +438,8 @@ try {
   await page.click("[data-testid=\"batch-tag-input\"]");
   await page.fill("[data-testid=\"batch-tag-input\"]", "M3_Source_B");
   await page.waitForSelector("[data-testid=\"batch-tag-dropdown\"]");
+  const dropdownBg = await page.locator("[data-testid=\"batch-tag-dropdown\"]").evaluate(el => getComputedStyle(el).backgroundColor);
+  assert.notEqual(dropdownBg, "rgb(30, 30, 34)", `BatchTagBar dropdown must use DSH tokens instead of hardcoded #1e1e22, got: ${dropdownBg}`);
   await page.locator("button[data-testid^=\"batch-tag-option-\"]", { hasText: "M3_Source_B" }).first().click();
   await page.waitForSelector("[data-testid=\"batch-result-banner\"]");
 
@@ -440,6 +454,15 @@ try {
   await firstTwoCheckboxes.nth(0).check();
   await page.locator("button[data-testid^=\"batch-assigned-tag-\"]", { hasText: "M3_Inline_New" }).first().click();
   await page.waitForSelector("[data-testid=\"batch-result-banner\"]");
+
+  // Switch back to Tag Management tab and confirm the unsaved draft survived (Issue #42 B5)
+  await page.click("[data-testid=\"toggle-tag-mgmt-btn\"]");
+  assert.equal(
+    await page.locator("[data-testid=\"tagmgmt-create-input\"]").inputValue(),
+    "DraftSurvivesTabSwitch",
+    "Expected Tag Management draft input to survive switching to Library tab and back",
+  );
+  await page.fill("[data-testid=\"tagmgmt-create-input\"]", "");
 
   // Merge M3_Source_B into M3_Target_A via preview + confirm
   await page.fill("[data-testid=\"tagmgmt-filter-input\"]", "M3_");

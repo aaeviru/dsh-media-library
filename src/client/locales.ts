@@ -180,6 +180,8 @@ export const en = {
   tagPreviewExisting: 'Existing',
   tagPreviewAlias: 'Alias',
   tagPreviewNew: 'New',
+  tabLibrary: 'Library',
+  batchCompactHint: 'Select one or more rows below to batch add or remove tags.',
 } as const;
 
 export type MediaLibraryKey = keyof typeof en;
@@ -364,6 +366,8 @@ export const zh: Record<keyof typeof en, string> = {
   tagPreviewExisting: '已有',
   tagPreviewAlias: '别名',
   tagPreviewNew: '新建',
+  tabLibrary: '媒体库',
+  batchCompactHint: '勾选下方任意行即可展开批量打标与移除操作。',
 };
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
