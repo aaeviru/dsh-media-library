@@ -22,6 +22,7 @@ SHORT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 TARGET_TGZ="$OUT_ABS/dsh-media-library-${VERSION}-${SHORT_SHA}.tgz"
 
 cd "$BUNDLE_DIR"
+export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-${TMPDIR:-/tmp}/dsh-media-npm-cache}"
 RAW_TGZ_NAME="$(npm pack --quiet --pack-destination "$OUT_ABS" | tail -n 1)"
 mv -f "$OUT_ABS/$RAW_TGZ_NAME" "$TARGET_TGZ"
 echo "$TARGET_TGZ"

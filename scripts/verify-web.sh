@@ -24,6 +24,7 @@ if [[ ! -f "$TGZ" ]]; then
   echo "Error: tarball not found at $TGZ (run ./scripts/pack.sh first)" >&2
   exit 1
 fi
+TGZ="$(realpath "$TGZ")"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/dsh-media-web-verify.XXXXXX")"
 WEB_PID=""
