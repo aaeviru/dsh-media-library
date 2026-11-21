@@ -19,6 +19,22 @@ export async function verifyIngestionWeb(page) {
   // and verify selection stays active and `ingestion-tags-input` matches the sorted pill order.
   await page.getByTestId('ingestion-file-issue39-switch.mp4').click();
   await page.getByTestId('ingestion-detail').waitFor();
+
+  // Issue #49 B1 & B2: verify side-by-side Master-Detail layout on 1440x900 desktop viewport
+  // and verify TagPicker autocomplete/create appends tags into ingestion-tags-input without duplicates.
+  const listBox = await page.getByTestId('ingestion-manifest-list').boundingBox();
+  const detailBox = await page.getByTestId('ingestion-detail').boundingBox();
+  assert.ok(
+    listBox && detailBox && detailBox.x >= listBox.x + listBox.width - 4,
+    `Expected side-by-side Master-Detail layout on 1440px viewport, got list=${JSON.stringify(listBox)} detail=${JSON.stringify(detailBox)}`,
+  );
+  await page.getByTestId('ingestion-tag-picker-input').click();
+  await page.getByTestId('ingestion-tag-picker-input').fill('Stage3PickedTag');
+  await page.getByTestId('ingestion-tag-picker-dropdown').waitFor();
+  await page.keyboard.press('Enter');
+  assert.equal(await page.getByTestId('ingestion-tags-input').inputValue(), 'Stage3PickedTag');
+  // Clear draft back to empty so Issue #39 serverFallback test below runs on clean state
+  await page.getByTestId('ingestion-tags-input').fill('');
   await page.getByTestId('toggle-ingestion-panel-btn').click();
   const db39 = new DatabaseSync(path.join(process.env.DSH_HOME, 'media-library/library.sqlite3'));
   try {

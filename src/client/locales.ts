@@ -185,6 +185,9 @@ export const en = {
   tagMgmtArchiveConfirmBtn: 'Confirm Archive',
   tagMgmtArchiveCancelBtn: 'Cancel',
   performerDeleteConfirmBtn: 'Confirm Delete',
+  ingestionQueueListHeading: 'Staged Files Queue',
+  ingestionSelectPrompt: 'Select a staged file on the left to review metadata, tags, and performers.',
+  ingestionTagPickerPlaceholder: 'Search existing tag/alias or type a new tag and press Enter...',
 } as const;
 
 export type MediaLibraryKey = keyof typeof en;
@@ -374,6 +377,9 @@ export const zh: Record<keyof typeof en, string> = {
   tagMgmtArchiveConfirmBtn: '确认归档',
   tagMgmtArchiveCancelBtn: '取消',
   performerDeleteConfirmBtn: '确认删除',
+  ingestionQueueListHeading: '待入库文件队列',
+  ingestionSelectPrompt: '请在左侧选择一个待入库文件，审核标题、日期、标签与演员映射。',
+  ingestionTagPickerPlaceholder: '搜索已有标签/别名，或输入新标签按回车追加...',
 };
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

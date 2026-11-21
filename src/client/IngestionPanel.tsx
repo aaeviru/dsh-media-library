@@ -6,10 +6,12 @@ import type {
   PerformerAliasRecord,
   PerformerReviewItem,
   StagingFileItem,
+  TagSummary,
 } from '../types.ts';
 import { PerformerDrawer, PerformerInlineCard } from './PerformerReviewSection.tsx';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
+import { TagPicker } from './ui/TagPicker.tsx';
 import { cx } from './ui/primitives.ts';
 import css from './ui/styles.module.css';
 
@@ -54,8 +56,8 @@ interface UnifiedStagingEntry {
 
 /**
  * Per-file staging review & recoverable ingestion panel (`B6`).
- * Uses Host/SQLite `ingestion_tasks` for cross-switch progress visibility & concurrency locks,
- * and separates client `dirtyDrafts` from server manifest refreshes.
+ * Stage 3 (Issue #49): responsive Master-Detail workbench with sticky action footer
+ * and searchable TagPicker autocomplete synced with the comma-separated tag draft.
  */
 export function IngestionPanel({
   t,
@@ -81,6 +83,8 @@ export function IngestionPanel({
   const [busyOp, setBusyOp] = useState<BusyOp>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tagPickerQuery, setTagPickerQuery] = useState('');
+  const [tagCandidates, setTagCandidates] = useState<readonly TagSummary[]>([]);
 
   const togglePerformerDrawer = useCallback(() => {
     setShowPerformerDrawerState((prev) => {
@@ -98,7 +102,19 @@ export function IngestionPanel({
   const updateDraft = useCallback((key: string, patch: Partial<DraftFields>, fallback: DraftFields) => {
     setDirtyDrafts((prev) => {
       const current = prev[key] ?? fallback;
-      const next = { ...prev, [key]: { ...current, ...patch } };
+      const nextDraft = { ...current, ...patch };
+      if (
+        nextDraft.title === fallback.title &&
+        nextDraft.mediaDate === fallback.mediaDate &&
+        nextDraft.tagsText === fallback.tagsText
+      ) {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        sessionCache.dirtyDrafts = next;
+        return next;
+      }
+      const next = { ...prev, [key]: nextDraft };
       sessionCache.dirtyDrafts = next;
       return next;
     });
@@ -160,6 +176,21 @@ export function IngestionPanel({
       setError(err instanceof Error ? err.message : String(err));
     }
   }, [mediaLibrary, t]);
+
+  useEffect(() => {
+    let active = true;
+    const trimmed = tagPickerQuery.trim();
+    void mediaLibrary
+      .listTags({ query: trimmed || undefined, limit: 30 })
+      .then((res) => {
+        if (!active || !res.ok) return;
+        setTagCandidates(res.value.tags);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [mediaLibrary, tagPickerQuery, manifests]);
 
   const runScan = useCallback(
     async (silent: boolean) => {
@@ -381,6 +412,32 @@ export function IngestionPanel({
     },
     [draftTagList, selected, serverFallback, updateDraft],
   );
+
+  const appendDraftTag = useCallback(
+    (rawTagName: string) => {
+      const trimmed = rawTagName.trim();
+      if (!trimmed || !selected) return;
+      const lower = trimmed.toLowerCase();
+      const alreadyPresent = draftTagList.some((existing) => existing.toLowerCase() === lower);
+      if (!alreadyPresent) {
+        const nextList = [...draftTagList, trimmed];
+        updateDraft(selected.key, { tagsText: nextList.join(', ') }, serverFallback);
+      }
+      setTagPickerQuery('');
+    },
+    [draftTagList, selected, serverFallback, updateDraft],
+  );
+
+  const trimmedPickerQuery = tagPickerQuery.trim();
+  const hasExactPickerMatch = useMemo(() => {
+    if (!trimmedPickerQuery) return true;
+    const lower = trimmedPickerQuery.toLowerCase();
+    return tagCandidates.some(
+      (tag) =>
+        tag.name.toLowerCase() === lower ||
+        tag.aliases.some((alias) => alias.toLowerCase() === lower),
+    );
+  }, [tagCandidates, trimmedPickerQuery]);
 
   const handlePerformerChanged = useCallback(
     (msg: string) => {
@@ -630,167 +687,220 @@ export function IngestionPanel({
           {t('ingestionEmpty')}
         </div>
       ) : (
-        <ul data-testid="ingestion-manifest-list" className={css.scrollList}>
-          {entries.map((entry) => (
-            <li key={entry.key}>
-              <button
-                type="button"
-                data-testid={entry.manifest ? `ingestion-row-${entry.manifest.id}` : `ingestion-file-${entry.filename}`}
-                onClick={() => setSelectedKey(entry.key)}
-                className={cx(css.listRowBtn, entry.key === selected?.key && css.listRowBtnSelected)}
-              >
-                <strong>{entry.filename}</strong> ·{' '}
-                <code>{entry.manifest?.state ?? 'temp'}</code>
-                {entry.manifest ? (
-                  <span>
-                    {' '}
-                    / <code>{entry.manifest.reviewDecision}</code>
-                  </span>
-                ) : null}
-                {entry.catalogNumber ? <span> · {entry.catalogNumber}</span> : null}
-                <span> · {Math.round(entry.fileSize / (1024 * 1024))} MB</span>
-                {entry.manifest?.indexedMediaId !== null && entry.manifest?.indexedMediaId !== undefined ? (
-                  <span> · media #{entry.manifest.indexedMediaId}</span>
-                ) : null}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {selected ? (
-        <div data-testid="ingestion-detail" className={cx(css.stack, css.dividerTop)}>
-          <div>
-            <strong>{t('ingestionTargetLabel')}:</strong> <code>{selected.targetRelativePath}</code>
-            {selected.manifest?.metadataSource ? (
-              <span className={css.muted}> ({selected.manifest.metadataSource})</span>
-            ) : null}
-          </div>
-          <label className={css.stackSm}>
-            <span className={css.fieldLabel}>{t('ingestionTitleLabel')}</span>
-            <input
-              type="text"
-              data-testid="ingestion-title-input"
-              disabled={selectedFrozen || degraded}
-              value={activeDraft.title}
-              onChange={(e) => updateDraft(selected.key, { title: e.target.value }, serverFallback)}
-              className={css.control}
-            />
-          </label>
-          <label className={css.stackSm}>
-            <span className={css.fieldLabel}>{t('ingestionDateLabel')}</span>
-            <input
-              type="text"
-              data-testid="ingestion-date-input"
-              disabled={selectedFrozen || degraded}
-              placeholder="YYYY-MM-DD"
-              value={activeDraft.mediaDate}
-              onChange={(e) => updateDraft(selected.key, { mediaDate: e.target.value }, serverFallback)}
-              className={css.control}
-            />
-          </label>
-          {performerPreview ? (
-            <PerformerInlineCard
-              t={t}
-              preview={performerPreview}
-              mediaLibrary={mediaLibrary}
-              disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
-              onChanged={handlePerformerChanged}
-              onError={setError}
-            />
-          ) : null}
-          <div className={css.stackSm}>
-            <span className={css.fieldLabel}>{t('ingestionTagsLabel')}</span>
-            {sortedTagPills.length > 0 ? (
-              <div data-testid="ingestion-tag-preview" className={css.rowTight}>
-                {sortedTagPills.map(({ tagName, idx, matchedVia, matchedTagName }) => {
-                  const badgeText =
-                    matchedVia === 'name'
-                      ? t('tagPreviewExisting')
-                      : matchedVia === 'alias'
-                        ? `${t('tagPreviewAlias')}→${matchedTagName ?? ''}`
-                        : `+ ${t('tagPreviewNew')}`;
-                  return (
-                    <span
-                      key={`${tagName}-${idx}`}
-                      className={cx(
-                        css.pillChip,
-                        css.pillChipStatic,
-                        matchedVia === 'new' ? css.pillChipWarnDashed : css.pillChipSuccess,
-                      )}
-                    >
-                      <span>{tagName}</span>
-                      <span className={css.mutedSm}>({badgeText})</span>
-                      {selected.manifest?.state !== 'indexed' ? (
-                        <button
-                          type="button"
-                          disabled={selectedFrozen || degraded}
-                          aria-label={`Remove ${tagName}`}
-                          onClick={() => removeDraftTag(idx)}
-                          className={css.chipRemoveBtn}
-                        >
-                          ×
-                        </button>
-                      ) : null}
-                    </span>
-                  );
-                })}
-              </div>
-            ) : null}
-            <input
-              type="text"
-              data-testid="ingestion-tags-input"
-              disabled={selectedFrozen || degraded}
-              value={activeDraft.tagsText}
-              onChange={(e) => updateDraft(selected.key, { tagsText: e.target.value }, serverFallback)}
-              className={css.control}
-            />
-          </div>
-          {commitBlockedByPerformer ? (
-            <div role="status" data-testid="performer-commit-gate" className={cx(css.banner, css.bannerWarn)}>
-              ⚠ {t('performerCommitGateHint')}
+        <div data-testid="ingestion-workbench" className={css.ingestionWorkbench}>
+          {/* Left Master Column: Staged File & Manifest Queue */}
+          <div className={css.ingestionMasterCol}>
+            <div className={css.rowBetween}>
+              <span className={css.fieldLabel}>
+                {t('ingestionQueueListHeading')} ({entries.length})
+              </span>
             </div>
-          ) : null}
-          <div className={css.row}>
-            <button
-              type="button"
-              data-testid="ingestion-play-btn"
-              disabled={busy || selectedFrozen}
-              onClick={() => void handlePlay(selected)}
-              className={css.btn}
-            >
-              {busyOp === 'play' ? t('ingestionPlayingBtn') : t('ingestionPlayBtn')}
-            </button>
-            <button
-              type="button"
-              data-testid="ingestion-fetch-btn"
-              disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
-              onClick={() => void handleFetch(selected)}
-              className={css.btn}
-            >
-              {busyOp === 'fetch' ? t('ingestionFetchingBtn') : t('ingestionFetchBtn')}
-            </button>
-            <button
-              type="button"
-              data-testid="ingestion-approve-btn"
-              disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
-              onClick={() => void handleApprove(selected)}
-              className={css.btn}
-            >
-              {t('ingestionApproveBtn')}
-            </button>
-            <button
-              type="button"
-              data-testid="ingestion-commit-btn"
-              disabled={busy || executionBusy || selectedFrozen || degraded || commitBlockedByPerformer || selected.manifest?.state === 'indexed'}
-              onClick={() => void handleMoveAndIndex(selected)}
-              className={cx(css.btn, css.btnPrimary)}
-            >
-              {executing?.op === 'commit' ? t('ingestionCommittingBtn') : t('ingestionCommitBtn')}
-            </button>
+            <ul data-testid="ingestion-manifest-list" className={css.ingestionQueueList}>
+              {entries.map((entry) => (
+                <li key={entry.key}>
+                  <button
+                    type="button"
+                    data-testid={entry.manifest ? `ingestion-row-${entry.manifest.id}` : `ingestion-file-${entry.filename}`}
+                    onClick={() => setSelectedKey(entry.key)}
+                    className={cx(css.listRowBtn, entry.key === selected?.key && css.listRowBtnSelected)}
+                  >
+                    <div>
+                      <strong>{entry.filename}</strong>
+                    </div>
+                    <div className={css.ingestionQueueMeta}>
+                      <code>{entry.manifest?.state ?? 'temp'}</code>
+                      {entry.manifest ? (
+                        <span>
+                          / <code>{entry.manifest.reviewDecision}</code>
+                        </span>
+                      ) : null}
+                      {entry.catalogNumber ? <span>· {entry.catalogNumber}</span> : null}
+                      <span>· {Math.round(entry.fileSize / (1024 * 1024))} MB</span>
+                      {entry.manifest?.indexedMediaId !== null && entry.manifest?.indexedMediaId !== undefined ? (
+                        <span>· media #{entry.manifest.indexedMediaId}</span>
+                      ) : null}
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
           </div>
+
+          {/* Right Detail Column: Selected File Metadata, Performer Review, TagPicker & Sticky Actions */}
+          {selected ? (
+            <div data-testid="ingestion-detail" className={css.ingestionDetailCard}>
+              <div className={css.ingestionDetailBody}>
+                <div className={css.rowBetween}>
+                  <div>
+                    <strong>{t('ingestionTargetLabel')}:</strong>{' '}
+                    <code>{selected.targetRelativePath}</code>
+                  </div>
+                  {selected.manifest?.metadataSource ? (
+                    <span className={css.mutedSm}>({selected.manifest.metadataSource})</span>
+                  ) : null}
+                </div>
+
+                <div className={css.ingestionMetaGrid}>
+                  <label className={css.stackSm}>
+                    <span className={css.fieldLabel}>{t('ingestionTitleLabel')}</span>
+                    <input
+                      type="text"
+                      data-testid="ingestion-title-input"
+                      disabled={selectedFrozen || degraded}
+                      value={activeDraft.title}
+                      onChange={(e) => updateDraft(selected.key, { title: e.target.value }, serverFallback)}
+                      className={css.control}
+                    />
+                  </label>
+                  <label className={css.stackSm}>
+                    <span className={css.fieldLabel}>{t('ingestionDateLabel')}</span>
+                    <input
+                      type="text"
+                      data-testid="ingestion-date-input"
+                      disabled={selectedFrozen || degraded}
+                      placeholder="YYYY-MM-DD"
+                      value={activeDraft.mediaDate}
+                      onChange={(e) => updateDraft(selected.key, { mediaDate: e.target.value }, serverFallback)}
+                      className={css.control}
+                    />
+                  </label>
+                </div>
+
+                {performerPreview ? (
+                  <PerformerInlineCard
+                    t={t}
+                    preview={performerPreview}
+                    mediaLibrary={mediaLibrary}
+                    disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
+                    onChanged={handlePerformerChanged}
+                    onError={setError}
+                  />
+                ) : null}
+
+                <div className={css.stackSm}>
+                  <span className={css.fieldLabel}>{t('ingestionTagsLabel')}</span>
+                  {sortedTagPills.length > 0 ? (
+                    <div data-testid="ingestion-tag-preview" className={css.rowTight}>
+                      {sortedTagPills.map(({ tagName, idx, matchedVia, matchedTagName }) => {
+                        const badgeText =
+                          matchedVia === 'name'
+                            ? t('tagPreviewExisting')
+                            : matchedVia === 'alias'
+                              ? `${t('tagPreviewAlias')}→${matchedTagName ?? ''}`
+                              : `+ ${t('tagPreviewNew')}`;
+                        return (
+                          <span
+                            key={`${tagName}-${idx}`}
+                            className={cx(
+                              css.pillChip,
+                              css.pillChipStatic,
+                              matchedVia === 'new' ? css.pillChipWarnDashed : css.pillChipSuccess,
+                            )}
+                          >
+                            <span>{tagName}</span>
+                            <span className={css.mutedSm}>({badgeText})</span>
+                            {selected.manifest?.state !== 'indexed' ? (
+                              <button
+                                type="button"
+                                disabled={selectedFrozen || degraded}
+                                aria-label={`Remove ${tagName}`}
+                                onClick={() => removeDraftTag(idx)}
+                                className={css.chipRemoveBtn}
+                              >
+                                ×
+                              </button>
+                            ) : null}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+
+                  <TagPicker
+                    query={tagPickerQuery}
+                    onQueryChange={setTagPickerQuery}
+                    candidates={tagCandidates}
+                    selectedTagId={null}
+                    onSelectTag={(tag) => appendDraftTag(tag.name)}
+                    showCreateOption={Boolean(trimmedPickerQuery && !hasExactPickerMatch)}
+                    createOptionText={`+ ${t('batchCreateAndAdd')} “${trimmedPickerQuery}”`}
+                    onCreateTag={() => appendDraftTag(trimmedPickerQuery)}
+                    placeholder={t('ingestionTagPickerPlaceholder')}
+                    noMatchText={t('batchNoMatch')}
+                    disabled={selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
+                    inputTestId="ingestion-tag-picker-input"
+                    dropdownTestId="ingestion-tag-picker-dropdown"
+                    optionTestIdPrefix="ingestion-tag-picker-option-"
+                    createOptionTestId="ingestion-tag-picker-create"
+                  />
+
+                  <input
+                    type="text"
+                    data-testid="ingestion-tags-input"
+                    disabled={selectedFrozen || degraded}
+                    value={activeDraft.tagsText}
+                    onChange={(e) => updateDraft(selected.key, { tagsText: e.target.value }, serverFallback)}
+                    className={css.control}
+                  />
+                </div>
+
+                {commitBlockedByPerformer ? (
+                  <div role="status" data-testid="performer-commit-gate" className={cx(css.banner, css.bannerWarn)}>
+                    ⚠ {t('performerCommitGateHint')}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className={css.ingestionDetailFooter}>
+                <div className={css.rowTight}>
+                  <button
+                    type="button"
+                    data-testid="ingestion-play-btn"
+                    disabled={busy || selectedFrozen}
+                    onClick={() => void handlePlay(selected)}
+                    className={css.btn}
+                  >
+                    {busyOp === 'play' ? t('ingestionPlayingBtn') : t('ingestionPlayBtn')}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="ingestion-fetch-btn"
+                    disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
+                    onClick={() => void handleFetch(selected)}
+                    className={css.btn}
+                  >
+                    {busyOp === 'fetch' ? t('ingestionFetchingBtn') : t('ingestionFetchBtn')}
+                  </button>
+                </div>
+                <div className={css.rowTight}>
+                  <button
+                    type="button"
+                    data-testid="ingestion-approve-btn"
+                    disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
+                    onClick={() => void handleApprove(selected)}
+                    className={css.btn}
+                  >
+                    {t('ingestionApproveBtn')}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="ingestion-commit-btn"
+                    disabled={busy || executionBusy || selectedFrozen || degraded || commitBlockedByPerformer || selected.manifest?.state === 'indexed'}
+                    onClick={() => void handleMoveAndIndex(selected)}
+                    className={cx(css.btn, css.btnPrimary)}
+                  >
+                    {executing?.op === 'commit' ? t('ingestionCommittingBtn') : t('ingestionCommitBtn')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div data-testid="ingestion-no-selection" className={css.emptyBox}>
+              {t('ingestionSelectPrompt')}
+            </div>
+          )}
         </div>
-      ) : null}
+      )}
     </section>
   );
 }
