@@ -373,6 +373,16 @@ try {
   // Issue #5 M3 E2E: Tag management (XSS-as-data, create/alias/rename/archive/restore, batch tag, merge preview & confirm)
   await page.click("[data-testid=\"toggle-tag-mgmt-btn\"]");
   await page.waitForSelector("[data-testid=\"tag-management-panel\"]");
+  assert.equal(
+    await page.locator("[data-testid=\"library-main-view\"]").isVisible(),
+    false,
+    "Expected Library view to be hidden when Tag Management tab is active",
+  );
+  assert.equal(
+    await page.locator("[data-testid=\"diagnostics-drawer\"]").isVisible(),
+    false,
+    "Expected Diagnostics view to be hidden when Tag Management tab is active",
+  );
 
   const xssName = "<img src=x onerror=window.__dshXss=1>";
   await page.fill("[data-testid=\"tagmgmt-create-input\"]", xssName);

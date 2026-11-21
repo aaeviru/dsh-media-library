@@ -675,6 +675,7 @@ export function MediaLibraryPanel({
       {(mountedTabs.has('diagnostics') || showDiagnosticsVisible) ? (
         <section
           data-testid="diagnostics-drawer"
+          hidden={!showDiagnosticsVisible}
           className={cx(css.panel, !showDiagnosticsVisible && css.hiddenTab)}
         >
           <div className={css.stack}>
@@ -774,6 +775,7 @@ export function MediaLibraryPanel({
       {mountedTabs.has('ops') && opsStatus ? (
         <section
           data-testid="ops-panel"
+          hidden={activeTab !== 'ops'}
           className={cx(css.panel, activeTab !== 'ops' && css.hiddenTab)}
         >
           <div className={css.rowBetween}>
@@ -861,7 +863,7 @@ export function MediaLibraryPanel({
 
       {/* Issue #7 Staging & Recoverable Ingestion View (lazy-mounted, state-preserved) */}
       {mountedTabs.has('ingestion') ? (
-        <div className={activeTab !== 'ingestion' ? css.hiddenTab : undefined}>
+        <div hidden={activeTab !== 'ingestion'} className={activeTab !== 'ingestion' ? css.hiddenTab : undefined}>
           <IngestionPanel
             t={t}
             mediaLibrary={mediaLibrary}
@@ -873,13 +875,17 @@ export function MediaLibraryPanel({
 
       {/* Issue #5 Tag & Alias Management View (lazy-mounted, state-preserved) */}
       {mountedTabs.has('tags') ? (
-        <div className={activeTab !== 'tags' ? css.hiddenTab : undefined}>
+        <div hidden={activeTab !== 'tags'} className={activeTab !== 'tags' ? css.hiddenTab : undefined}>
           <TagManagementPanel t={t} mediaLibrary={mediaLibrary} onChanged={handleTagsChanged} />
         </div>
       ) : null}
 
       {/* Main Library View (Search & Filter + Batch Bar + Results Table; state preserved across tab switches) */}
-      <div className={cx(css.stackMd, activeTab !== 'library' && css.hiddenTab)}>
+      <div
+        data-testid="library-main-view"
+        hidden={activeTab !== 'library'}
+        className={cx(css.stackMd, activeTab !== 'library' && css.hiddenTab)}
+      >
         <section className={css.panel}>
           <div className={css.filterGrid}>
             {/* Keyword Search */}

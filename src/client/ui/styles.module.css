@@ -85,7 +85,7 @@
 }
 
 .hiddenTab {
-  display: none;
+  display: none !important;
 }
 
 .panel {
