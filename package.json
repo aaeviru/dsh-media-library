@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-experimental-media-library",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "type": "module",
   "private": true,
   "main": "lib/index.js",
@@ -50,6 +50,7 @@
     "@deepseek-ai/dsh-client-locale": "workspace:*",
     "@deepseek-ai/dsh-client-ui-layout": "workspace:*",
     "@deepseek-ai/dsh-client-ui-sidebar": "workspace:*",
+    "@deepseek-ai/dsh-client-ui-primitives": "workspace:*",
     "@deepseek-ai/dsh-api-remotes": "workspace:*",
     "react": "^18.2.0",
     "zod": "4.4.3"

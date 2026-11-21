@@ -4,8 +4,44 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "==> [1/5] Checking git whitespace / formatting hygiene..."
+echo "==> [1/5] Checking git whitespace / formatting hygiene & client UI rules..."
 git diff --check
+node --input-type=module -e '
+  import fs from "node:fs";
+  import path from "node:path";
+  const clientDir = "src/client";
+  const files = [];
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else if (/\.(tsx?|css)$/.test(ent.name)) files.push(full);
+    }
+  };
+  walk(clientDir);
+  const violations = [];
+  for (const file of files) {
+    const lines = fs.readFileSync(file, "utf8").split("\n");
+    lines.forEach((line, idx) => {
+      if (/#[0-9a-fA-F]{3,8}\b/.test(line) || /\brgba?\s*\(/.test(line)) {
+        violations.push(`${file}:${idx + 1} hardcoded color: ${line.trim()}`);
+      }
+      if (file.endsWith(".tsx") && /<select\b/.test(line) && !/^\s*(?:\/\*|\*|\/\/|\{\/\*)/.test(line)) {
+        const isLegacyMergeSelect =
+          file.endsWith("TagManagementPanel.tsx") &&
+          lines[idx + 1]?.includes("tagmgmt-merge-source-select");
+        if (!isLegacyMergeSelect) {
+          violations.push(`${file}:${idx + 1} forbidden native <select> (Issue #28 / #42 B6): ${line.trim()}`);
+        }
+      }
+    });
+  }
+  if (violations.length > 0) {
+    console.error("Client UI hygiene gate failed:\n" + violations.join("\n"));
+    process.exit(1);
+  }
+  console.log("Client UI hygiene gate passed (0 hardcoded colors, 0 new native <select>).");
+'
 
 echo "==> [2/5] Building plugin bundle and verifying typecheck & external imports..."
 ./scripts/build-bundle.sh

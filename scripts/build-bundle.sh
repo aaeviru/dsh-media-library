@@ -27,6 +27,7 @@ setup_local_node_modules() {
   ln -sfn "$HARNESS_DIR/packages/client/ui-plugin-manager" "$nm/@deepseek-ai/dsh-client-ui-plugin-manager"
   ln -sfn "$HARNESS_DIR/packages/client/ui-renderer" "$nm/@deepseek-ai/dsh-client-ui-renderer"
   ln -sfn "$HARNESS_DIR/packages/client/ui-sidebar" "$nm/@deepseek-ai/dsh-client-ui-sidebar"
+  ln -sfn "$HARNESS_DIR/packages/client/ui-primitives" "$nm/@deepseek-ai/dsh-client-ui-primitives"
   ln -sfn "$HARNESS_DIR/packages/client/ui-slots" "$nm/@deepseek-ai/dsh-client-ui-slots"
   ln -sfn "$HARNESS_DIR/packages/api/remotes" "$nm/@deepseek-ai/dsh-api-remotes"
   ln -sfn "$HARNESS_DIR/packages/typert/protocol" "$nm/@deepseek-ai/dsh-typert-protocol"

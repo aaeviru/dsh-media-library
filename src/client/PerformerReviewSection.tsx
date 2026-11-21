@@ -7,9 +7,10 @@ import type {
   PerformerReviewItem,
   TagSummary,
 } from '../types.ts';
-import { buttonStyle, controlStyle } from './TagManagementPanel.tsx';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
+import { cx } from './ui/primitives.ts';
+import css from './ui/styles.module.css';
 
 type Translate = (key: MediaLibraryKey) => string;
 
@@ -123,23 +124,12 @@ function PerformerTagPickerEditor({
   };
 
   return (
-    <div
-      data-testid={`performer-picker-${target.key}`}
-      style={{
-        padding: '8px 10px',
-        borderRadius: '6px',
-        border: '1px solid rgba(245,158,11,0.5)',
-        background: 'rgba(245,158,11,0.08)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '6px',
-      }}
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+    <div data-testid={`performer-picker-${target.key}`} className={css.performerPickerCard}>
+      <div className={css.rowBetween}>
         <span>
           <strong>{target.headingText}</strong>
           {target.manifestFilename ? (
-            <span style={{ opacity: 0.72, marginLeft: '6px' }}>· {target.manifestFilename}</span>
+            <span className={css.muted}> · {target.manifestFilename}</span>
           ) : null}
         </span>
         {onCancel ? (
@@ -147,7 +137,7 @@ function PerformerTagPickerEditor({
             type="button"
             disabled={working}
             onClick={onCancel}
-            style={{ ...buttonStyle, padding: '2px 8px' }}
+            className={cx(css.btn, css.btnXs)}
           >
             {t('performerCancelEditBtn')}
           </button>
@@ -161,16 +151,13 @@ function PerformerTagPickerEditor({
         value={searchText}
         onChange={(e) => setSearchText(e.target.value)}
         disabled={disabled || working}
-        style={controlStyle}
+        className={css.control}
       />
 
       {mergedOptions.length === 0 ? (
-        <span style={{ opacity: 0.72 }}>{t('performerNoMatchingTags')}</span>
+        <span className={css.muted}>{t('performerNoMatchingTags')}</span>
       ) : (
-        <div
-          data-testid={`performer-tag-pills-${target.key}`}
-          style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center', maxHeight: '110px', overflowY: 'auto' }}
-        >
+        <div data-testid={`performer-tag-pills-${target.key}`} className={css.performerPillsScroll}>
           {mergedOptions.map((o) => {
             const isSelected = selectedTagId === o.id;
             return (
@@ -180,22 +167,10 @@ function PerformerTagPickerEditor({
                 data-testid={`performer-tag-pill-${o.id}`}
                 disabled={disabled || working}
                 onClick={() => setSelectedTagId(o.id)}
-                style={{
-                  ...buttonStyle,
-                  padding: '2px 9px',
-                  borderRadius: '999px',
-                  borderColor: isSelected
-                    ? 'rgba(59,130,246,0.95)'
-                    : o.isCandidate
-                      ? 'rgba(245,158,11,0.75)'
-                      : undefined,
-                  background: isSelected
-                    ? 'rgba(59,130,246,0.22)'
-                    : o.isCandidate
-                      ? 'rgba(245,158,11,0.12)'
-                      : undefined,
-                  fontWeight: isSelected ? 600 : 400,
-                }}
+                className={cx(
+                  css.pillChip,
+                  isSelected ? css.pillChipActive : o.isCandidate && css.pillChipWarn,
+                )}
               >
                 {isSelected ? '✓ ' : ''}#{o.id} {o.name}
               </button>
@@ -204,8 +179,8 @@ function PerformerTagPickerEditor({
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+      <div className={css.row}>
+        <label className={css.checkboxLabel}>
           <input
             type="checkbox"
             checked={rememberRule}
@@ -215,7 +190,7 @@ function PerformerTagPickerEditor({
           <span>{t('performerRememberRule')}</span>
         </label>
         {rememberRule ? (
-          <label style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+          <label className={css.checkboxLabel}>
             <input
               type="checkbox"
               checked={alwaysAsk}
@@ -230,7 +205,7 @@ function PerformerTagPickerEditor({
           data-testid={`performer-bind-btn-${target.key}`}
           disabled={disabled || working || selectedTagId <= 0}
           onClick={() => void runResolve('bind_existing')}
-          style={buttonStyle}
+          className={cx(css.btn, css.btnPrimary)}
         >
           {t('performerBindBtn')}
         </button>
@@ -239,7 +214,7 @@ function PerformerTagPickerEditor({
           data-testid={`performer-create-btn-${target.key}`}
           disabled={disabled || working}
           onClick={() => void runResolve('create_performer_tag')}
-          style={buttonStyle}
+          className={css.btn}
         >
           {t('performerCreateBtn')}
         </button>
@@ -248,7 +223,7 @@ function PerformerTagPickerEditor({
           data-testid={`performer-skip-btn-${target.key}`}
           disabled={disabled || working}
           onClick={() => void runResolve('skip')}
-          style={buttonStyle}
+          className={css.btn}
         >
           {t('performerSkipBtn')}
         </button>
@@ -301,46 +276,17 @@ export function PerformerInlineCard({
 
   if (!hasAny) return null;
 
-  const chipEditBtnStyle = {
-    border: 'none',
-    background: 'transparent',
-    color: 'inherit',
-    cursor: 'pointer',
-    textDecoration: 'underline',
-    padding: '0 2px',
-    marginLeft: '4px',
-    fontSize: '11px',
-    opacity: 0.85,
-  } as const;
-
   return (
-    <div
-      data-testid="ingestion-performer-section"
-      style={{
-        padding: '8px 10px',
-        borderRadius: '6px',
-        border: '1px solid rgba(128,128,128,0.28)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '6px',
-      }}
-    >
+    <div data-testid="ingestion-performer-section" className={css.performerCard}>
       <strong>{t('performerSectionHeading')}</strong>
 
       {(preview.autoMatched.length > 0 || preview.humanResolved.length > 0 || preview.skippedEntries.length > 0) ? (
-        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+        <div className={css.rowTight}>
           {preview.autoMatched.map((m) => (
             <span
               key={`auto-${m.normalizedName}-${m.tagId}`}
               data-testid={`performer-auto-chip-${m.tagId}`}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                padding: '2px 8px',
-                borderRadius: '999px',
-                border: '1px solid rgba(34,197,94,0.6)',
-                background: 'rgba(34,197,94,0.12)',
-              }}
+              className={cx(css.pillChip, css.pillChipStatic, css.pillChipSuccess)}
             >
               <span>
                 ✓ {m.rawName} → #{m.tagId} {m.tagName} ({t('performerAutoMatched')})
@@ -363,7 +309,7 @@ export function PerformerInlineCard({
                       defaultAlwaysAsk: false,
                     })
                   }
-                  style={chipEditBtnStyle}
+                  className={css.inlineLinkBtn}
                 >
                   {t('performerEditBtn')}
                 </button>
@@ -374,14 +320,7 @@ export function PerformerInlineCard({
             <span
               key={`human-${m.normalizedName}-${m.tagId}`}
               data-testid={`performer-human-chip-${m.tagId}`}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                padding: '2px 8px',
-                borderRadius: '999px',
-                border: '1px solid rgba(59,130,246,0.6)',
-                background: 'rgba(59,130,246,0.12)',
-              }}
+              className={cx(css.pillChip, css.pillChipStatic, css.pillChipActive)}
             >
               <span>
                 ✓ {m.rawName} → #{m.tagId} {m.tagName} ({t('performerHumanConfirmed')})
@@ -404,7 +343,7 @@ export function PerformerInlineCard({
                       defaultAlwaysAsk: false,
                     })
                   }
-                  style={chipEditBtnStyle}
+                  className={css.inlineLinkBtn}
                 >
                   {t('performerEditBtn')}
                 </button>
@@ -415,14 +354,7 @@ export function PerformerInlineCard({
             <span
               key={`skip-${s.reviewId}`}
               data-testid={`performer-skipped-chip-${s.reviewId}`}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                padding: '2px 8px',
-                borderRadius: '999px',
-                border: '1px solid rgba(128,128,128,0.4)',
-                opacity: 0.82,
-              }}
+              className={cx(css.pillChip, css.pillChipStatic)}
             >
               <span>
                 {t('performerSkipped')}: {s.rawName}
@@ -445,7 +377,7 @@ export function PerformerInlineCard({
                       defaultAlwaysAsk: false,
                     })
                   }
-                  style={chipEditBtnStyle}
+                  className={css.inlineLinkBtn}
                 >
                   {t('performerEditBtn')}
                 </button>
@@ -542,24 +474,13 @@ export function PerformerDrawer({
   };
 
   return (
-    <div
-      data-testid="performer-drawer"
-      style={{
-        padding: '10px 12px',
-        borderRadius: '6px',
-        border: '1px solid rgba(128,128,128,0.32)',
-        background: 'rgba(128,128,128,0.05)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '10px',
-      }}
-    >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+    <div data-testid="performer-drawer" className={css.performerCard}>
+      <div className={css.stackSm}>
         <strong>
           {t('performerQueueHeading')} ({pendingQueue.length})
         </strong>
         {pendingQueue.length === 0 ? (
-          <span style={{ opacity: 0.72 }}>{t('performerNoPending')}</span>
+          <span className={css.muted}>{t('performerNoPending')}</span>
         ) : (
           pendingQueue.map((item) => (
             <PerformerTagPickerEditor
@@ -575,43 +496,32 @@ export function PerformerDrawer({
         )}
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', borderTop: '1px solid rgba(128,128,128,0.2)', paddingTop: '8px' }}>
+      <div className={cx(css.stackSm, css.dividerTop)}>
         <strong>
           {t('performerRulesHeading')} ({aliases.length})
         </strong>
         {aliases.length === 0 ? (
-          <span style={{ opacity: 0.72 }}>{t('performerNoRules')}</span>
+          <span className={css.muted}>{t('performerNoRules')}</span>
         ) : (
-          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '180px', overflowY: 'auto' }}>
+          <ul className={css.scrollList}>
             {aliases.map((a) => (
               <li
                 key={a.id}
                 data-testid={`performer-alias-row-${a.id}`}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: '8px',
-                  flexWrap: 'wrap',
-                  padding: '4px 8px',
-                  borderRadius: '4px',
-                  border: a.needsRemediation
-                    ? '1px solid rgba(239,68,68,0.6)'
-                    : '1px solid rgba(128,128,128,0.22)',
-                }}
+                className={cx(css.performerAliasRow, a.needsRemediation && css.performerAliasRowDanger)}
               >
                 <span>
                   <code>{a.rawAlias}</code> → <strong>#{a.tagId} {a.tagName}</strong>{' '}
-                  <code style={{ opacity: 0.8 }}>[{a.policy}]</code>
-                  {a.isAmbiguous ? <span style={{ marginLeft: '6px', color: '#f59e0b' }}>⚠ ambiguous</span> : null}
-                  {a.needsRemediation ? <span style={{ marginLeft: '6px', color: '#ef4444' }}>⚠ archived target</span> : null}
+                  <code className={css.muted}>[{a.policy}]</code>
+                  {a.isAmbiguous ? <span className={css.warnText}>⚠ ambiguous</span> : null}
+                  {a.needsRemediation ? <span className={css.dangerText}>⚠ archived target</span> : null}
                 </span>
-                <span style={{ display: 'inline-flex', gap: '6px' }}>
+                <span className={css.rowTight}>
                   <button
                     type="button"
                     disabled={disabled || aliasFrozen(a.rawAlias) || a.needsRemediation}
                     onClick={() => void handleTogglePolicy(a)}
-                    style={{ ...buttonStyle, padding: '2px 8px' }}
+                    className={cx(css.btn, css.btnXs)}
                   >
                     {t('performerTogglePolicyBtn')}
                   </button>
@@ -619,7 +529,7 @@ export function PerformerDrawer({
                     type="button"
                     disabled={disabled || aliasFrozen(a.rawAlias)}
                     onClick={() => void handleDeleteAlias(a)}
-                    style={{ ...buttonStyle, padding: '2px 8px' }}
+                    className={cx(css.btn, css.btnXs)}
                   >
                     {t('performerDeleteRuleBtn')}
                   </button>

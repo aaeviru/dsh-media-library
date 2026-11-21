@@ -8,9 +8,10 @@ import type {
   StagingFileItem,
 } from '../types.ts';
 import { PerformerDrawer, PerformerInlineCard } from './PerformerReviewSection.tsx';
-import { buttonStyle, controlStyle } from './TagManagementPanel.tsx';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
+import { cx } from './ui/primitives.ts';
+import css from './ui/styles.module.css';
 
 type Translate = (key: MediaLibraryKey) => string;
 
@@ -535,30 +536,18 @@ export function IngestionPanel({
           : busyOp === 'approve' ? t('ingestionApprovingBtn') : null;
 
   return (
-    <section
-      data-testid="ingestion-panel"
-      style={{
-        padding: '14px 16px',
-        borderRadius: '8px',
-        border: '1px solid rgba(128,128,128,0.28)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '10px',
-        fontSize: '12px',
-      }}
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
-        <strong style={{ fontSize: '14px' }}>{t('ingestionHeading')}</strong>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+    <section data-testid="ingestion-panel" className={css.panel}>
+      <div className={css.rowBetween}>
+        <strong className={css.sectionTitle}>{t('ingestionHeading')}</strong>
+        <div className={css.row}>
           <button
             type="button"
             data-testid="performer-drawer-btn"
             onClick={togglePerformerDrawer}
-            style={{
-              ...buttonStyle,
-              borderColor:
-                pendingQueue.length > 0 || remediationCount > 0 ? 'rgba(245,158,11,0.7)' : undefined,
-            }}
+            className={cx(
+              css.btn,
+              (pendingQueue.length > 0 || remediationCount > 0) && css.btnWarnBorder,
+            )}
           >
             {t('performerDrawerBtn')} ({pendingQueue.length}
             {remediationCount > 0 ? ` / ⚠${remediationCount}` : ''})
@@ -568,7 +557,7 @@ export function IngestionPanel({
             data-testid="ingestion-scan-btn"
             disabled={busy || degraded}
             onClick={() => void runScan(false)}
-            style={buttonStyle}
+            className={css.btn}
           >
             {busyOp === 'scan' ? t('ingestionScanningBtn') : t('ingestionScanBtn')}
           </button>
@@ -577,7 +566,7 @@ export function IngestionPanel({
             data-testid="ingestion-reconcile-btn"
             disabled={busy || executionBusy || degraded}
             onClick={() => void handleReconcile()}
-            style={buttonStyle}
+            className={css.btn}
           >
             {executing?.op === 'reconcile' ? t('ingestionReconcilingBtn') : t('ingestionReconcileBtn')}
           </button>
@@ -599,45 +588,41 @@ export function IngestionPanel({
       ) : null}
 
       {busyBannerText ? (
-        <div role="status" data-testid="ingestion-busy" style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(59,130,246,0.5)', background: 'rgba(59,130,246,0.12)' }}>
+        <div role="status" data-testid="ingestion-busy" className={cx(css.banner, css.bannerInfo)}>
           {busyBannerText}
         </div>
       ) : null}
 
       {runningHostTask?.waitingWarning ? (
-        <div role="status" data-testid="ingestion-waiting-warning">{t('ingestionWaitingWarning')}</div>
+        <div role="status" data-testid="ingestion-waiting-warning" className={cx(css.banner, css.bannerWarn)}>
+          {t('ingestionWaitingWarning')}
+        </div>
       ) : null}
 
       {message ? (
-        <div role="status" data-testid="ingestion-message" style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.3)' }}>
+        <div role="status" data-testid="ingestion-message" className={css.banner}>
           {message}
         </div>
       ) : null}
       {error ? (
-        <div role="alert" data-testid="ingestion-error" style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(239,68,68,0.5)' }}>
+        <div role="alert" data-testid="ingestion-error" className={cx(css.banner, css.bannerDanger)}>
           {error}
         </div>
       ) : null}
 
       {entries.length === 0 ? (
-        <div data-testid="ingestion-empty" style={{ opacity: 0.75, padding: '12px', border: '1px dashed rgba(128,128,128,0.3)', borderRadius: '8px' }}>
+        <div data-testid="ingestion-empty" className={css.emptyBox}>
           {t('ingestionEmpty')}
         </div>
       ) : (
-        <ul data-testid="ingestion-manifest-list" style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '4px', maxHeight: '200px', overflowY: 'auto' }}>
+        <ul data-testid="ingestion-manifest-list" className={css.scrollList}>
           {entries.map((entry) => (
             <li key={entry.key}>
               <button
                 type="button"
                 data-testid={entry.manifest ? `ingestion-row-${entry.manifest.id}` : `ingestion-file-${entry.filename}`}
                 onClick={() => setSelectedKey(entry.key)}
-                style={{
-                  ...controlStyle,
-                  width: '100%',
-                  textAlign: 'left',
-                  cursor: 'pointer',
-                  background: entry.key === selected?.key ? 'rgba(59,130,246,0.16)' : 'transparent',
-                }}
+                className={cx(css.listRowBtn, entry.key === selected?.key && css.listRowBtnSelected)}
               >
                 <strong>{entry.filename}</strong> ·{' '}
                 <code>{entry.manifest?.state ?? 'temp'}</code>
@@ -659,26 +644,26 @@ export function IngestionPanel({
       )}
 
       {selected ? (
-        <div data-testid="ingestion-detail" style={{ display: 'flex', flexDirection: 'column', gap: '8px', paddingTop: '8px', borderTop: '1px solid rgba(128,128,128,0.25)' }}>
+        <div data-testid="ingestion-detail" className={cx(css.stack, css.dividerTop)}>
           <div>
             <strong>{t('ingestionTargetLabel')}:</strong> <code>{selected.targetRelativePath}</code>
             {selected.manifest?.metadataSource ? (
-              <span style={{ marginLeft: '10px', opacity: 0.78 }}>({selected.manifest.metadataSource})</span>
+              <span className={css.muted}> ({selected.manifest.metadataSource})</span>
             ) : null}
           </div>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <span>{t('ingestionTitleLabel')}</span>
+          <label className={css.stackSm}>
+            <span className={css.fieldLabel}>{t('ingestionTitleLabel')}</span>
             <input
               type="text"
               data-testid="ingestion-title-input"
               disabled={selectedFrozen || degraded}
               value={activeDraft.title}
               onChange={(e) => updateDraft(selected.key, { title: e.target.value }, serverFallback)}
-              style={controlStyle}
+              className={css.control}
             />
           </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <span>{t('ingestionDateLabel')}</span>
+          <label className={css.stackSm}>
+            <span className={css.fieldLabel}>{t('ingestionDateLabel')}</span>
             <input
               type="text"
               data-testid="ingestion-date-input"
@@ -686,7 +671,7 @@ export function IngestionPanel({
               placeholder="YYYY-MM-DD"
               value={activeDraft.mediaDate}
               onChange={(e) => updateDraft(selected.key, { mediaDate: e.target.value }, serverFallback)}
-              style={controlStyle}
+              className={css.control}
             />
           </label>
           {performerPreview ? (
@@ -699,10 +684,10 @@ export function IngestionPanel({
               onError={setError}
             />
           ) : null}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <span>{t('ingestionTagsLabel')}</span>
+          <div className={css.stackSm}>
+            <span className={css.fieldLabel}>{t('ingestionTagsLabel')}</span>
             {sortedTagPills.length > 0 ? (
-              <div data-testid="ingestion-tag-preview" style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+              <div data-testid="ingestion-tag-preview" className={css.rowTight}>
                 {sortedTagPills.map(({ tagName, idx, matchedVia, matchedTagName }) => {
                   const badgeText =
                     matchedVia === 'name'
@@ -713,36 +698,21 @@ export function IngestionPanel({
                   return (
                     <span
                       key={`${tagName}-${idx}`}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        padding: '2px 8px',
-                        borderRadius: '999px',
-                        border:
-                          matchedVia === 'new'
-                            ? '1px dashed rgba(245,158,11,0.65)'
-                            : '1px solid rgba(34,197,94,0.55)',
-                        background:
-                          matchedVia === 'new' ? 'rgba(245,158,11,0.1)' : 'rgba(34,197,94,0.1)',
-                      }}
+                      className={cx(
+                        css.pillChip,
+                        css.pillChipStatic,
+                        matchedVia === 'new' ? css.pillChipWarnDashed : css.pillChipSuccess,
+                      )}
                     >
                       <span>{tagName}</span>
-                      <span style={{ opacity: 0.72, fontSize: '11px' }}>({badgeText})</span>
+                      <span className={css.mutedSm}>({badgeText})</span>
                       {selected.manifest?.state !== 'indexed' ? (
                         <button
                           type="button"
                           disabled={selectedFrozen || degraded}
                           aria-label={`Remove ${tagName}`}
                           onClick={() => removeDraftTag(idx)}
-                          style={{
-                            border: 'none',
-                            background: 'transparent',
-                            color: 'inherit',
-                            cursor: 'pointer',
-                            padding: '0 2px',
-                            fontWeight: 700,
-                          }}
+                          className={css.chipRemoveBtn}
                         >
                           ×
                         </button>
@@ -758,30 +728,21 @@ export function IngestionPanel({
               disabled={selectedFrozen || degraded}
               value={activeDraft.tagsText}
               onChange={(e) => updateDraft(selected.key, { tagsText: e.target.value }, serverFallback)}
-              style={controlStyle}
+              className={css.control}
             />
           </div>
           {commitBlockedByPerformer ? (
-            <div
-              role="status"
-              data-testid="performer-commit-gate"
-              style={{
-                padding: '6px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(245,158,11,0.6)',
-                background: 'rgba(245,158,11,0.12)',
-              }}
-            >
+            <div role="status" data-testid="performer-commit-gate" className={cx(css.banner, css.bannerWarn)}>
               ⚠ {t('performerCommitGateHint')}
             </div>
           ) : null}
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <div className={css.row}>
             <button
               type="button"
               data-testid="ingestion-play-btn"
               disabled={busy || selectedFrozen}
               onClick={() => void handlePlay(selected)}
-              style={buttonStyle}
+              className={css.btn}
             >
               {busyOp === 'play' ? t('ingestionPlayingBtn') : t('ingestionPlayBtn')}
             </button>
@@ -790,13 +751,17 @@ export function IngestionPanel({
               data-testid="ingestion-fetch-btn"
               disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
               onClick={() => void handleFetch(selected)}
-              style={buttonStyle}
+              className={css.btn}
             >
               {busyOp === 'fetch' ? t('ingestionFetchingBtn') : t('ingestionFetchBtn')}
             </button>
-            <button type="button" data-testid="ingestion-approve-btn"
+            <button
+              type="button"
+              data-testid="ingestion-approve-btn"
               disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
-              onClick={() => void handleApprove(selected)} style={buttonStyle}>
+              onClick={() => void handleApprove(selected)}
+              className={css.btn}
+            >
               {t('ingestionApproveBtn')}
             </button>
             <button
@@ -804,7 +769,7 @@ export function IngestionPanel({
               data-testid="ingestion-commit-btn"
               disabled={busy || executionBusy || selectedFrozen || degraded || commitBlockedByPerformer || selected.manifest?.state === 'indexed'}
               onClick={() => void handleMoveAndIndex(selected)}
-              style={buttonStyle}
+              className={cx(css.btn, css.btnPrimary)}
             >
               {executing?.op === 'commit' ? t('ingestionCommittingBtn') : t('ingestionCommitBtn')}
             </button>

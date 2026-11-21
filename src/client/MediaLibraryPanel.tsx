@@ -28,10 +28,14 @@ import type { MediaLibraryNamespace } from './namespace.ts';
 import { BatchTagBar } from './BatchTagBar.tsx';
 import { IngestionPanel } from './IngestionPanel.tsx';
 import { TagManagementPanel } from './TagManagementPanel.tsx';
+import { Button, Tag, cx, type TagTone } from './ui/primitives.ts';
+import css from './ui/styles.module.css';
 
 type Translate = (key: MediaLibraryKey) => string;
 
-let persistedShowIngestionPanel = false;
+type ActiveTab = 'library' | 'ingestion' | 'tags' | 'ops' | 'diagnostics';
+
+let persistedActiveTab: ActiveTab = 'library';
 
 interface ContextMenuState {
   readonly mediaId: string;
@@ -67,15 +71,30 @@ export function MediaLibraryPanel({
   const [status, setStatus] = useState<SpikeStatus | null>(null);
   const [overview, setOverview] = useState<LibraryOverview | null>(null);
   const [opsStatus, setOpsStatus] = useState<OpsStatus | null>(null);
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [showTagMgmt, setShowTagMgmt] = useState(false);
-  const [showOpsPanel, setShowOpsPanel] = useState(false);
-  const [showIngestionPanel, setShowIngestionPanel] = useState(() => persistedShowIngestionPanel);
+  const [activeTab, setActiveTabState] = useState<ActiveTab>(() => persistedActiveTab);
+  const [mountedTabs, setMountedTabs] = useState<ReadonlySet<ActiveTab>>(
+    () => new Set<ActiveTab>(['library', persistedActiveTab]),
+  );
   const [backingUp, setBackingUp] = useState(false);
   const [backupResult, setBackupResult] = useState<CreateBackupResult | null>(null);
   const [exportingFormat, setExportingFormat] = useState<MappingReportFormat | null>(null);
   const [exportInfo, setExportInfo] = useState<string | null>(null);
   const [selectedMediaIds, setSelectedMediaIds] = useState<ReadonlySet<string>>(new Set());
+
+  const selectTab = useCallback((next: ActiveTab) => {
+    persistedActiveTab = next;
+    setActiveTabState(next);
+    setMountedTabs((prev) => (prev.has(next) ? prev : new Set([...prev, next])));
+  }, []);
+
+  const toggleTab = useCallback((target: Exclude<ActiveTab, 'library'>) => {
+    setActiveTabState((prev) => {
+      const next: ActiveTab = prev === target ? 'library' : target;
+      persistedActiveTab = next;
+      setMountedTabs((mounted) => (mounted.has(next) ? mounted : new Set([...mounted, next])));
+      return next;
+    });
+  }, []);
 
   // Search filter state
   const [keyword, setKeyword] = useState('');
@@ -163,15 +182,17 @@ export function MediaLibraryPanel({
 
       // The form is a draft. A cursor only belongs to the query that produced
       // the currently displayed results, never to subsequent draft edits.
-      const query: SearchMediaInput = isAppend ? committedQuery.current! : {
-        text: effectiveKeyword || undefined,
-        catalogNumber: effectiveCatalog || undefined,
-        catalogMatchMode: effectiveCatalogMode,
-        tagIds: effectiveTagIds.length > 0 ? effectiveTagIds : undefined,
-        dateFrom: effectiveDateFrom || undefined,
-        dateTo: effectiveDateTo || undefined,
-        limit: 50,
-      };
+      const query: SearchMediaInput = isAppend
+        ? committedQuery.current!
+        : {
+            text: effectiveKeyword || undefined,
+            catalogNumber: effectiveCatalog || undefined,
+            catalogMatchMode: effectiveCatalogMode,
+            tagIds: effectiveTagIds.length > 0 ? effectiveTagIds : undefined,
+            dateFrom: effectiveDateFrom || undefined,
+            dateTo: effectiveDateTo || undefined,
+            limit: 50,
+          };
       try {
         const res = await mediaLibrary.searchMedia({ ...query, cursor: isAppend ? options?.cursor : undefined });
         if (requestId !== searchRequest.current) return;
@@ -233,9 +254,6 @@ export function MediaLibraryPanel({
         setOverview(overviewRes.value);
         setImportSourcePath((prev) => prev || overviewRes.value.defaultTagStudioSourcePath);
         setImportUncRoot((prev) => prev || overviewRes.value.activeUncRoot);
-        if (overviewRes.value.counts.mediaFiles === 0) {
-          setShowDiagnostics(true);
-        }
       }
 
       await Promise.all([loadTags(tagSearchInput), executeSearch()]);
@@ -496,178 +514,111 @@ export function MediaLibraryPanel({
 
   const renderStatusBadge = (st: MediaFileStatus) => {
     let label = t('statusIndexed');
-    let border = 'rgba(34,197,94,0.45)';
-    let bg = 'rgba(34,197,94,0.1)';
+    let tone: TagTone = 'success';
     if (st === 'missing') {
       label = t('statusMissing');
-      border = 'rgba(239,68,68,0.5)';
-      bg = 'rgba(239,68,68,0.12)';
+      tone = 'danger';
     } else if (st === 'offline') {
       label = t('statusOffline');
-      border = 'rgba(245,158,11,0.55)';
-      bg = 'rgba(245,158,11,0.14)';
+      tone = 'warning';
     } else if (st === 'unmapped') {
       label = t('statusUnmapped');
-      border = 'rgba(245,158,11,0.55)';
-      bg = 'rgba(245,158,11,0.14)';
+      tone = 'warning';
     } else if (st === 'permission_denied') {
       label = t('statusPermission');
-      border = 'rgba(239,68,68,0.5)';
-      bg = 'rgba(239,68,68,0.12)';
+      tone = 'danger';
     }
     return (
-      <span
-        data-testid={`media-status-${st}`}
-        style={{
-          display: 'inline-block',
-          padding: '2px 8px',
-          borderRadius: '999px',
-          border: `1px solid ${border}`,
-          background: bg,
-          fontSize: '11px',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {label}
+      <span data-testid={`media-status-${st}`}>
+        <Tag tone={tone}>{label}</Tag>
       </span>
     );
   };
 
+  // Show Diagnostics/Import inline on Library view only when the library is empty (onboarding),
+  // or when the Diagnostics tab is active.
+  const showDiagnosticsVisible =
+    activeTab === 'diagnostics' || (activeTab === 'library' && overview?.counts.mediaFiles === 0);
+
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '16px',
-        padding: '20px 24px',
-        height: '100%',
-        overflowY: 'auto',
-        boxSizing: 'border-box',
-        position: 'relative',
-      }}
-    >
-      {/* Top Header */}
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'flex-start',
-          gap: '12px',
-          flexWrap: 'wrap',
-        }}
-      >
+    <div className={css.root}>
+      {/* Top Header & Mutually Exclusive State-Preserving Tab Navigation (Issue #42 B5) */}
+      <div className={css.header}>
         <div>
-          <h2 style={{ margin: '0 0 4px 0', fontSize: '20px', fontWeight: 600 }}>
-            {t('heading')}
-          </h2>
-          <p style={{ margin: 0, opacity: 0.78, fontSize: '13px' }}>{t('subtitle')}</p>
+          <h2 className={css.heading}>{t('heading')}</h2>
+          <p className={css.subtitle}>{t('subtitle')}</p>
         </div>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <button
-            type="button"
-            data-testid="toggle-diagnostics-btn"
-            onClick={() => setShowDiagnostics((prev) => !prev)}
-            style={{
-              padding: '6px 12px',
-              borderRadius: '6px',
-              border: '1px solid rgba(128,128,128,0.35)',
-              background: showDiagnostics ? 'rgba(128,128,128,0.16)' : 'transparent',
-              color: 'inherit',
-              cursor: 'pointer',
-              fontSize: '12px',
-            }}
-          >
-            {t('toggleDiagnostics')}
-          </button>
-          <button
-            type="button"
-            data-testid="toggle-tag-mgmt-btn"
-            aria-pressed={showTagMgmt}
-            onClick={() => setShowTagMgmt((prev) => !prev)}
-            style={{
-              padding: '6px 12px',
-              borderRadius: '6px',
-              border: '1px solid rgba(128,128,128,0.35)',
-              background: showTagMgmt ? 'rgba(128,128,128,0.16)' : 'transparent',
-              color: 'inherit',
-              cursor: 'pointer',
-              fontSize: '12px',
-            }}
-          >
-            {t('toggleTagMgmt')}
-          </button>
-          <button
-            type="button"
-            data-testid="toggle-ops-panel-btn"
-            aria-pressed={showOpsPanel}
-            onClick={() => setShowOpsPanel((prev) => !prev)}
-            style={{
-              padding: '6px 12px',
-              borderRadius: '6px',
-              border: '1px solid rgba(128,128,128,0.35)',
-              background: showOpsPanel ? 'rgba(128,128,128,0.16)' : 'transparent',
-              color: 'inherit',
-              cursor: 'pointer',
-              fontSize: '12px',
-            }}
-          >
-            {t('toggleOpsPanel')}
-          </button>
-          <button
-            type="button"
-            data-testid="toggle-ingestion-panel-btn"
-            aria-pressed={showIngestionPanel}
-            onClick={() =>
-              setShowIngestionPanel((prev) => {
-                const next = !prev;
-                persistedShowIngestionPanel = next;
-                return next;
-              })
-            }
-            style={{
-              padding: '6px 12px',
-              borderRadius: '6px',
-              border: '1px solid rgba(128,128,128,0.35)',
-              background: showIngestionPanel ? 'rgba(128,128,128,0.16)' : 'transparent',
-              color: 'inherit',
-              cursor: 'pointer',
-              fontSize: '12px',
-            }}
-          >
-            {t('toggleIngestionPanel')}
-          </button>
-          <button
-            type="button"
+        <div className={css.headerControls}>
+          <div role="tablist" aria-label={t('heading')} className={css.tabBar}>
+            <button
+              type="button"
+              role="tab"
+              data-testid="tab-library-btn"
+              aria-selected={activeTab === 'library'}
+              onClick={() => selectTab('library')}
+              className={cx(css.tabBtn, activeTab === 'library' && css.tabBtnActive)}
+            >
+              {t('tabLibrary')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              data-testid="toggle-ingestion-panel-btn"
+              aria-selected={activeTab === 'ingestion'}
+              aria-pressed={activeTab === 'ingestion'}
+              onClick={() => toggleTab('ingestion')}
+              className={cx(css.tabBtn, activeTab === 'ingestion' && css.tabBtnActive)}
+            >
+              {t('toggleIngestionPanel')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              data-testid="toggle-tag-mgmt-btn"
+              aria-selected={activeTab === 'tags'}
+              aria-pressed={activeTab === 'tags'}
+              onClick={() => toggleTab('tags')}
+              className={cx(css.tabBtn, activeTab === 'tags' && css.tabBtnActive)}
+            >
+              {t('toggleTagMgmt')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              data-testid="toggle-ops-panel-btn"
+              aria-selected={activeTab === 'ops'}
+              aria-pressed={activeTab === 'ops'}
+              onClick={() => toggleTab('ops')}
+              className={cx(css.tabBtn, activeTab === 'ops' && css.tabBtnActive)}
+            >
+              {t('toggleOpsPanel')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              data-testid="toggle-diagnostics-btn"
+              aria-selected={activeTab === 'diagnostics'}
+              aria-pressed={activeTab === 'diagnostics'}
+              onClick={() => toggleTab('diagnostics')}
+              className={cx(css.tabBtn, activeTab === 'diagnostics' && css.tabBtnActive)}
+            >
+              {t('toggleDiagnostics')}
+            </button>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => void refreshAll()}
             disabled={searching}
-            style={{
-              padding: '6px 12px',
-              borderRadius: '6px',
-              border: '1px solid rgba(128,128,128,0.35)',
-              background: 'transparent',
-              color: 'inherit',
-              cursor: searching ? 'wait' : 'pointer',
-              fontSize: '12px',
-            }}
           >
             {t('refresh')}
-          </button>
+          </Button>
         </div>
       </div>
 
       {/* Read-Only Degraded Mode Alert Banner (Issue #6 B4) */}
       {opsStatus?.degradedState.degraded ? (
-        <div
-          role="alert"
-          data-testid="degraded-mode-banner"
-          style={{
-            padding: '10px 14px',
-            borderRadius: '8px',
-            border: '1px solid rgba(239,68,68,0.6)',
-            background: 'rgba(239,68,68,0.14)',
-            fontSize: '12px',
-          }}
-        >
+        <div role="alert" data-testid="degraded-mode-banner" className={cx(css.banner, css.bannerDanger)}>
           <strong>{t('opsDegradedBanner')}</strong>{' '}
           {opsStatus.degradedState.reason ? <span>({opsStatus.degradedState.reason})</span> : null}
         </div>
@@ -675,18 +626,7 @@ export function MediaLibraryPanel({
 
       {/* Overview Summary Strip */}
       {overview ? (
-        <div
-          style={{
-            padding: '10px 14px',
-            borderRadius: '8px',
-            border: '1px solid rgba(128,128,128,0.22)',
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '12px 24px',
-            fontSize: '12px',
-            alignItems: 'center',
-          }}
-        >
+        <div className={css.overviewStrip}>
           <div>
             <strong>{t('indexedSummary')}:</strong>{' '}
             <code data-testid="overview-counts">
@@ -705,17 +645,7 @@ export function MediaLibraryPanel({
 
       {/* Error Banner */}
       {loadError ? (
-        <div
-          role="alert"
-          data-testid="media-library-error-banner"
-          style={{
-            padding: '12px',
-            borderRadius: '8px',
-            border: '1px solid rgba(239,68,68,0.5)',
-            background: 'rgba(239,68,68,0.1)',
-            fontSize: '13px',
-          }}
-        >
+        <div role="alert" data-testid="media-library-error-banner" className={cx(css.banner, css.bannerDanger)}>
           {loadError}
         </div>
       ) : null}
@@ -724,18 +654,7 @@ export function MediaLibraryPanel({
       {lastResult ? (
         <section
           data-testid="last-action-banner"
-          style={{
-            padding: '10px 14px',
-            borderRadius: '8px',
-            border: lastResult.ok
-              ? '1px solid rgba(34,197,94,0.45)'
-              : '1px solid rgba(239,68,68,0.45)',
-            background: lastResult.ok ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
-            fontSize: '12px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '4px',
-          }}
+          className={cx(css.banner, css.stackSm, lastResult.ok ? css.bannerSuccess : css.bannerDanger)}
         >
           <div>
             <strong>{t('lastActionHeading')}:</strong>{' '}
@@ -753,39 +672,22 @@ export function MediaLibraryPanel({
         </section>
       ) : null}
 
-      {/* Collapsible Import & M1 Diagnostics Drawer */}
-      {showDiagnostics ? (
+      {/* Import & M1 Diagnostics View (visible on Diagnostics tab, or inline on empty Library) */}
+      {(mountedTabs.has('diagnostics') || showDiagnosticsVisible) ? (
         <section
           data-testid="diagnostics-drawer"
-          style={{
-            padding: '14px 16px',
-            borderRadius: '8px',
-            border: '1px solid rgba(128,128,128,0.28)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '14px',
-          }}
+          className={cx(css.panel, !showDiagnosticsVisible && css.hiddenTab)}
         >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 600 }}>
-              {t('importHeading')}
-            </h3>
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <div className={css.stack}>
+            <h3 className={css.sectionTitle}>{t('importHeading')}</h3>
+            <div className={css.row}>
               <input
                 type="text"
                 data-testid="import-source-input"
                 value={importSourcePath}
                 onChange={(e) => setImportSourcePath(e.target.value)}
                 placeholder={t('importSourcePlaceholder')}
-                style={{
-                  flex: '2 1 280px',
-                  padding: '6px 10px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.35)',
-                  background: 'transparent',
-                  color: 'inherit',
-                  fontSize: '12px',
-                }}
+                className={cx(css.control, css.controlFlexWide)}
               />
               <input
                 type="text"
@@ -793,31 +695,14 @@ export function MediaLibraryPanel({
                 value={importUncRoot}
                 onChange={(e) => setImportUncRoot(e.target.value)}
                 placeholder={t('importUncPlaceholder')}
-                style={{
-                  flex: '1 1 220px',
-                  padding: '6px 10px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.35)',
-                  background: 'transparent',
-                  color: 'inherit',
-                  fontSize: '12px',
-                }}
+                className={cx(css.control, css.controlFlex)}
               />
               <button
                 type="button"
                 data-testid="import-submit-btn"
                 disabled={importing || !importSourcePath.trim()}
                 onClick={() => void handleImportSubmit()}
-                style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.45)',
-                  background: 'transparent',
-                  color: 'inherit',
-                  cursor: importing ? 'wait' : 'pointer',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                }}
+                className={cx(css.btn, css.btnPrimary)}
               >
                 {importing ? t('importingBtn') : t('importBtn')}
               </button>
@@ -825,14 +710,7 @@ export function MediaLibraryPanel({
             {importResult ? (
               <div
                 data-testid="import-result-banner"
-                style={{
-                  padding: '8px 12px',
-                  borderRadius: '6px',
-                  border: importResult.ok
-                    ? '1px solid rgba(34,197,94,0.45)'
-                    : '1px solid rgba(239,68,68,0.45)',
-                  fontSize: '12px',
-                }}
+                className={cx(css.banner, importResult.ok ? css.bannerSuccess : css.bannerDanger)}
               >
                 {importResult.message}
               </div>
@@ -840,18 +718,9 @@ export function MediaLibraryPanel({
           </div>
 
           {status ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 600 }}>
-                {t('testItemsHeading')}
-              </h3>
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-                  gap: '6px 14px',
-                  fontSize: '12px',
-                }}
-              >
+            <div className={css.stack}>
+              <h3 className={css.sectionTitle}>{t('testItemsHeading')}</h3>
+              <div className={css.diagGrid}>
                 <div>
                   <strong>{t('platform')}:</strong> <code>{status.platform}</code>
                 </div>
@@ -865,43 +734,22 @@ export function MediaLibraryPanel({
                   </code>
                 </div>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <div className={css.stackSm}>
                 {status.items.map((item) => {
                   const isOpening = pendingMediaId === `open:${item.mediaId}`;
                   const isRevealing = pendingMediaId === `reveal:${item.mediaId}`;
                   return (
-                    <div
-                      key={item.mediaId}
-                      style={{
-                        padding: '8px 12px',
-                        borderRadius: '6px',
-                        border: '1px solid rgba(128,128,128,0.22)',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: '10px',
-                        flexWrap: 'wrap',
-                        fontSize: '12px',
-                      }}
-                    >
+                    <div key={item.mediaId} className={cx(css.panelCompact, css.rowBetween)}>
                       <div>
                         <strong>{item.label}</strong>{' '}
-                        <code style={{ opacity: 0.75 }}>({item.mediaId})</code>
+                        <code className={css.muted}>({item.mediaId})</code>
                       </div>
-                      <div style={{ display: 'flex', gap: '6px' }}>
+                      <div className={css.rowTight}>
                         <button
                           type="button"
                           disabled={isOpening || isRevealing}
                           onClick={() => void handleAction('open', item.mediaId)}
-                          style={{
-                            padding: '4px 8px',
-                            borderRadius: '5px',
-                            border: '1px solid rgba(128,128,128,0.35)',
-                            background: 'transparent',
-                            color: 'inherit',
-                            cursor: 'pointer',
-                            fontSize: '11px',
-                          }}
+                          className={cx(css.btn, css.btnSm)}
                         >
                           {t('openBtn')}
                         </button>
@@ -909,15 +757,7 @@ export function MediaLibraryPanel({
                           type="button"
                           disabled={isOpening || isRevealing}
                           onClick={() => void handleAction('reveal', item.mediaId)}
-                          style={{
-                            padding: '4px 8px',
-                            borderRadius: '5px',
-                            border: '1px solid rgba(128,128,128,0.35)',
-                            background: 'transparent',
-                            color: 'inherit',
-                            cursor: 'pointer',
-                            fontSize: '11px',
-                          }}
+                          className={cx(css.btn, css.btnSm)}
                         >
                           {t('revealBtn')}
                         </button>
@@ -931,37 +771,21 @@ export function MediaLibraryPanel({
         </section>
       ) : null}
 
-      {/* Issue #6 Backup, Restore & Cold-Fallback Ops Panel */}
-      {showOpsPanel && opsStatus ? (
+      {/* Issue #6 Backup, Restore & Cold-Fallback Ops View (lazy-mounted, state-preserved) */}
+      {mountedTabs.has('ops') && opsStatus ? (
         <section
           data-testid="ops-panel"
-          style={{
-            padding: '14px 16px',
-            borderRadius: '8px',
-            border: '1px solid rgba(128,128,128,0.28)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '10px',
-            fontSize: '12px',
-          }}
+          className={cx(css.panel, activeTab !== 'ops' && css.hiddenTab)}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
-            <strong style={{ fontSize: '14px' }}>{t('opsHeading')}</strong>
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <div className={css.rowBetween}>
+            <strong className={css.sectionTitle}>{t('opsHeading')}</strong>
+            <div className={css.row}>
               <button
                 type="button"
                 data-testid="create-backup-btn"
                 disabled={backingUp}
                 onClick={() => void handleCreateBackup()}
-                style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.35)',
-                  background: 'transparent',
-                  color: 'inherit',
-                  cursor: backingUp ? 'wait' : 'pointer',
-                  fontSize: '12px',
-                }}
+                className={cx(css.btn, css.btnPrimary)}
               >
                 {backingUp ? t('opsCreatingBackup') : t('opsCreateBackupBtn')}
               </button>
@@ -970,15 +794,7 @@ export function MediaLibraryPanel({
                 data-testid="export-json-btn"
                 disabled={exportingFormat !== null}
                 onClick={() => void handleExportReport('json')}
-                style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.35)',
-                  background: 'transparent',
-                  color: 'inherit',
-                  cursor: exportingFormat ? 'wait' : 'pointer',
-                  fontSize: '12px',
-                }}
+                className={css.btn}
               >
                 {exportingFormat === 'json' ? t('opsExporting') : t('opsExportJsonBtn')}
               </button>
@@ -987,24 +803,17 @@ export function MediaLibraryPanel({
                 data-testid="export-csv-btn"
                 disabled={exportingFormat !== null}
                 onClick={() => void handleExportReport('csv')}
-                style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.35)',
-                  background: 'transparent',
-                  color: 'inherit',
-                  cursor: exportingFormat ? 'wait' : 'pointer',
-                  fontSize: '12px',
-                }}
+                className={css.btn}
               >
                 {exportingFormat === 'csv' ? t('opsExporting') : t('opsExportCsvBtn')}
               </button>
             </div>
           </div>
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 20px', opacity: 0.85 }}>
+          <div className={cx(css.row, css.muted)}>
             <span>
-              <strong>{t('opsRetentionLabel')}</strong> {opsStatus.dailyRetentionCount} / {opsStatus.preMigrateRetentionCount}
+              <strong>{t('opsRetentionLabel')}</strong> {opsStatus.dailyRetentionCount} /{' '}
+              {opsStatus.preMigrateRetentionCount}
             </span>
             <span>
               <strong>{t('opsNasDirLabel')}</strong> <code>{opsStatus.nasBackupDir ?? '—'}</code>
@@ -1015,7 +824,11 @@ export function MediaLibraryPanel({
           </div>
 
           {backupResult ? (
-            <div role="status" data-testid="backup-result-banner" style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.3)' }}>
+            <div
+              role="status"
+              data-testid="backup-result-banner"
+              className={cx(css.banner, backupResult.ok ? css.bannerSuccess : css.bannerDanger)}
+            >
               {backupResult.ok
                 ? `Backup OK: ${backupResult.backupPath} (sha256:${backupResult.sha256?.slice(0, 12)}, pruned:${backupResult.prunedCount ?? 0})${backupResult.nasCopyWarning ? ` · ${backupResult.nasCopyWarning}` : ''}`
                 : `Backup failed: ${backupResult.error}`}
@@ -1023,17 +836,19 @@ export function MediaLibraryPanel({
           ) : null}
 
           {exportInfo ? (
-            <div role="status" data-testid="export-result-banner" style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,0.3)' }}>
+            <div role="status" data-testid="export-result-banner" className={css.banner}>
               {exportInfo}
             </div>
           ) : null}
 
           <div>
-            <strong>{t('opsBackupsHeading')} ({opsStatus.backups.length}):</strong>
+            <strong>
+              {t('opsBackupsHeading')} ({opsStatus.backups.length}):
+            </strong>
             {opsStatus.backups.length === 0 ? (
-              <div style={{ opacity: 0.72, marginTop: '4px' }}>{t('opsNoBackups')}</div>
+              <div className={css.muted}>{t('opsNoBackups')}</div>
             ) : (
-              <ul data-testid="ops-backup-list" style={{ margin: '4px 0 0 18px', padding: 0 }}>
+              <ul data-testid="ops-backup-list" className={css.backupList}>
                 {opsStatus.backups.slice(0, 10).map((b) => (
                   <li key={b.path}>
                     <code>{b.filename}</code> ({b.kind}, {Math.round(b.size / 1024)} KB)
@@ -1045,573 +860,361 @@ export function MediaLibraryPanel({
         </section>
       ) : null}
 
-      {/* Issue #7 Staging & Recoverable Ingestion */}
-      {showIngestionPanel ? (
-        <IngestionPanel
-          t={t}
-          mediaLibrary={mediaLibrary}
-          degraded={Boolean(opsStatus?.degradedState.degraded)}
-          onCommitted={handleTagsChanged}
-        />
-      ) : null}
-
-      {/* Issue #5 tag & alias management */}
-      {showTagMgmt ? (
-        <TagManagementPanel t={t} mediaLibrary={mediaLibrary} onChanged={handleTagsChanged} />
-      ) : null}
-
-      {/* M2 Search & Filter Panel */}
-      <section
-        style={{
-          padding: '14px 16px',
-          borderRadius: '8px',
-          border: '1px solid rgba(128,128,128,0.25)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '12px',
-        }}
-      >
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
-            gap: '10px 14px',
-            alignItems: 'end',
-          }}
-        >
-          {/* Keyword Search */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <label style={{ fontSize: '12px', fontWeight: 500 }}>{t('searchKeywordLabel')}</label>
-            <input
-              type="text"
-              data-testid="search-keyword-input"
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void executeSearch();
-              }}
-              placeholder={t('searchKeywordPlaceholder')}
-              style={{
-                padding: '6px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.35)',
-                background: 'transparent',
-                color: 'inherit',
-                fontSize: '12px',
-              }}
-            />
-          </div>
-
-          {/* Catalog Number + Exact/Prefix Mode */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <label style={{ fontSize: '12px', fontWeight: 500 }}>{t('catalogLabel')}</label>
-              <div style={{ display: 'flex', gap: '4px' }}>
-                <button
-                  type="button"
-                  data-testid="catalog-mode-exact"
-                  onClick={() => setCatalogMatchMode('exact')}
-                  style={{
-                    padding: '1px 6px',
-                    borderRadius: '4px',
-                    border: '1px solid rgba(128,128,128,0.35)',
-                    background:
-                      catalogMatchMode === 'exact' ? 'rgba(128,128,128,0.22)' : 'transparent',
-                    color: 'inherit',
-                    fontSize: '11px',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {t('catalogExact')}
-                </button>
-                <button
-                  type="button"
-                  data-testid="catalog-mode-prefix"
-                  onClick={() => setCatalogMatchMode('prefix')}
-                  style={{
-                    padding: '1px 6px',
-                    borderRadius: '4px',
-                    border: '1px solid rgba(128,128,128,0.35)',
-                    background:
-                      catalogMatchMode === 'prefix' ? 'rgba(128,128,128,0.22)' : 'transparent',
-                    color: 'inherit',
-                    fontSize: '11px',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {t('catalogPrefix')}
-                </button>
-              </div>
-            </div>
-            <input
-              type="text"
-              data-testid="search-catalog-input"
-              value={catalogNumber}
-              onChange={(e) => setCatalogNumber(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void executeSearch();
-              }}
-              placeholder={t('catalogPlaceholder')}
-              style={{
-                padding: '6px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.35)',
-                background: 'transparent',
-                color: 'inherit',
-                fontSize: '12px',
-              }}
-            />
-          </div>
-
-          {/* Date From */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <label style={{ fontSize: '12px', fontWeight: 500 }}>{t('dateFromLabel')}</label>
-            <input
-              type="text"
-              data-testid="search-date-from-input"
-              value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void executeSearch();
-              }}
-              placeholder="YYYY-MM-DD"
-              style={{
-                padding: '6px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.35)',
-                background: 'transparent',
-                color: 'inherit',
-                fontSize: '12px',
-              }}
-            />
-          </div>
-
-          {/* Date To */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <label style={{ fontSize: '12px', fontWeight: 500 }}>{t('dateToLabel')}</label>
-            <input
-              type="text"
-              data-testid="search-date-to-input"
-              value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void executeSearch();
-              }}
-              placeholder="YYYY-MM-DD"
-              style={{
-                padding: '6px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.35)',
-                background: 'transparent',
-                color: 'inherit',
-                fontSize: '12px',
-              }}
-            />
-          </div>
+      {/* Issue #7 Staging & Recoverable Ingestion View (lazy-mounted, state-preserved) */}
+      {mountedTabs.has('ingestion') ? (
+        <div className={activeTab !== 'ingestion' ? css.hiddenTab : undefined}>
+          <IngestionPanel
+            t={t}
+            mediaLibrary={mediaLibrary}
+            degraded={Boolean(opsStatus?.degradedState.degraded)}
+            onCommitted={handleTagsChanged}
+          />
         </div>
+      ) : null}
 
-        {/* Tag & Alias Search + Multi-Tag AND Chips */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div
-            style={{
-              display: 'flex',
-              gap: '8px',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-            }}
-          >
-            <label style={{ fontSize: '12px', fontWeight: 500 }}>{t('tagFilterLabel')}</label>
-            <input
-              type="text"
-              data-testid="tag-search-input"
-              value={tagSearchInput}
-              onChange={(e) => setTagSearchInput(e.target.value)}
-              placeholder={t('tagSearchPlaceholder')}
-              style={{
-                flex: '1 1 220px',
-                padding: '5px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.35)',
-                background: 'transparent',
-                color: 'inherit',
-                fontSize: '12px',
-              }}
-            />
-            <button
-              type="button"
-              data-testid="search-submit-btn"
-              disabled={searching}
-              onClick={() => void executeSearch()}
-              style={{
-                padding: '6px 14px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.45)',
-                background: 'rgba(128,128,128,0.16)',
-                color: 'inherit',
-                cursor: searching ? 'wait' : 'pointer',
-                fontSize: '12px',
-                fontWeight: 600,
-              }}
-            >
-              {searching ? t('searchingBtn') : t('searchBtn')}
-            </button>
-            <button
-              type="button"
-              data-testid="search-reset-btn"
-              onClick={handleResetFilters}
-              style={{
-                padding: '6px 12px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.35)',
-                background: 'transparent',
-                color: 'inherit',
-                cursor: 'pointer',
-                fontSize: '12px',
-              }}
-            >
-              {t('clearFiltersBtn')}
-            </button>
+      {/* Issue #5 Tag & Alias Management View (lazy-mounted, state-preserved) */}
+      {mountedTabs.has('tags') ? (
+        <div className={activeTab !== 'tags' ? css.hiddenTab : undefined}>
+          <TagManagementPanel t={t} mediaLibrary={mediaLibrary} onChanged={handleTagsChanged} />
+        </div>
+      ) : null}
+
+      {/* Main Library View (Search & Filter + Batch Bar + Results Table; state preserved across tab switches) */}
+      <div className={cx(css.stackMd, activeTab !== 'library' && css.hiddenTab)}>
+        <section className={css.panel}>
+          <div className={css.filterGrid}>
+            {/* Keyword Search */}
+            <div className={css.stackSm}>
+              <label className={css.fieldLabel}>{t('searchKeywordLabel')}</label>
+              <input
+                type="text"
+                data-testid="search-keyword-input"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void executeSearch();
+                }}
+                placeholder={t('searchKeywordPlaceholder')}
+                className={css.control}
+              />
+            </div>
+
+            {/* Catalog Number + Exact/Prefix Mode */}
+            <div className={css.stackSm}>
+              <div className={css.rowBetween}>
+                <label className={css.fieldLabel}>{t('catalogLabel')}</label>
+                <div className={css.rowTight}>
+                  <button
+                    type="button"
+                    data-testid="catalog-mode-exact"
+                    onClick={() => setCatalogMatchMode('exact')}
+                    className={cx(css.btn, css.btnXs, catalogMatchMode === 'exact' && css.btnActive)}
+                  >
+                    {t('catalogExact')}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="catalog-mode-prefix"
+                    onClick={() => setCatalogMatchMode('prefix')}
+                    className={cx(css.btn, css.btnXs, catalogMatchMode === 'prefix' && css.btnActive)}
+                  >
+                    {t('catalogPrefix')}
+                  </button>
+                </div>
+              </div>
+              <input
+                type="text"
+                data-testid="search-catalog-input"
+                value={catalogNumber}
+                onChange={(e) => setCatalogNumber(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void executeSearch();
+                }}
+                placeholder={t('catalogPlaceholder')}
+                className={css.control}
+              />
+            </div>
+
+            {/* Date From */}
+            <div className={css.stackSm}>
+              <label className={css.fieldLabel}>{t('dateFromLabel')}</label>
+              <input
+                type="text"
+                data-testid="search-date-from-input"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void executeSearch();
+                }}
+                placeholder="YYYY-MM-DD"
+                className={css.control}
+              />
+            </div>
+
+            {/* Date To */}
+            <div className={css.stackSm}>
+              <label className={css.fieldLabel}>{t('dateToLabel')}</label>
+              <input
+                type="text"
+                data-testid="search-date-to-input"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void executeSearch();
+                }}
+                placeholder="YYYY-MM-DD"
+                className={css.control}
+              />
+            </div>
           </div>
 
-          {/* Active Selected Tag AND Filter Chips */}
-          {selectedTags.length > 0 ? (
-            <div
-              data-testid="active-tag-filters"
-              style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}
-            >
-              <span style={{ fontSize: '12px', opacity: 0.8 }}>{t('activeTagFilters')}</span>
-              {selectedTags.map((tag) => (
-                <button
-                  key={tag.id}
-                  type="button"
-                  data-testid={`active-tag-chip-${tag.id}`}
-                  onClick={() => toggleTagSelection(tag)}
-                  style={{
-                    padding: '3px 8px',
-                    borderRadius: '999px',
-                    border: '1px solid rgba(59,130,246,0.55)',
-                    background: 'rgba(59,130,246,0.15)',
-                    color: 'inherit',
-                    cursor: 'pointer',
-                    fontSize: '11px',
-                  }}
-                >
-                  {tag.name} ×
-                </button>
-              ))}
+          {/* Tag & Alias Search + Multi-Tag AND Chips */}
+          <div className={css.stack}>
+            <div className={css.row}>
+              <label className={css.fieldLabel}>{t('tagFilterLabel')}</label>
+              <input
+                type="text"
+                data-testid="tag-search-input"
+                value={tagSearchInput}
+                onChange={(e) => setTagSearchInput(e.target.value)}
+                placeholder={t('tagSearchPlaceholder')}
+                className={cx(css.control, css.controlFlex)}
+              />
+              <button
+                type="button"
+                data-testid="search-submit-btn"
+                disabled={searching}
+                onClick={() => void executeSearch()}
+                className={cx(css.btn, css.btnPrimary)}
+              >
+                {searching ? t('searchingBtn') : t('searchBtn')}
+              </button>
+              <button
+                type="button"
+                data-testid="search-reset-btn"
+                onClick={handleResetFilters}
+                className={css.btn}
+              >
+                {t('clearFiltersBtn')}
+              </button>
             </div>
-          ) : null}
 
-          {/* Available Tag Suggestions (Name + Aliases + Count) */}
-          {availableTags.length > 0 ? (
-            <div
-              data-testid="tag-suggestions-list"
-              style={{
-                display: 'flex',
-                gap: '6px',
-                flexWrap: 'wrap',
-                maxHeight: '84px',
-                overflowY: 'auto',
-              }}
-            >
-              {availableTags.slice(0, 24).map((tag) => {
-                const isSelected = selectedTags.some((item) => item.id === tag.id);
-                const aliasLabel =
-                  tag.aliases.length > 0 ? ` (${tag.aliases.slice(0, 2).join(', ')})` : '';
-                return (
+            {/* Active Selected Tag AND Filter Chips */}
+            {selectedTags.length > 0 ? (
+              <div data-testid="active-tag-filters" className={css.rowTight}>
+                <span className={css.muted}>{t('activeTagFilters')}</span>
+                {selectedTags.map((tag) => (
                   <button
                     key={tag.id}
                     type="button"
-                    data-testid={`tag-option-${tag.id}`}
-                    onClick={() => toggleTagSelection({ id: tag.id, name: tag.name })}
-                    style={{
-                      padding: '3px 8px',
-                      borderRadius: '999px',
-                      border: isSelected
-                        ? '1px solid rgba(59,130,246,0.6)'
-                        : '1px solid rgba(128,128,128,0.28)',
-                      background: isSelected ? 'rgba(59,130,246,0.16)' : 'transparent',
-                      color: 'inherit',
-                      cursor: 'pointer',
-                      fontSize: '11px',
-                    }}
+                    data-testid={`active-tag-chip-${tag.id}`}
+                    onClick={() => toggleTagSelection(tag)}
+                    className={cx(css.pillChip, css.pillChipActive)}
                   >
-                    {tag.name}
-                    {aliasLabel} <span style={{ opacity: 0.65 }}>[{tag.mediaCount}]</span>
+                    {tag.name} ×
                   </button>
-                );
-              })}
-            </div>
-          ) : null}
+                ))}
+              </div>
+            ) : null}
 
-          {/* Ambiguous Alias Warning */}
-          {tagAmbiguousAliases.length > 0 ? (
-            <div
-              data-testid="ambiguous-alias-warning"
-              style={{
-                padding: '6px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(245,158,11,0.5)',
-                background: 'rgba(245,158,11,0.1)',
-                fontSize: '11px',
-              }}
-            >
-              {tagAmbiguousAliases.map((amb) => (
-                <div key={amb.normalizedAlias}>
-                  Shared alias <code>{amb.normalizedAlias}</code> maps to multiple tags:{' '}
-                  {amb.matchingTags.map((m) => `${m.name} (#${m.id})`).join(', ')}
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </section>
-
-      {/* Results Section */}
-      <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            gap: '12px',
-          }}
-        >
-          <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600 }}>
-            {t('resultsHeading')}{' '}
-            <code
-              data-testid="search-results-summary"
-              style={{ fontSize: '12px', fontWeight: 400, opacity: 0.8 }}
-            >
-              ({items.length} / {totalMatching} · {searchElapsedMs} ms)
-            </code>
-          </h3>
-        </div>
-
-        {items.length > 0 && (
-          <BatchTagBar
-            t={t}
-            mediaLibrary={mediaLibrary}
-            selectedItems={items.filter((item) => selectedMediaIds.has(item.mediaId))}
-            onClearSelection={() => setSelectedMediaIds(new Set())}
-            onApplied={handleTagsChanged}
-          />
-        )}
-
-        {items.length === 0 && !searching ? (
-          <div
-            data-testid="empty-results-state"
-            style={{
-              padding: '28px 16px',
-              borderRadius: '8px',
-              border: '1px dashed rgba(128,128,128,0.3)',
-              textAlign: 'center',
-              fontSize: '13px',
-              opacity: 0.82,
-            }}
-          >
-            {overview && overview.counts.mediaFiles === 0
-              ? t('emptyLibraryState')
-              : t('emptySearchState')}
-          </div>
-        ) : (
-          <div
-            style={{
-              borderRadius: '8px',
-              border: '1px solid rgba(128,128,128,0.25)',
-              overflowX: 'auto',
-            }}
-          >
-            <table
-              data-testid="media-results-table"
-              style={{
-                width: '100%',
-                borderCollapse: 'collapse',
-                fontSize: '12px',
-                textAlign: 'left',
-              }}
-            >
-              <thead>
-                <tr
-                  style={{
-                    borderBottom: '1px solid rgba(128,128,128,0.25)',
-                    background: 'rgba(128,128,128,0.06)',
-                  }}
-                >
-                  <th style={{ padding: '8px 8px 8px 12px', width: '28px' }}>
-                    <input
-                      type="checkbox"
-                      aria-label="Select all visible rows"
-                      data-testid="select-all-media-checkbox"
-                      checked={items.length > 0 && items.every((item) => selectedMediaIds.has(item.mediaId))}
-                      onChange={(ev) => {
-                        if (ev.target.checked) {
-                          setSelectedMediaIds(new Set(items.map((item) => item.mediaId)));
-                        } else {
-                          setSelectedMediaIds(new Set());
-                        }
-                      }}
-                    />
-                  </th>
-                  <th style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>
-                    {t('colCatalogDate')}
-                  </th>
-                  <th style={{ padding: '8px 12px' }}>{t('colFileAndTitle')}</th>
-                  <th style={{ padding: '8px 12px' }}>{t('colTags')}</th>
-                  <th style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>{t('colStatus')}</th>
-                  <th style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>{t('colActions')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((item) => {
-                  const isOpening = pendingMediaId === `open:${item.mediaId}`;
-                  const isRevealing = pendingMediaId === `reveal:${item.mediaId}`;
+            {/* Available Tag Suggestions (Name + Aliases + Count) */}
+            {availableTags.length > 0 ? (
+              <div data-testid="tag-suggestions-list" className={css.suggestionsList}>
+                {availableTags.slice(0, 24).map((tag) => {
+                  const isSelected = selectedTags.some((item) => item.id === tag.id);
+                  const aliasLabel =
+                    tag.aliases.length > 0 ? ` (${tag.aliases.slice(0, 2).join(', ')})` : '';
                   return (
-                    <tr
-                      key={item.mediaId}
-                      tabIndex={0}
-                      data-testid={`media-row-${item.mediaId}`}
-                      onClick={(ev) => {
-                        const target = ev.target as HTMLElement | null;
-                        if (target?.closest('button, input, a, select, textarea')) return;
-                        if (window.getSelection()?.toString()) return;
-                        toggleMediaSelected(item.mediaId);
-                      }}
-                      onContextMenu={(ev) => handleRowContextMenu(ev, item)}
-                      onKeyDown={(ev) => handleRowKeyDown(ev, item)}
-                      style={{
-                        borderBottom: '1px solid rgba(128,128,128,0.15)',
-                        background: selectedMediaIds.has(item.mediaId) ? 'rgba(59,130,246,0.1)' : undefined,
-                        cursor: 'pointer',
-                      }}
+                    <button
+                      key={tag.id}
+                      type="button"
+                      data-testid={`tag-option-${tag.id}`}
+                      onClick={() => toggleTagSelection({ id: tag.id, name: tag.name })}
+                      className={cx(css.pillChip, isSelected && css.pillChipActive)}
                     >
-                      <td style={{ padding: '8px 8px 8px 12px', verticalAlign: 'top' }}>
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${item.filename}`}
-                          data-testid={`select-media-checkbox-${item.mediaId}`}
-                          checked={selectedMediaIds.has(item.mediaId)}
-                          onChange={() => toggleMediaSelected(item.mediaId)}
-                          onClick={(ev) => ev.stopPropagation()}
-                        />
-                      </td>
-                      <td style={{ padding: '8px 12px', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
-                        <div style={{ fontWeight: 600 }}>
-                          {item.catalogNumber ? <code>{item.catalogNumber}</code> : '—'}
-                        </div>
-                        <div style={{ opacity: 0.72, fontSize: '11px' }}>
-                          {item.mediaDate ?? '—'}
-                        </div>
-                      </td>
-                      <td style={{ padding: '8px 12px', verticalAlign: 'top' }}>
-                        <div style={{ fontWeight: 600 }}>
-                          {item.title ? `${item.title} (${item.filename})` : item.filename}
-                        </div>
-                        <code
-                          style={{
-                            fontSize: '11px',
-                            opacity: 0.76,
-                            wordBreak: 'break-all',
-                          }}
-                        >
-                          {item.relativePath}
-                        </code>
-                      </td>
-                      <td style={{ padding: '8px 12px', verticalAlign: 'top' }}>
-                        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                          {item.tags.map((tag) => (
-                            <button
-                              key={tag.id}
-                              type="button"
-                              onClick={() => toggleTagSelection({ id: tag.id, name: tag.name })}
-                              style={{
-                                padding: '2px 6px',
-                                borderRadius: '999px',
-                                border: '1px solid rgba(128,128,128,0.3)',
-                                background: 'transparent',
-                                color: 'inherit',
-                                cursor: 'pointer',
-                                fontSize: '11px',
-                              }}
-                            >
-                              {tag.name}
-                            </button>
-                          ))}
-                        </div>
-                      </td>
-                      <td style={{ padding: '8px 12px', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
-                        {renderStatusBadge(item.status)}
-                      </td>
-                      <td style={{ padding: '8px 12px', verticalAlign: 'top', whiteSpace: 'nowrap' }}>
-                        <div style={{ display: 'flex', gap: '6px' }}>
-                          <button
-                            type="button"
-                            data-testid={`open-media-btn-${item.mediaId}`}
-                            disabled={isOpening || isRevealing}
-                            onClick={() => void handleAction('open', item.mediaId)}
-                            style={{
-                              padding: '4px 8px',
-                              borderRadius: '5px',
-                              border: '1px solid rgba(128,128,128,0.35)',
-                              background: 'transparent',
-                              color: 'inherit',
-                              cursor: 'pointer',
-                              fontSize: '11px',
-                            }}
-                          >
-                            {t('openBtn')}
-                          </button>
-                          <button
-                            type="button"
-                            data-testid={`reveal-media-btn-${item.mediaId}`}
-                            disabled={isOpening || isRevealing}
-                            onClick={() => void handleAction('reveal', item.mediaId)}
-                            style={{
-                              padding: '4px 8px',
-                              borderRadius: '5px',
-                              border: '1px solid rgba(128,128,128,0.35)',
-                              background: 'transparent',
-                              color: 'inherit',
-                              cursor: 'pointer',
-                              fontSize: '11px',
-                            }}
-                          >
-                            {t('revealBtn')}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+                      {tag.name}
+                      {aliasLabel} <span className={css.mutedSm}>[{tag.mediaCount}]</span>
+                    </button>
                   );
                 })}
-              </tbody>
-            </table>
-          </div>
-        )}
+              </div>
+            ) : null}
 
-        {/* Keyset Pagination Load More Button */}
-        {nextCursor ? (
-          <div style={{ display: 'flex', justifyContent: 'center', paddingTop: '6px' }}>
-            <button
-              type="button"
-              data-testid="load-more-btn"
-              disabled={loadingMore || searching}
-              onClick={() => void executeSearch({ cursor: nextCursor, append: true })}
-              style={{
-                padding: '6px 16px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.4)',
-                background: 'transparent',
-                color: 'inherit',
-                cursor: loadingMore ? 'wait' : 'pointer',
-                fontSize: '12px',
-                fontWeight: 500,
-              }}
-            >
-              {loadingMore ? t('loadingMoreBtn') : t('loadMoreBtn')}
-            </button>
+            {/* Ambiguous Alias Warning */}
+            {tagAmbiguousAliases.length > 0 ? (
+              <div data-testid="ambiguous-alias-warning" className={cx(css.banner, css.bannerWarn)}>
+                {tagAmbiguousAliases.map((amb) => (
+                  <div key={amb.normalizedAlias}>
+                    Shared alias <code>{amb.normalizedAlias}</code> maps to multiple tags:{' '}
+                    {amb.matchingTags.map((m) => `${m.name} (#${m.id})`).join(', ')}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
-        ) : null}
-      </section>
+        </section>
+
+        {/* Results Section */}
+        <section className={css.stackMd}>
+          <div className={css.rowBetween}>
+            <h3 className={css.resultsTitle}>
+              {t('resultsHeading')}{' '}
+              <code data-testid="search-results-summary" className={css.muted}>
+                ({items.length} / {totalMatching} · {searchElapsedMs} ms)
+              </code>
+            </h3>
+          </div>
+
+          {items.length > 0 && (
+            <BatchTagBar
+              t={t}
+              mediaLibrary={mediaLibrary}
+              selectedItems={items.filter((item) => selectedMediaIds.has(item.mediaId))}
+              onClearSelection={() => setSelectedMediaIds(new Set())}
+              onApplied={handleTagsChanged}
+            />
+          )}
+
+          {items.length === 0 && !searching ? (
+            <div data-testid="empty-results-state" className={css.emptyBox}>
+              {overview && overview.counts.mediaFiles === 0
+                ? t('emptyLibraryState')
+                : t('emptySearchState')}
+            </div>
+          ) : (
+            <div className={css.tableWrap}>
+              <table data-testid="media-results-table" className={css.table}>
+                <thead>
+                  <tr className={css.tableHeadRow}>
+                    <th className={css.thCheck}>
+                      <input
+                        type="checkbox"
+                        aria-label="Select all visible rows"
+                        data-testid="select-all-media-checkbox"
+                        checked={items.length > 0 && items.every((item) => selectedMediaIds.has(item.mediaId))}
+                        onChange={(ev) => {
+                          if (ev.target.checked) {
+                            setSelectedMediaIds(new Set(items.map((item) => item.mediaId)));
+                          } else {
+                            setSelectedMediaIds(new Set());
+                          }
+                        }}
+                      />
+                    </th>
+                    <th className={cx(css.th, css.thNowrap)}>{t('colCatalogDate')}</th>
+                    <th className={css.th}>{t('colFileAndTitle')}</th>
+                    <th className={css.th}>{t('colTags')}</th>
+                    <th className={cx(css.th, css.thNowrap)}>{t('colStatus')}</th>
+                    <th className={cx(css.th, css.thNowrap)}>{t('colActions')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item) => {
+                    const isOpening = pendingMediaId === `open:${item.mediaId}`;
+                    const isRevealing = pendingMediaId === `reveal:${item.mediaId}`;
+                    return (
+                      <tr
+                        key={item.mediaId}
+                        tabIndex={0}
+                        data-testid={`media-row-${item.mediaId}`}
+                        onClick={(ev) => {
+                          const target = ev.target as HTMLElement | null;
+                          if (target?.closest('button, input, a, select, textarea')) return;
+                          if (window.getSelection()?.toString()) return;
+                          toggleMediaSelected(item.mediaId);
+                        }}
+                        onContextMenu={(ev) => handleRowContextMenu(ev, item)}
+                        onKeyDown={(ev) => handleRowKeyDown(ev, item)}
+                        className={cx(
+                          css.tableRow,
+                          selectedMediaIds.has(item.mediaId) && css.tableRowSelected,
+                        )}
+                      >
+                        <td className={css.tdCheck}>
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${item.filename}`}
+                            data-testid={`select-media-checkbox-${item.mediaId}`}
+                            checked={selectedMediaIds.has(item.mediaId)}
+                            onChange={() => toggleMediaSelected(item.mediaId)}
+                            onClick={(ev) => ev.stopPropagation()}
+                          />
+                        </td>
+                        <td className={cx(css.td, css.tdNowrap)}>
+                          <div>
+                            <strong>{item.catalogNumber ? <code>{item.catalogNumber}</code> : '—'}</strong>
+                          </div>
+                          <div className={css.mutedSm}>{item.mediaDate ?? '—'}</div>
+                        </td>
+                        <td className={css.td}>
+                          <div>
+                            <strong>
+                              {item.title ? `${item.title} (${item.filename})` : item.filename}
+                            </strong>
+                          </div>
+                          <code className={css.pathCode}>{item.relativePath}</code>
+                        </td>
+                        <td className={css.td}>
+                          <div className={css.rowTight}>
+                            {item.tags.map((tag) => (
+                              <button
+                                key={tag.id}
+                                type="button"
+                                onClick={() => toggleTagSelection({ id: tag.id, name: tag.name })}
+                                className={css.pillChip}
+                              >
+                                {tag.name}
+                              </button>
+                            ))}
+                          </div>
+                        </td>
+                        <td className={cx(css.td, css.tdNowrap)}>{renderStatusBadge(item.status)}</td>
+                        <td className={cx(css.td, css.tdNowrap)}>
+                          <div className={css.rowTight}>
+                            <button
+                              type="button"
+                              data-testid={`open-media-btn-${item.mediaId}`}
+                              disabled={isOpening || isRevealing}
+                              onClick={() => void handleAction('open', item.mediaId)}
+                              className={cx(css.btn, css.btnSm)}
+                            >
+                              {t('openBtn')}
+                            </button>
+                            <button
+                              type="button"
+                              data-testid={`reveal-media-btn-${item.mediaId}`}
+                              disabled={isOpening || isRevealing}
+                              onClick={() => void handleAction('reveal', item.mediaId)}
+                              className={cx(css.btn, css.btnSm)}
+                            >
+                              {t('revealBtn')}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Keyset Pagination Load More Button */}
+          {nextCursor ? (
+            <div className={css.loadMoreWrap}>
+              <button
+                type="button"
+                data-testid="load-more-btn"
+                disabled={loadingMore || searching}
+                onClick={() => void executeSearch({ cursor: nextCursor, append: true })}
+                className={css.btn}
+              >
+                {loadingMore ? t('loadingMoreBtn') : t('loadMoreBtn')}
+              </button>
+            </div>
+          ) : null}
+        </section>
+      </div>
 
       {/* Floating Right-Click Context Menu */}
       {contextMenu ? (
@@ -1621,38 +1224,12 @@ export function MediaLibraryPanel({
           data-testid="media-row-context-menu"
           onClick={(ev) => ev.stopPropagation()}
           style={{
-            position: 'fixed',
             top: `${contextMenu.y}px`,
             left: `${contextMenu.x}px`,
-            zIndex: 9999,
-            width: '260px',
-            maxWidth: 'calc(100vw - 16px)',
-            maxHeight: 'calc(100vh - 16px)',
-            overflowY: 'auto',
-            boxSizing: 'border-box',
-            padding: '6px',
-            borderRadius: '8px',
-            border: '1px solid rgba(128,128,128,0.4)',
-            background: '#1e1e22',
-            color: '#f4f4f6',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '4px',
-            fontSize: '12px',
           }}
+          className={css.contextMenu}
         >
-          <div
-            style={{
-              padding: '4px 8px',
-              opacity: 0.7,
-              fontSize: '11px',
-              borderBottom: '1px solid rgba(128,128,128,0.25)',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
+          <div className={css.contextMenuHeader}>
             {contextMenu.filename} (#{contextMenu.mediaId})
           </div>
           <button
@@ -1660,16 +1237,7 @@ export function MediaLibraryPanel({
             role="menuitem"
             data-testid="context-menu-open-btn"
             onClick={() => void handleAction('open', contextMenu.mediaId)}
-            style={{
-              padding: '6px 8px',
-              borderRadius: '5px',
-              border: 'none',
-              background: 'transparent',
-              color: 'inherit',
-              textAlign: 'left',
-              cursor: 'pointer',
-              fontSize: '12px',
-            }}
+            className={css.contextMenuItem}
           >
             {t('contextMenuOpen')}
           </button>
@@ -1678,16 +1246,7 @@ export function MediaLibraryPanel({
             role="menuitem"
             data-testid="context-menu-reveal-btn"
             onClick={() => void handleAction('reveal', contextMenu.mediaId)}
-            style={{
-              padding: '6px 8px',
-              borderRadius: '5px',
-              border: 'none',
-              background: 'transparent',
-              color: 'inherit',
-              textAlign: 'left',
-              cursor: 'pointer',
-              fontSize: '12px',
-            }}
+            className={css.contextMenuItem}
           >
             {t('contextMenuReveal')}
           </button>
