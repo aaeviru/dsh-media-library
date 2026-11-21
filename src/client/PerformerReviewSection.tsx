@@ -439,6 +439,7 @@ export function PerformerDrawer({
   onChanged: (msg: string) => void;
   onError: (msg: string) => void;
 }) {
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<number | null>(null);
   const aliasFrozen = (name: string) => frozenPerformerNames.some(n =>
     normalizePerformerName(n) === normalizePerformerName(name));
   const handleTogglePolicy = async (alias: PerformerAliasRecord) => {
@@ -525,14 +526,41 @@ export function PerformerDrawer({
                   >
                     {t('performerTogglePolicyBtn')}
                   </button>
-                  <button
-                    type="button"
-                    disabled={disabled || aliasFrozen(a.rawAlias)}
-                    onClick={() => void handleDeleteAlias(a)}
-                    className={cx(css.btn, css.btnXs)}
-                  >
-                    {t('performerDeleteRuleBtn')}
-                  </button>
+                  {confirmingDeleteId === a.id ? (
+                    <>
+                      <button
+                        type="button"
+                        data-testid={`performer-delete-confirm-${a.id}`}
+                        disabled={disabled || aliasFrozen(a.rawAlias)}
+                        onClick={() => {
+                          setConfirmingDeleteId(null);
+                          void handleDeleteAlias(a);
+                        }}
+                        className={cx(css.btn, css.btnXs, css.btnDanger)}
+                      >
+                        {t('performerDeleteConfirmBtn')}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid={`performer-delete-cancel-${a.id}`}
+                        disabled={disabled}
+                        onClick={() => setConfirmingDeleteId(null)}
+                        className={cx(css.btn, css.btnXs)}
+                      >
+                        {t('performerCancelEditBtn')}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      data-testid={`performer-delete-btn-${a.id}`}
+                      disabled={disabled || aliasFrozen(a.rawAlias)}
+                      onClick={() => setConfirmingDeleteId(a.id)}
+                      className={cx(css.btn, css.btnXs, css.btnDanger)}
+                    >
+                      {t('performerDeleteRuleBtn')}
+                    </button>
+                  )}
                 </span>
               </li>
             ))}

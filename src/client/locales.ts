@@ -182,6 +182,9 @@ export const en = {
   tagPreviewNew: 'New',
   tabLibrary: 'Library',
   batchCompactHint: 'Select one or more rows below to batch add or remove tags.',
+  tagMgmtArchiveConfirmBtn: 'Confirm Archive',
+  tagMgmtArchiveCancelBtn: 'Cancel',
+  performerDeleteConfirmBtn: 'Confirm Delete',
 } as const;
 
 export type MediaLibraryKey = keyof typeof en;
@@ -368,6 +371,9 @@ export const zh: Record<keyof typeof en, string> = {
   tagPreviewNew: '新建',
   tabLibrary: '媒体库',
   batchCompactHint: '勾选下方任意行即可展开批量打标与移除操作。',
+  tagMgmtArchiveConfirmBtn: '确认归档',
+  tagMgmtArchiveCancelBtn: '取消',
+  performerDeleteConfirmBtn: '确认删除',
 };
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

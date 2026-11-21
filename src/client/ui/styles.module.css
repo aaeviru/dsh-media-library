@@ -291,6 +291,20 @@
   border-color: var(--dsw-alias-state-warn-primary);
 }
 
+.btnDanger {
+  border-color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  font-weight: 600;
+}
+
+@media (hover: hover) {
+  .btnDanger:hover:not(:disabled) {
+    background: var(--dsw-alias-interactive-bg-hover-danger);
+    border-color: var(--dsw-alias-state-error-primary);
+  }
+}
+
 .inlineLinkBtn {
   border: none;
   background: transparent;
@@ -521,6 +535,21 @@
   white-space: nowrap;
 }
 
+.tdCatalog {
+  width: 150px;
+  white-space: nowrap;
+}
+
+.tdTags {
+  min-width: 180px;
+  max-width: 320px;
+}
+
+.tdActions {
+  width: 150px;
+  white-space: nowrap;
+}
+
 .muted {
   color: var(--dsw-alias-label-secondary);
 }
@@ -584,6 +613,12 @@
 
 .dropdownItemSelected {
   background: var(--dsw-alias-state-business-tertiary);
+}
+
+.dropdownItemActive {
+  background: var(--dsw-alias-interactive-bg-active);
+  outline: 1px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -1px;
 }
 
 .dropdownCreateItem {

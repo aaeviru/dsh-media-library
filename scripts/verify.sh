@@ -27,12 +27,7 @@ node --input-type=module -e '
         violations.push(`${file}:${idx + 1} hardcoded color: ${line.trim()}`);
       }
       if (file.endsWith(".tsx") && /<select\b/.test(line) && !/^\s*(?:\/\*|\*|\/\/|\{\/\*)/.test(line)) {
-        const isLegacyMergeSelect =
-          file.endsWith("TagManagementPanel.tsx") &&
-          lines[idx + 1]?.includes("tagmgmt-merge-source-select");
-        if (!isLegacyMergeSelect) {
-          violations.push(`${file}:${idx + 1} forbidden native <select> (Issue #28 / #42 B6): ${line.trim()}`);
-        }
+        violations.push(`${file}:${idx + 1} forbidden native <select> (Issue #28 / #47 B3): ${line.trim()}`);
       }
     });
   }
