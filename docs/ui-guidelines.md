@@ -10,7 +10,7 @@ This plugin runs inside DSH Web / Desktop. Follow DSH's styling ownership (`deep
 - **Inline styles**: Reserve React `style={{ ... }}` strictly for dynamic runtime geometry (e.g., floating context-menu `top`/`left` coordinates).
 
 ## 2. Interaction & Navigation Invariants
-- **No native `<select>` for tag or performer picking (Issue #28)**: Use searchable, clickable candidate controls. Any temporary legacy `<select>` must be explicitly tracked and removed in Stage 2.
+- **No native `<select>` for tag or performer picking (Issue #28 / #47)**: Always use `src/client/ui/TagPicker.tsx` (searchable, clickable, keyboard-accessible combobox). `scripts/verify.sh` enforces 0 `<select>` tags across `src/client/*.tsx`.
 - **Preserve editing state across tab switches (Issue #42)**: Top-level views (`Media Library`, `Pending Ingestion`, `Tag Management`, `Backup & Ops`, `Diagnostics`) switch mutually exclusively via lazy-mount + CSS visibility (`hiddenTab`), never dropping unsaved drafts, filters, or row selections.
 - **Keep `data-testid` stable**: Existing `data-testid` attributes verified by `scripts/verify-web.sh` and `scripts/verify-ingestion-web.mjs` are behavioral contracts. Never rename or drop them without an explicit Contract update.
 - **Localization**: Every user-visible string belongs in `src/client/locales.ts` (both `en` and `zh`).

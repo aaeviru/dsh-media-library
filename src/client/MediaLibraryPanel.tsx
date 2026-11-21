@@ -292,9 +292,8 @@ export function MediaLibraryPanel({
     });
   }, []);
 
-  const handleTagsChanged = useCallback(() => {
-    void loadTags(tagSearchInput);
-    void executeSearch();
+  const handleTagsChanged = useCallback(async () => {
+    await Promise.all([loadTags(tagSearchInput), executeSearch()]);
   }, [loadTags, tagSearchInput, executeSearch]);
 
   useLayoutEffect(() => {
@@ -1140,7 +1139,7 @@ export function MediaLibraryPanel({
                             onClick={(ev) => ev.stopPropagation()}
                           />
                         </td>
-                        <td className={cx(css.td, css.tdNowrap)}>
+                        <td className={cx(css.td, css.tdCatalog)}>
                           <div>
                             <strong>{item.catalogNumber ? <code>{item.catalogNumber}</code> : '—'}</strong>
                           </div>
@@ -1154,7 +1153,7 @@ export function MediaLibraryPanel({
                           </div>
                           <code className={css.pathCode}>{item.relativePath}</code>
                         </td>
-                        <td className={css.td}>
+                        <td className={cx(css.td, css.tdTags)}>
                           <div className={css.rowTight}>
                             {item.tags.map((tag) => (
                               <button
@@ -1169,7 +1168,7 @@ export function MediaLibraryPanel({
                           </div>
                         </td>
                         <td className={cx(css.td, css.tdNowrap)}>{renderStatusBadge(item.status)}</td>
-                        <td className={cx(css.td, css.tdNowrap)}>
+                        <td className={cx(css.td, css.tdActions)}>
                           <div className={css.rowTight}>
                             <button
                               type="button"

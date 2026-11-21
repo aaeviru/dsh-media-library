@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   MergePreviewSuccess,
   MutationError,
@@ -7,6 +7,7 @@ import type {
 } from '../types.ts';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
+import { TagPicker } from './ui/TagPicker.tsx';
 import { cx } from './ui/primitives.ts';
 import css from './ui/styles.module.css';
 
@@ -37,7 +38,7 @@ export function TagManagementPanel({
 }: {
   t: Translate;
   mediaLibrary: MediaLibraryNamespace;
-  onChanged: () => void;
+  onChanged: () => Promise<void> | void;
 }) {
   const [query, setQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
@@ -52,7 +53,9 @@ export function TagManagementPanel({
   const [renameValue, setRenameValue] = useState('');
   const [aliasValue, setAliasValue] = useState('');
   const [mergeSourceId, setMergeSourceId] = useState<number | null>(null);
+  const [mergeQuery, setMergeQuery] = useState('');
   const [preview, setPreview] = useState<MergePreviewSuccess | null>(null);
+  const [confirmingArchive, setConfirmingArchive] = useState(false);
 
   const selected = tags.find((tag) => tag.id === selectedId) ?? null;
 
@@ -84,6 +87,8 @@ export function TagManagementPanel({
     setAliasValue('');
     setPreview(null);
     setMergeSourceId(null);
+    setMergeQuery('');
+    setConfirmingArchive(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
@@ -110,7 +115,7 @@ export function TagManagementPanel({
         if (value.ok) {
           setMessage(successMessage);
           after?.(value as unknown as Record<string, unknown>);
-          onChanged();
+          await Promise.resolve(onChanged());
         } else {
           setError(describeMutationError(t, value));
         }
@@ -161,6 +166,7 @@ export function TagManagementPanel({
 
   const handleArchive = () => {
     if (!selected) return;
+    setConfirmingArchive(false);
     return run(
       () => mediaLibrary.archiveTag({ tagId: selected.id, expectedRevision: selected.revision }),
       t('tagMgmtSaved'),
@@ -207,11 +213,26 @@ export function TagManagementPanel({
       () => {
         setPreview(null);
         setMergeSourceId(null);
+        setMergeQuery('');
       },
     );
   };
 
-  const mergeCandidates = tags.filter((tag) => !tag.archived && tag.id !== selectedId);
+  const mergeCandidates = useMemo(() => {
+    const active = tags.filter((tag) => !tag.archived && tag.id !== selectedId);
+    const trimmed = mergeQuery.trim().toLowerCase();
+    if (!trimmed) return active;
+    const selectedSource = active.find((tag) => tag.id === mergeSourceId);
+    if (selectedSource && trimmed === selectedSource.name.toLowerCase()) {
+      return active;
+    }
+    return active.filter(
+      (tag) =>
+        tag.name.toLowerCase().includes(trimmed) ||
+        String(tag.id) === trimmed.replace(/^#/, '') ||
+        tag.aliases.some((alias) => alias.toLowerCase().includes(trimmed)),
+    );
+  }, [tags, selectedId, mergeQuery, mergeSourceId]);
 
   return (
     <section data-testid="tag-management-panel" className={css.panel}>
@@ -351,13 +372,34 @@ export function TagManagementPanel({
               >
                 {t('tagMgmtRestoreBtn')}
               </button>
+            ) : confirmingArchive ? (
+              <span className={css.rowTight}>
+                <button
+                  type="button"
+                  data-testid="tagmgmt-archive-confirm-btn"
+                  disabled={busy}
+                  onClick={() => void handleArchive()}
+                  className={cx(css.btn, css.btnDanger)}
+                >
+                  {t('tagMgmtArchiveConfirmBtn')}
+                </button>
+                <button
+                  type="button"
+                  data-testid="tagmgmt-archive-cancel-btn"
+                  disabled={busy}
+                  onClick={() => setConfirmingArchive(false)}
+                  className={css.btn}
+                >
+                  {t('tagMgmtArchiveCancelBtn')}
+                </button>
+              </span>
             ) : (
               <button
                 type="button"
                 data-testid="tagmgmt-archive-btn"
                 disabled={busy}
-                onClick={() => void handleArchive()}
-                className={css.btn}
+                onClick={() => setConfirmingArchive(true)}
+                className={cx(css.btn, css.btnDanger)}
               >
                 {t('tagMgmtArchiveBtn')}
               </button>
@@ -417,24 +459,30 @@ export function TagManagementPanel({
             <div className={css.stack}>
               <strong>{t('tagMgmtMergeHeading')}</strong>
               <div className={css.row}>
-                {/* Legacy merge source <select> scheduled for TagPicker replacement in Stage 2 (Issue #42 B6) */}
-                <select
-                  data-testid="tagmgmt-merge-source-select"
-                  aria-label={t('tagMgmtMergeSourceLabel')}
-                  value={mergeSourceId ?? ''}
-                  onChange={(e) => {
-                    setMergeSourceId(e.target.value ? Number(e.target.value) : null);
+                <TagPicker
+                  query={mergeQuery}
+                  onQueryChange={(next) => {
+                    setMergeQuery(next);
+                    if (!next.trim()) {
+                      setMergeSourceId(null);
+                      setPreview(null);
+                    }
+                  }}
+                  candidates={mergeCandidates}
+                  selectedTagId={mergeSourceId}
+                  onSelectTag={(tag) => {
+                    setMergeSourceId(tag.id);
+                    setMergeQuery(tag.name);
                     setPreview(null);
                   }}
-                  className={cx(css.control, css.controlFlex)}
-                >
-                  <option value="">{t('tagMgmtMergePickSource')}</option>
-                  {mergeCandidates.map((tag) => (
-                    <option key={tag.id} value={tag.id}>
-                      {tag.name} (#{tag.id})
-                    </option>
-                  ))}
-                </select>
+                  placeholder={t('tagMgmtMergePickSource')}
+                  noMatchText={t('batchNoMatch')}
+                  disabled={busy}
+                  ariaLabel={t('tagMgmtMergeSourceLabel')}
+                  inputTestId="tagmgmt-merge-source-select"
+                  dropdownTestId="tagmgmt-merge-source-dropdown"
+                  optionTestIdPrefix="tagmgmt-merge-source-option-"
+                />
                 <button
                   type="button"
                   data-testid="tagmgmt-merge-preview-btn"
@@ -475,7 +523,7 @@ export function TagManagementPanel({
                       data-testid="tagmgmt-merge-confirm-btn"
                       disabled={busy || preview.wouldCreateCycle}
                       onClick={() => void handleMergeConfirm()}
-                      className={cx(css.btn, css.btnPrimary)}
+                      className={cx(css.btn, css.btnDanger)}
                     >
                       {t('tagMgmtMergeConfirmBtn')}
                     </button>

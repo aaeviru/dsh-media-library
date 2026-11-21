@@ -402,6 +402,8 @@ try {
   assert.equal(await page.locator("[data-testid=\"tagmgmt-selected-name\"]").innerText(), "M3_Target_A");
 
   await page.click("[data-testid=\"tagmgmt-archive-btn\"]");
+  await page.waitForSelector("[data-testid=\"tagmgmt-archive-confirm-btn\"]");
+  await page.click("[data-testid=\"tagmgmt-archive-confirm-btn\"]");
   await page.locator("[data-testid=\"tagmgmt-busy\"]").waitFor({ state: "detached" });
   await page.waitForSelector("[data-testid=\"tagmgmt-message\"]");
   await page.check("[data-testid=\"tagmgmt-show-archived\"]");
@@ -441,20 +443,35 @@ try {
   await page.waitForSelector("[data-testid=\"batch-tag-dropdown\"]");
   const dropdownBg = await page.locator("[data-testid=\"batch-tag-dropdown\"]").evaluate(el => getComputedStyle(el).backgroundColor);
   assert.notEqual(dropdownBg, "rgb(30, 30, 34)", `BatchTagBar dropdown must use DSH tokens instead of hardcoded #1e1e22, got: ${dropdownBg}`);
-  await page.locator("button[data-testid^=\"batch-tag-option-\"]", { hasText: "M3_Source_B" }).first().click();
+  // Issue #47 B2: select option via keyboard (Enter on highlighted candidate)
+  await page.keyboard.press("Enter");
   await page.waitForSelector("[data-testid=\"batch-result-banner\"]");
 
-  // Verify no-exact-match shows "Create & add" as first dropdown option, then one-click remove via assigned chip
-  await firstTwoCheckboxes.nth(0).check();
+  // Issue #47 B1: selection MUST stay at 2 selected rows without re-checking!
+  assert.ok(
+    (await page.locator("[data-testid=\"batch-selected-count\"]").innerText()).startsWith("2 "),
+    "Expected batch selection (2 rows) to persist after adding a tag",
+  );
+
+  // Consecutive batch action #2 (without re-checking): inline "Create & add" when no exact match
   await page.click("[data-testid=\"batch-tag-input\"]");
   await page.fill("[data-testid=\"batch-tag-input\"]", "M3_Inline_New");
   const firstOptionTestId = await page.locator("[data-testid=\"batch-tag-dropdown\"] button").first().getAttribute("data-testid");
   assert.equal(firstOptionTestId, "batch-create-tag-option", "Expected Create & add as first option when no exact match");
   await page.click("[data-testid=\"batch-create-tag-option\"]");
   await page.waitForSelector("[data-testid=\"batch-result-banner\"]");
-  await firstTwoCheckboxes.nth(0).check();
+  assert.ok(
+    (await page.locator("[data-testid=\"batch-selected-count\"]").innerText()).startsWith("2 "),
+    "Expected batch selection (2 rows) to persist after inline Create & add",
+  );
+
+  // Consecutive batch action #3 (without re-checking): one-click remove via assigned chip
   await page.locator("button[data-testid^=\"batch-assigned-tag-\"]", { hasText: "M3_Inline_New" }).first().click();
   await page.waitForSelector("[data-testid=\"batch-result-banner\"]");
+  assert.ok(
+    (await page.locator("[data-testid=\"batch-selected-count\"]").innerText()).startsWith("2 "),
+    "Expected batch selection (2 rows) to persist after removing an assigned tag",
+  );
 
   // Switch back to Tag Management tab and confirm the unsaved draft survived (Issue #42 B5)
   await page.click("[data-testid=\"toggle-tag-mgmt-btn\"]");
@@ -465,7 +482,7 @@ try {
   );
   await page.fill("[data-testid=\"tagmgmt-create-input\"]", "");
 
-  // Merge M3_Source_B into M3_Target_A via preview + confirm
+  // Merge M3_Source_B into M3_Target_A via searchable TagPicker (Issue #47 B3, zero native <select>) + preview + confirm
   await page.fill("[data-testid=\"tagmgmt-filter-input\"]", "M3_");
   await page.waitForFunction(() => {
     const opts = Array.from(document.querySelectorAll("[data-testid=\"tagmgmt-row-\"]"));
@@ -473,12 +490,10 @@ try {
   });
   await page.waitForTimeout(300);
   await page.locator("button[data-testid^=\"tagmgmt-row-\"]", { hasText: "M3_Target_A" }).first().click();
-  const mergeOptVal = await page.locator("[data-testid=\"tagmgmt-merge-source-select\"] option").evaluateAll(opts => {
-    const match = opts.find(o => o.textContent?.includes("M3_Source_B"));
-    return match ? match.value : "";
-  });
-  assert.ok(mergeOptVal, "Expected M3_Source_B in merge source select");
-  await page.selectOption("[data-testid=\"tagmgmt-merge-source-select\"]", mergeOptVal);
+  await page.click("[data-testid=\"tagmgmt-merge-source-select\"]");
+  await page.fill("[data-testid=\"tagmgmt-merge-source-select\"]", "M3_Source_B");
+  await page.waitForSelector("[data-testid=\"tagmgmt-merge-source-dropdown\"]");
+  await page.keyboard.press("Enter");
   await page.click("[data-testid=\"tagmgmt-merge-preview-btn\"]");
   await page.waitForSelector("[data-testid=\"tagmgmt-merge-preview\"]");
   assert.equal(await page.locator("[data-testid=\"preview-affected\"]").innerText(), "2");

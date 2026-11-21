@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { MediaSearchItem, TagSummary } from '../types.ts';
 import { describeMutationError } from './TagManagementPanel.tsx';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
+import { TagPicker } from './ui/TagPicker.tsx';
 import { cx } from './ui/primitives.ts';
 import css from './ui/styles.module.css';
 
@@ -16,8 +17,9 @@ function normalizeKey(value: string): string {
 
 /**
  * Batch add/remove of tags on the rows selected in search results (`B3`/`B7`).
- * Collapses to a compact hint when no rows are selected (Issue #42 B4), and expands
- * with a DSH-themed combobox, quick-add tags, one-click removal, and inline "Create & add".
+ * Keeps row selection after applying or removing tags (Issue #47 B1) and awaits
+ * `onApplied()` before releasing `busy` so consecutive batch actions always carry
+ * fresh optimistic-concurrency `revision` values.
  */
 export function BatchTagBar({
   t,
@@ -30,17 +32,15 @@ export function BatchTagBar({
   mediaLibrary: MediaLibraryNamespace;
   selectedItems: readonly MediaSearchItem[];
   onClearSelection: () => void;
-  onApplied: () => void;
+  onApplied: () => Promise<void> | void;
 }) {
   const [query, setQuery] = useState('');
   const [candidates, setCandidates] = useState<readonly TagSummary[]>([]);
   const [quickTags, setQuickTags] = useState<readonly TagSummary[]>([]);
   const [tagId, setTagId] = useState<number | null>(null);
-  const [dropdownOpen, setDropdownOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const comboboxRef = useRef<HTMLDivElement>(null);
 
   const loadCandidates = useCallback(async () => {
     try {
@@ -73,17 +73,6 @@ export function BatchTagBar({
   useEffect(() => {
     void loadQuickTags();
   }, [loadQuickTags]);
-
-  useEffect(() => {
-    if (!dropdownOpen) return;
-    const handleOutsideClick = (ev: MouseEvent) => {
-      if (comboboxRef.current && !comboboxRef.current.contains(ev.target as Node)) {
-        setDropdownOpen(false);
-      }
-    };
-    window.addEventListener('mousedown', handleOutsideClick);
-    return () => window.removeEventListener('mousedown', handleOutsideClick);
-  }, [dropdownOpen]);
 
   const count = selectedItems.length;
   const tooMany = count > MAX_BATCH_MEDIA;
@@ -131,11 +120,8 @@ export function BatchTagBar({
         setMessage(
           `${t('batchDone')}: +${res.value.added} / −${res.value.removed} / =${res.value.unchanged}`,
         );
-        setDropdownOpen(false);
-        onClearSelection();
-        onApplied();
-        void loadQuickTags();
-        void loadCandidates();
+        // Issue #47 B1: preserve selected rows and await fresh revisions before unlocking busy.
+        await Promise.all([Promise.resolve(onApplied()), loadQuickTags(), loadCandidates()]);
       } else {
         const failure = res.value;
         const detail = failure.failures
@@ -169,7 +155,6 @@ export function BatchTagBar({
       const newTagId = created.value.tagId;
       setQuery('');
       setTagId(newTagId);
-      setDropdownOpen(false);
       if (count > 0 && !tooMany) {
         const res = await mediaLibrary.setMediaTags({
           mediaIds: selectedItems.map((item) => item.mediaId),
@@ -182,16 +167,13 @@ export function BatchTagBar({
           setMessage(
             `${t('batchDone')}: +${res.value.added} / −${res.value.removed} / =${res.value.unchanged}`,
           );
-          onClearSelection();
-          onApplied();
+          await Promise.all([Promise.resolve(onApplied()), loadQuickTags(), loadCandidates()]);
         } else {
           setError(describeMutationError(t, res.value));
         }
       } else {
-        onApplied();
+        await Promise.all([Promise.resolve(onApplied()), loadQuickTags(), loadCandidates()]);
       }
-      void loadQuickTags();
-      void loadCandidates();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -229,90 +211,29 @@ export function BatchTagBar({
           {count} {t('batchSelectedCount')}
         </strong>
 
-        <div ref={comboboxRef} className={css.comboboxWrap}>
-          <input
-            type="text"
-            role="combobox"
-            aria-expanded={dropdownOpen}
-            aria-autocomplete="list"
-            data-testid="batch-tag-input"
-            value={query}
-            onFocus={() => setDropdownOpen(true)}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setDropdownOpen(true);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') {
-                setDropdownOpen(false);
-              } else if (e.key === 'Enter' && dropdownOpen) {
-                e.preventDefault();
-                if (trimmedQuery && !hasExactMatch) {
-                  void handleCreateAndAdd();
-                } else if (candidates.length > 0 && canApply) {
-                  void applyTagId('add', candidates[0]!.id);
-                }
-              }
-            }}
-            placeholder={t('batchTagPlaceholder')}
-            className={cx(css.control, css.controlFull)}
-          />
-          {dropdownOpen ? (
-            <div role="listbox" data-testid="batch-tag-dropdown" className={css.dropdownMenu}>
-              {trimmedQuery && !hasExactMatch ? (
-                <button
-                  type="button"
-                  role="option"
-                  data-testid="batch-create-tag-option"
-                  disabled={busy}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => void handleCreateAndAdd()}
-                  className={css.dropdownCreateItem}
-                >
-                  + {t('batchCreateAndAdd')} “{trimmedQuery}”
-                </button>
-              ) : null}
-
-              {candidates.length === 0 && !trimmedQuery ? (
-                <div className={css.mutedSm}>{t('batchNoMatch')}</div>
-              ) : candidates.length === 0 && hasExactMatch ? (
-                <div className={css.mutedSm}>{t('batchNoMatch')}</div>
-              ) : (
-                candidates.map((tag) => {
-                  const isSelected = tag.id === tagId;
-                  return (
-                    <button
-                      key={tag.id}
-                      type="button"
-                      role="option"
-                      aria-selected={isSelected}
-                      data-testid={`batch-tag-option-${tag.id}`}
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => {
-                        setTagId(tag.id);
-                        setQuery(tag.name);
-                        if (canApply) {
-                          void applyTagId('add', tag.id);
-                        } else {
-                          setDropdownOpen(false);
-                        }
-                      }}
-                      className={cx(css.dropdownItem, isSelected && css.dropdownItemSelected)}
-                    >
-                      <span>
-                        {tag.name}
-                        {tag.aliases.length > 0 ? (
-                          <span className={css.mutedSm}> ({tag.aliases.join(', ')})</span>
-                        ) : null}
-                      </span>
-                      <span className={cx(css.mutedSm, css.tdNowrap)}>[{tag.mediaCount}]</span>
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          ) : null}
-        </div>
+        <TagPicker
+          query={query}
+          onQueryChange={setQuery}
+          candidates={candidates}
+          selectedTagId={tagId}
+          onSelectTag={(tag) => {
+            setTagId(tag.id);
+            setQuery(tag.name);
+            if (canApply) {
+              void applyTagId('add', tag.id);
+            }
+          }}
+          showCreateOption={Boolean(trimmedQuery && !hasExactMatch)}
+          createOptionText={`+ ${t('batchCreateAndAdd')} “${trimmedQuery}”`}
+          onCreateTag={() => void handleCreateAndAdd()}
+          placeholder={t('batchTagPlaceholder')}
+          noMatchText={t('batchNoMatch')}
+          disabled={busy}
+          inputTestId="batch-tag-input"
+          dropdownTestId="batch-tag-dropdown"
+          optionTestIdPrefix="batch-tag-option-"
+          createOptionTestId="batch-create-tag-option"
+        />
 
         <button
           type="button"
