@@ -522,7 +522,7 @@ export class MediaLibrarySpikeService {
         const mig = await migrateDatabase(db, {
           dbPath,
           backupDir: this.backupDir,
-          appVersion: '0.7.4',
+          appVersion: '0.7.6',
           now: this.now,
         });
         if (!mig.health.ok) {
@@ -849,7 +849,7 @@ export class MediaLibrarySpikeService {
       return await this.withInitializedDatabase((db) =>
         exportPortableMappingReport(db, {
           format: input.format,
-          appVersion: '0.7.4',
+          appVersion: '0.7.6',
           now: this.now,
         }),
       );
@@ -914,6 +914,8 @@ export class MediaLibrarySpikeService {
         targetSubdir,
         roots,
         timeoutMs: this.probeTimeoutMs,
+        fileOps: this.ingestionFileOps,
+        now: this.now,
       });
     } finally {
       db.close();

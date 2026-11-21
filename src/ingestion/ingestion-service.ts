@@ -69,17 +69,40 @@ export const defaultIngestionFileOps: IngestionFileOps = {
   removeFile: p => fsp.rm(p, { force: true }),
 };
 
+function deduplicateManifestTags(tags: readonly IngestionManifestTag[]): IngestionManifestTag[] {
+  const seenTagIds = new Set<number>();
+  const seenNames = new Set<string>();
+  const result: IngestionManifestTag[] = [];
+  for (const tag of tags) {
+    const trimmed = tag.name.trim();
+    const norm = normalizeLabel(trimmed);
+    if (!norm) continue;
+    if (tag.tagId !== undefined) {
+      if (seenTagIds.has(tag.tagId) || seenNames.has(norm)) continue;
+      seenTagIds.add(tag.tagId);
+      seenNames.add(norm);
+      result.push({ tagId: tag.tagId, name: trimmed });
+    } else {
+      if (seenNames.has(norm)) continue;
+      seenNames.add(norm);
+      result.push({ name: trimmed });
+    }
+  }
+  return result;
+}
+
 function mapManifestRow(row: Record<string, unknown>): IngestionManifest {
   let tags: IngestionManifestTag[] = [];
   try {
     const parsed = JSON.parse(String(row.tags_json ?? '[]'));
     if (Array.isArray(parsed)) {
-      tags = parsed
+      const rawTags = parsed
         .filter((t): t is Record<string, unknown> => Boolean(t && typeof t === 'object' && typeof (t as { name?: unknown }).name === 'string'))
         .map((t) => ({
           tagId: typeof t.tagId === 'number' ? Number(t.tagId) : undefined,
           name: String(t.name),
         }));
+      tags = deduplicateManifestTags(rawTags);
     }
   } catch {
     tags = [];
@@ -311,11 +334,15 @@ export async function scanStagingDirectory(
     readonly targetSubdir: string;
     readonly roots: readonly MediaRootConfig[];
     readonly timeoutMs?: number | undefined;
+    readonly fileOps?: IngestionFileOps | undefined;
+    readonly now?: (() => Date) | undefined;
   },
 ): Promise<ScanStagingResult> {
   const started = Date.now();
+  const fileOps = options.fileOps ?? defaultIngestionFileOps;
+  const nowIso = (options.now ?? (() => new Date()))().toISOString();
   const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
-  const manifests = listIngestionManifests(db);
+  const initialManifests = listIngestionManifests(db);
   const preview = await previewStagingPlan(options);
 
   if (!preview.ok) {
@@ -326,25 +353,113 @@ export async function scanStagingDirectory(
       targetSubdir: cleanSubdir,
       elapsedMs: Date.now() - started,
       files: [],
-      manifests,
+      manifests: initialManifests,
       error: preview.error,
     };
   }
 
-  const byTempPath = new Map<string, IngestionManifest>();
-  for (const m of manifests) {
-    byTempPath.set(m.tempPath.toLowerCase(), m);
+  const frozenIds = new Set(listFrozenIngestionManifests(db).map((m) => m.id));
+  const unindexedByFilename = new Map<string, IngestionManifest>();
+  for (const m of initialManifests) {
+    if (m.state === 'indexed') continue;
+    const key = m.filename.toLowerCase();
+    if (!unindexedByFilename.has(key)) {
+      unindexedByFilename.set(key, m);
+    }
   }
 
-  const files: StagingFileItem[] = preview.files.map((f) => {
-    const existing = byTempPath.get(f.tempPath.toLowerCase());
-    return {
+  const matchedManifestIds = new Set<number>();
+  const files: StagingFileItem[] = [];
+
+  for (const f of preview.files) {
+    const filenameKey = f.filename.toLowerCase();
+    let existing = unindexedByFilename.get(filenameKey);
+    if (existing) {
+      matchedManifestIds.add(existing.id);
+      const nextSourceId = `staging:${f.targetRelativePath.toLowerCase()}:${f.fileSize}`;
+      const tempChanged = existing.tempPath.toLowerCase() !== f.tempPath.toLowerCase();
+      const targetChanged =
+        existing.targetRootId !== options.targetRootId ||
+        existing.targetRelativePath !== f.targetRelativePath ||
+        existing.fileSize !== f.fileSize ||
+        existing.sourceId !== nextSourceId;
+
+      if (!frozenIds.has(existing.id) && (tempChanged || targetChanged)) {
+        const nextState: IngestionState =
+          tempChanged && existing.state === 'failed'
+            ? existing.reviewDecision === 'approved'
+              ? 'reviewed'
+              : 'planned'
+            : existing.state;
+        const nextError = tempChanged && existing.state === 'failed' ? null : existing.lastError;
+        const sourceIdConflict = db
+          .prepare('SELECT id FROM ingestion_manifests WHERE source_id = ? AND id <> ? LIMIT 1')
+          .get(nextSourceId, existing.id) as { id: number } | undefined;
+        const safeSourceId = sourceIdConflict ? `${nextSourceId}#${existing.id}` : nextSourceId;
+
+        db.prepare(
+          `UPDATE ingestion_manifests
+           SET source_id = ?,
+               temp_path = ?,
+               target_root_id = ?,
+               target_relative_path = ?,
+               filename = ?,
+               file_size = ?,
+               state = ?,
+               last_error = ?,
+               updated_at = ?
+           WHERE id = ?`,
+        ).run(
+          safeSourceId,
+          f.tempPath,
+          options.targetRootId,
+          f.targetRelativePath,
+          f.filename,
+          f.fileSize,
+          nextState,
+          nextError,
+          nowIso,
+          existing.id,
+        );
+        existing = getIngestionManifestById(db, existing.id) ?? existing;
+        unindexedByFilename.set(filenameKey, existing);
+      }
+    }
+
+    files.push({
       ...f,
       manifestId: existing?.id ?? null,
       state: existing?.state ?? null,
       reviewDecision: existing?.reviewDecision ?? null,
-    };
-  });
+    });
+  }
+
+  // B2: Automatically delete stale unindexed manifests whose staged file is no longer in `stagingDir`,
+  // preserving running/frozen manifests and approved `moving`/`failed` recovery candidates whose target file already exists.
+  const scannedFilenameKeys = new Set(preview.files.map((f) => f.filename.toLowerCase()));
+  for (const m of initialManifests) {
+    if (m.state === 'indexed') continue;
+    if (matchedManifestIds.has(m.id) || scannedFilenameKeys.has(m.filename.toLowerCase())) continue;
+    if (frozenIds.has(m.id)) continue;
+
+    if (m.reviewDecision === 'approved' && (m.state === 'moving' || m.state === 'failed')) {
+      const resolution = resolveAllowlistedUncPath(options.roots, m.targetRootId, m.targetRelativePath);
+      if (resolution.ok) {
+        try {
+          if (await fileOps.exists(resolution.resolvedUncPath)) {
+            continue;
+          }
+        } catch {
+          // If destination probe fails transiently, keep the recovery candidate rather than deleting it.
+          continue;
+        }
+      }
+    }
+
+    db.prepare('DELETE FROM ingestion_manifests WHERE id = ? AND state <> ?').run(m.id, 'indexed');
+  }
+
+  const manifests = listIngestionManifests(db);
 
   return {
     ok: true,
@@ -441,11 +556,71 @@ export async function ensureManifestForStagingFile(
   const fileSize = (await fileOps.statSize(tempPath));
   const sourceId = `staging:${targetRel.toLowerCase()}:${fileSize}`;
 
-  const existing = db
+  // B1: Match existing unindexed manifest by case-insensitive filename first (or source_id / temp_path),
+  // rebinding temp_path and target fields when the file moved to a new stagingDir.
+  const existingUnindexed = db
+    .prepare(
+      `SELECT * FROM ingestion_manifests
+       WHERE state <> 'indexed'
+         AND (LOWER(filename) = LOWER(?) OR source_id = ? OR LOWER(temp_path) = LOWER(?))
+       ORDER BY CASE WHEN LOWER(filename) = LOWER(?) THEN 0 ELSE 1 END, updated_at DESC, id DESC
+       LIMIT 1`,
+    )
+    .get(filename, sourceId, tempPath, filename) as Record<string, unknown> | undefined;
+  if (existingUnindexed) {
+    const mapped = mapManifestRow(existingUnindexed);
+    const tempChanged = mapped.tempPath.toLowerCase() !== tempPath.toLowerCase();
+    const targetChanged =
+      mapped.targetRootId !== options.targetRootId ||
+      mapped.targetRelativePath !== targetRel ||
+      mapped.fileSize !== fileSize ||
+      mapped.sourceId !== sourceId;
+    if ((tempChanged || targetChanged) && !findManifestTask(db, mapped.id)) {
+      const nextState: IngestionState =
+        tempChanged && mapped.state === 'failed'
+          ? mapped.reviewDecision === 'approved'
+            ? 'reviewed'
+            : 'planned'
+          : mapped.state;
+      const nextError = tempChanged && mapped.state === 'failed' ? null : mapped.lastError;
+      const sourceIdConflict = db
+        .prepare('SELECT id FROM ingestion_manifests WHERE source_id = ? AND id <> ? LIMIT 1')
+        .get(sourceId, mapped.id) as { id: number } | undefined;
+      const safeSourceId = sourceIdConflict ? `${sourceId}#${mapped.id}` : sourceId;
+      db.prepare(
+        `UPDATE ingestion_manifests
+         SET source_id = ?,
+             temp_path = ?,
+             target_root_id = ?,
+             target_relative_path = ?,
+             filename = ?,
+             file_size = ?,
+             state = ?,
+             last_error = ?,
+             updated_at = ?
+         WHERE id = ?`,
+      ).run(
+        safeSourceId,
+        tempPath,
+        options.targetRootId,
+        targetRel,
+        filename,
+        fileSize,
+        nextState,
+        nextError,
+        now,
+        mapped.id,
+      );
+      return getIngestionManifestById(db, mapped.id)!;
+    }
+    return mapped;
+  }
+
+  const existingIndexed = db
     .prepare('SELECT * FROM ingestion_manifests WHERE source_id = ? OR LOWER(temp_path) = LOWER(?) LIMIT 1')
     .get(sourceId, tempPath) as Record<string, unknown> | undefined;
-  if (existing) {
-    return mapManifestRow(existing);
+  if (existingIndexed) {
+    return mapManifestRow(existingIndexed);
   }
 
   const ext = path.extname(filename);
@@ -531,6 +706,7 @@ export async function fetchMetadataForManifest(
   const actressNormSet = new Set(meta.actresses.map((a) => normalizePerformerName(a)).filter(Boolean));
   const mergedActresses = [...new Set([...manifest.actresses, ...meta.actresses].map((a) => a.trim()).filter(Boolean))];
   const mergedTagNames = new Map<string, { tag: IngestionManifestTag; rank: number; order: number }>();
+  const seenResolvedTagIds = new Set<number>();
   let order = 0;
   const rankForTag = (name: string): number => {
     const norm = normalizeLabel(name);
@@ -553,7 +729,22 @@ export async function fetchMetadataForManifest(
   for (const t of manifest.tags) {
     const norm = normalizeLabel(t.name);
     if (!norm) continue;
-    mergedTagNames.set(norm, { tag: t, rank: rankForTag(t.name), order: order++ });
+    const existingTag =
+      t.tagId !== undefined
+        ? (db.prepare('SELECT id, name FROM tags WHERE id = ? AND archived_at IS NULL LIMIT 1').get(t.tagId) as
+            | { id: number; name: string }
+            | undefined)
+        : resolveExistingTagByNameOrAlias(db, norm);
+    const resolved: IngestionManifestTag = existingTag
+      ? { tagId: Number(existingTag.id), name: String(existingTag.name) }
+      : t;
+    if (resolved.tagId !== undefined) {
+      if (seenResolvedTagIds.has(resolved.tagId)) continue;
+      seenResolvedTagIds.add(resolved.tagId);
+    }
+    const canonicalNorm = normalizeLabel(resolved.name);
+    if (mergedTagNames.has(canonicalNorm)) continue;
+    mergedTagNames.set(canonicalNorm, { tag: resolved, rank: rankForTag(t.name), order: order++ });
   }
   for (const name of meta.candidateTags) {
     // Route fetched performers through `performer_aliases` + `performer_review_queue` instead of auto-creating normal tags.
@@ -561,16 +752,24 @@ export async function fetchMetadataForManifest(
     const norm = normalizeLabel(name);
     if (!norm || mergedTagNames.has(norm)) continue;
     const existingTag = resolveExistingTagByNameOrAlias(db, norm);
-    const resolved = existingTag ? { tagId: existingTag.id, name: existingTag.name } : { name };
-    mergedTagNames.set(norm, {
+    if (existingTag && seenResolvedTagIds.has(existingTag.id)) continue;
+    const resolved: IngestionManifestTag = existingTag ? { tagId: existingTag.id, name: existingTag.name } : { name };
+    const canonicalNorm = normalizeLabel(resolved.name);
+    if (mergedTagNames.has(canonicalNorm)) continue;
+    if (resolved.tagId !== undefined) {
+      seenResolvedTagIds.add(resolved.tagId);
+    }
+    mergedTagNames.set(canonicalNorm, {
       tag: resolved,
       rank: existingTag ? (normalizeLabel(existingTag.name) === norm ? 0 : 1) : 2,
       order: order++,
     });
   }
-  const sortedMergedTags = [...mergedTagNames.values()]
-    .sort((a, b) => a.rank - b.rank || a.order - b.order)
-    .map((entry) => entry.tag);
+  const sortedMergedTags = deduplicateManifestTags(
+    [...mergedTagNames.values()]
+      .sort((a, b) => a.rank - b.rank || a.order - b.order)
+      .map((entry) => entry.tag),
+  );
 
   const ts = now().toISOString();
   db.prepare(
@@ -627,6 +826,7 @@ export function reviewIngestionManifest(
   }
 
   const tagMap = new Map<string, IngestionManifestTag>();
+  const seenTagIds = new Set<number>();
   for (const id of input.tagIds ?? []) {
     const row = db
       .prepare('SELECT id, name, archived_at FROM tags WHERE id = ?')
@@ -637,7 +837,10 @@ export function reviewIngestionManifest(
     if (row.archived_at !== null) {
       return { ok: false, code: 'TAG_ARCHIVED', message: `Tag #${id} (${row.name}) is archived.` };
     }
-    tagMap.set(normalizeLabel(String(row.name)), { tagId: Number(row.id), name: String(row.name) });
+    const tagId = Number(row.id);
+    if (seenTagIds.has(tagId)) continue;
+    seenTagIds.add(tagId);
+    tagMap.set(normalizeLabel(String(row.name)), { tagId, name: String(row.name) });
   }
 
   for (const rawName of input.newTagNames ?? []) {
@@ -649,11 +852,21 @@ export function reviewIngestionManifest(
       .prepare('SELECT id, name, archived_at FROM tags WHERE normalized_name = ?')
       .get(norm) as { id: number; name: string; archived_at: string | null } | undefined;
     if (existing && existing.archived_at === null) {
-      tagMap.set(norm, { tagId: Number(existing.id), name: String(existing.name) });
-    } else if (!existing) {
-      tagMap.set(norm, { name: trimmed });
-    } else {
+      const tagId = Number(existing.id);
+      if (seenTagIds.has(tagId)) continue;
+      seenTagIds.add(tagId);
+      tagMap.set(normalizeLabel(String(existing.name)), { tagId, name: String(existing.name) });
+    } else if (existing && existing.archived_at !== null) {
       return { ok: false, code: 'TAG_ARCHIVED', message: `Tag "${existing.name}" is archived.` };
+    } else {
+      const viaAlias = resolveExistingTagByNameOrAlias(db, norm);
+      if (viaAlias) {
+        if (seenTagIds.has(viaAlias.id)) continue;
+        seenTagIds.add(viaAlias.id);
+        tagMap.set(normalizeLabel(viaAlias.name), { tagId: viaAlias.id, name: viaAlias.name });
+      } else {
+        tagMap.set(norm, { name: trimmed });
+      }
     }
   }
 

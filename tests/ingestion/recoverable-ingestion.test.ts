@@ -643,4 +643,239 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('Issue #45 B1..B3: rebinds unindexed manifest by filename across stagingDir changes, cleans up stale manifests on scan while preserving frozen/recovery items, and deduplicates alias-matched tags on repeated fetches', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ingest-issue45-'));
+    try {
+      const homeStagingDir = path.join(tmpDir, 'home-temp');
+      const privateStagingDir = path.join(tmpDir, 'private-temp');
+      const targetDir = path.join(tmpDir, 'nas-root', 'FC2', '2026-09-4963189');
+      fs.mkdirSync(homeStagingDir, { recursive: true });
+      fs.mkdirSync(privateStagingDir, { recursive: true });
+      const dbPath = path.join(tmpDir, 'library.sqlite3');
+      const uncRoot = '\\\\iriyano\\Private';
+      const roots: MediaRootConfig[] = [
+        { rootId: 'nas-main', label: 'Private NAS', canonicalUncRoot: uncRoot, enabled: true },
+      ];
+      const mapPath = (p: string): string => {
+        if (p.toLowerCase().startsWith(uncRoot.toLowerCase())) {
+          const rel = p.slice(uncRoot.length).replace(/^[\\/]+/, '').replace(/\\/g, '/');
+          return rel ? path.join(tmpDir, 'nas-root', rel) : path.join(tmpDir, 'nas-root');
+        }
+        return p;
+      };
+      let simulateExdev = true;
+      const fileOps: IngestionFileOps = {
+        exists: (p) => defaultIngestionFileOps.exists(mapPath(p)),
+        statSize: (p) => defaultIngestionFileOps.statSize(mapPath(p)),
+        sha256: (p) => defaultIngestionFileOps.sha256(mapPath(p)),
+        readRange: (p, offset, length) => defaultIngestionFileOps.readRange(mapPath(p), offset, length),
+        ensureDir: (d) => defaultIngestionFileOps.ensureDir(mapPath(d)),
+        rename: async (src, dest) => {
+          if (simulateExdev) {
+            throw Object.assign(new Error('EXDEV: cross-device link'), { code: 'EXDEV' });
+          }
+          await defaultIngestionFileOps.rename(mapPath(src), mapPath(dest));
+        },
+        copyFile: (src, dest) => defaultIngestionFileOps.copyFile(mapPath(src), mapPath(dest)),
+        removeFile: (p) => defaultIngestionFileOps.removeFile(mapPath(p)),
+      };
+
+      const filename12 = 'FC2-PPV-4999261 172cm高身長Fカップ美女.mp4';
+      const oldTempFile = path.join(homeStagingDir, filename12);
+      const staleFile = path.join(homeStagingDir, 'FC2-PPV-4000001-stale.mp4');
+      const recoveryFile = path.join(homeStagingDir, 'FC2-PPV-4000002-recovered.mp4');
+      const frozenFile = path.join(homeStagingDir, 'FC2-PPV-4000003-frozen.mp4');
+      fs.writeFileSync(oldTempFile, 'video-4999261-payload');
+      fs.writeFileSync(staleFile, 'stale-payload');
+      fs.writeFileSync(recoveryFile, 'recovery-payload');
+      fs.writeFileSync(frozenFile, 'frozen-payload');
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        await migrateDatabase(db, { dbPath, appVersion: '0.7.6' });
+        const nowIso = '2026-11-21T00:00:00.000Z';
+        db.prepare(
+          `INSERT INTO media_roots (id, name, canonical_unc_root, enabled, created_at)
+           VALUES ('nas-main', 'Private NAS', ?, 1, ?)`,
+        ).run(uncRoot, nowIso);
+
+        // Seed tag #8 "无码" with alias "無修正"
+        const tagIns = db
+          .prepare(
+            `INSERT INTO tags (name, normalized_name, kind, created_at, updated_at, revision)
+             VALUES ('无码', '无码', 'custom', ?, ?, 1)`,
+          )
+          .run(nowIso, nowIso);
+        const uncensoredTagId = Number(tagIns.lastInsertRowid);
+        db.prepare(
+          `INSERT INTO tag_aliases (tag_id, alias, normalized_alias)
+           VALUES (?, '無修正', '無修正')`,
+        ).run(uncensoredTagId);
+
+        const targetSubdir = 'FC2/2026-09-4963189';
+        const m12 = await ensureManifestForStagingFile(db, {
+          tempPath: oldTempFile,
+          stagingDir: homeStagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir,
+          roots,
+          fileOps,
+        });
+        const mStale = await ensureManifestForStagingFile(db, {
+          tempPath: staleFile,
+          stagingDir: homeStagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir,
+          roots,
+          fileOps,
+        });
+        const mRecovery = await ensureManifestForStagingFile(db, {
+          tempPath: recoveryFile,
+          stagingDir: homeStagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir,
+          roots,
+          fileOps,
+        });
+        const mFrozen = await ensureManifestForStagingFile(db, {
+          tempPath: frozenFile,
+          stagingDir: homeStagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir,
+          roots,
+          fileOps,
+        });
+
+        // Add a performer review queue item on mStale to verify cascade deletion on scan cleanup
+        db.prepare(
+          `INSERT INTO performer_review_queue (
+             manifest_id, raw_name, normalized_name, reason, candidate_tag_ids_json, status, created_at, updated_at
+           ) VALUES (?, 'Stale Actress', 'stale actress', 'unknown', '[]', 'pending', ?, ?)`,
+        ).run(mStale.id, nowIso, nowIso);
+
+        const fetcher = new MetadataFetcher({
+          requestDelayMs: 0,
+          fetchImpl: async () => ({
+            status: 200,
+            ok: true,
+            text: async () => `
+              <html><body><script data-page="app" type="application/json">
+                {"props":{"article":{"video_id":4999261,"title":"172cm高身長Fカップ美女","release_date":"2026-11-11","writer":{"name":"ハメ師"},"tags":[{"name":"無修正"},{"name":"ハメ撮り"}]}}}
+              </script></body></html>
+            `,
+          }),
+        });
+
+        // B3: Fetch metadata twice and verify alias-matched tag "無修正" -> {tagId: uncensoredTagId, name: "无码"} is never duplicated
+        const fetch1 = await fetchMetadataForManifest(db, m12.id, fetcher);
+        assert.equal(fetch1.ok, true);
+        const fetch2 = await fetchMetadataForManifest(db, m12.id, fetcher);
+        assert.equal(fetch2.ok, true);
+        const matchingTags = (fetch2.manifest?.tags ?? []).filter((t) => t.tagId === uncensoredTagId || t.name === '无码');
+        assert.equal(matchingTags.length, 1, `Expected exactly 1 "无码" tag after repeated fetch, got: ${JSON.stringify(fetch2.manifest?.tags)}`);
+
+        // Approve m12 and fail commit with EXDEV (simulating \\iriyano\home\Temp -> \\iriyano\Private)
+        reviewIngestionManifest(db, {
+          manifestId: m12.id,
+          decision: 'approved',
+          tagIds: [uncensoredTagId],
+          newTagNames: ['無修正', 'ハメ師', 'ハメ撮り'],
+        });
+        const failedCommit = await commitIngestionManifest(db, {
+          manifestId: m12.id,
+          stagingDir: homeStagingDir,
+          roots,
+          fileOps,
+          allowCrossDeviceCopy: false,
+        });
+        assert.equal(failedCommit.ok, false);
+        assert.equal(failedCommit.manifest?.state, 'failed');
+        assert.match(failedCommit.manifest?.lastError ?? '', /Cross-device copy is disabled/);
+
+        // Prepare mRecovery as a moved-not-indexed candidate (approved + moving + destination file exists, source missing)
+        reviewIngestionManifest(db, { manifestId: mRecovery.id, decision: 'approved' });
+        db.prepare(`UPDATE ingestion_manifests SET state = 'moving' WHERE id = ?`).run(mRecovery.id);
+        fs.mkdirSync(targetDir, { recursive: true });
+        fs.renameSync(recoveryFile, path.join(targetDir, 'FC2-PPV-4000002-recovered.mp4'));
+
+        // Freeze mFrozen with a running task while its file is removed from staging
+        const frozenLock = startIngestionTask(db, `manifest:${mFrozen.id}`, 'fetch', 'Running fetch...');
+        assert.equal(frozenLock.acquired, true);
+        fs.rmSync(frozenFile);
+        fs.rmSync(staleFile);
+
+        // User moves FC2-PPV-4999261 from homeStagingDir to privateStagingDir and switches stagingDir
+        const newTempFile = path.join(privateStagingDir, filename12);
+        fs.renameSync(oldTempFile, newTempFile);
+
+        // B1 & B2: Scan privateStagingDir ->
+        // 1) m12 is matched by filename, temp_path is rebound to newTempFile, state resets from 'failed' to 'reviewed', last_error cleared!
+        // 2) mStale (and its performer_review_queue row) is deleted because its file is gone!
+        // 3) mRecovery (moved-not-indexed) and mFrozen (running task) are preserved!
+        const scan = await scanStagingDirectory(db, {
+          stagingDir: privateStagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir,
+          roots,
+          fileOps,
+        });
+        assert.equal(scan.ok, true);
+        assert.equal(scan.files.length, 1);
+        assert.equal(scan.files[0]!.manifestId, m12.id);
+        assert.equal(scan.files[0]!.state, 'reviewed');
+        assert.equal(scan.files[0]!.reviewDecision, 'approved');
+
+        const rebound12 = scan.manifests.find((m) => m.id === m12.id);
+        assert.ok(rebound12);
+        assert.equal(rebound12.tempPath, newTempFile);
+        assert.equal(rebound12.state, 'reviewed');
+        assert.equal(rebound12.lastError, null);
+        assert.equal(rebound12.title, '172cm高身長Fカップ美女');
+
+        // Stale unindexed manifest and its performer queue row were cleaned up
+        assert.equal(scan.manifests.find((m) => m.id === mStale.id), undefined);
+        const orphanQueueCount = Number(
+          (db.prepare('SELECT COUNT(*) AS c FROM performer_review_queue WHERE manifest_id = ?').get(mStale.id) as { c: number }).c,
+        );
+        assert.equal(orphanQueueCount, 0);
+
+        // Recovery candidate and frozen manifest were preserved
+        assert.ok(scan.manifests.find((m) => m.id === mRecovery.id));
+        assert.ok(scan.manifests.find((m) => m.id === mFrozen.id));
+
+        // Also test ensureManifestForStagingFile directly when temp_path changes before scan
+        const altStagingDir = path.join(tmpDir, 'alt-temp');
+        fs.mkdirSync(altStagingDir, { recursive: true });
+        const altTempFile = path.join(altStagingDir, filename12);
+        fs.renameSync(newTempFile, altTempFile);
+
+        const ensuredRebound = await ensureManifestForStagingFile(db, {
+          tempPath: altTempFile,
+          stagingDir: altStagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir,
+          roots,
+          fileOps,
+        });
+        assert.equal(ensuredRebound.id, m12.id);
+        assert.equal(ensuredRebound.tempPath, altTempFile);
+
+        // Now same-share commit succeeds without PATH_TRAVERSAL_REJECTED or EXDEV!
+        simulateExdev = false;
+        const committed = await commitIngestionManifest(db, {
+          manifestId: m12.id,
+          stagingDir: altStagingDir,
+          roots,
+          fileOps,
+        });
+        assert.equal(committed.ok, true);
+        assert.equal(committed.manifest?.state, 'indexed');
+      } finally {
+        db.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

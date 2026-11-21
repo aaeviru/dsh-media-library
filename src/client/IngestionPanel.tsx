@@ -211,13 +211,23 @@ export function IngestionPanel({
 
   const entries = useMemo<UnifiedStagingEntry[]>(() => {
     const byManifestId = new Map<number, IngestionManifest>();
-    for (const m of manifests) byManifestId.set(m.id, m);
+    const unindexedByFilename = new Map<string, IngestionManifest>();
+    for (const m of manifests) {
+      byManifestId.set(m.id, m);
+      if (m.state !== 'indexed') {
+        const key = m.filename.toLowerCase();
+        if (!unindexedByFilename.has(key)) {
+          unindexedByFilename.set(key, m);
+        }
+      }
+    }
 
     // Show only files currently present in the temp staging folder (exclude already-moved history).
     const list: UnifiedStagingEntry[] = [];
     for (const file of stagedFiles) {
       const matched =
         (file.manifestId !== null ? byManifestId.get(file.manifestId) : undefined) ??
+        unindexedByFilename.get(file.filename.toLowerCase()) ??
         manifests.find((m) => m.tempPath.toLowerCase() === file.tempPath.toLowerCase()) ??
         null;
       list.push({
@@ -247,7 +257,12 @@ export function IngestionPanel({
     if (exact) return exact;
     if (selectedKey.startsWith('f:')) {
       const targetTempLower = selectedKey.slice(2).toLowerCase();
-      return entries.find((e) => e.tempPath.toLowerCase() === targetTempLower) ?? null;
+      const byTemp = entries.find((e) => e.tempPath.toLowerCase() === targetTempLower);
+      if (byTemp) return byTemp;
+      const baseName = targetTempLower.split(/[\\/]/).pop() ?? '';
+      if (baseName) {
+        return entries.find((e) => e.filename.toLowerCase() === baseName) ?? null;
+      }
     }
     return null;
   }, [entries, selectedKey]);

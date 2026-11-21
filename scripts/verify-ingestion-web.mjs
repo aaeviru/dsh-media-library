@@ -56,10 +56,52 @@ export async function verifyIngestionWeb(page) {
       expectedTags,
       `Expected ingestion-tags-input to sort existing tag before new tag, got: ${inputVal}`,
     );
+
+    // Issue #45 B1, B2 & B4:
+    // 1. Insert a stale unindexed manifest whose file does not exist in stagingDir, and an unindexed manifest
+    //    for `issue30-other.mp4` that points to an outdated temp_path (`\\old-share\temp\issue30-other.mp4`) with `state = 'failed'`.
+    // 2. Click Scan and verify:
+    //    - The stale manifest is deleted from SQLite.
+    //    - `issue30-other.mp4` rebinds to its current staging tempPath, clears `failed` -> `planned`, and keeps its title when selected!
+    db39.prepare(`
+      INSERT INTO ingestion_manifests (
+        source_id, temp_path, target_root_id, target_relative_path, filename,
+        title, catalog_number, media_date, tags_json, metadata_source,
+        checksum_sha256, file_size, state, review_decision, last_error, created_at, updated_at
+      ) VALUES
+        ('staging:ingested/stale-removed.mp4:99', '\\\\old-share\\temp\\stale-removed.mp4', 'nas-main', 'ingested/stale-removed.mp4', 'stale-removed.mp4',
+         'Stale Manifest Should Be Cleaned', 'STALE-45', '2026-11-20', '[]', NULL, '', 99, 'planned', 'pending', NULL, ?, ?),
+        ('staging:old-subdir/issue30-other.mp4:15', '\\\\old-share\\temp\\issue30-other.mp4', 'nas-main', 'old-subdir/issue30-other.mp4', 'issue30-other.mp4',
+         'Rebound From Old Share', 'ISSUE-45', '2026-11-21', '[]', 'https://fc2cmadb.com/articles/45', '', 15, 'failed', 'pending', 'Cross-device copy is disabled.', ?, ?)
+    `).run(nowIso, nowIso, nowIso, nowIso);
   } finally {
     db39.close();
   }
   console.log('Issue #39 cold-install E2E: selection survives f:<tempPath> -> m:<id> across panel switch and tag input matches sorted pill order: PASS');
+
+  await page.click('[data-testid="ingestion-scan-btn"]');
+  await page.waitForFunction(() =>
+    document.querySelector('[data-testid="ingestion-message"]')?.textContent?.includes('Scanned')
+  );
+  const db45 = new DatabaseSync(path.join(process.env.DSH_HOME, 'media-library/library.sqlite3'));
+  let reboundManifestId = null;
+  try {
+    const staleRow = db45.prepare("SELECT id FROM ingestion_manifests WHERE filename = 'stale-removed.mp4'").get();
+    assert.equal(staleRow, undefined, 'Expected stale unindexed manifest to be cleaned up on Scan');
+    const reboundRow = db45.prepare("SELECT id, temp_path, state, last_error, title FROM ingestion_manifests WHERE filename = 'issue30-other.mp4'").get();
+    assert.ok(reboundRow, 'Expected unindexed manifest for issue30-other.mp4 to be preserved and rebound');
+    assert.equal(reboundRow.temp_path, path.join(staging, 'issue30-other.mp4'));
+    assert.equal(reboundRow.state, 'planned');
+    assert.equal(reboundRow.last_error, null);
+    reboundManifestId = Number(reboundRow.id);
+  } finally {
+    db45.close();
+  }
+  await page.getByTestId(`ingestion-row-${reboundManifestId}`).click();
+  await page.waitForFunction(() =>
+    document.querySelector('[data-testid="ingestion-title-input"]')?.value === 'Rebound From Old Share'
+  );
+  console.log('Issue #45 cold-install E2E: filename-bound manifest rebinding across stagingDir change and stale manifest cleanup on Scan: PASS');
 
   await page.getByTestId('ingestion-file-issue30-slow.mp4').click();
   await page.getByTestId('ingestion-title-input').fill('Issue 30 controlled rename');
@@ -85,7 +127,7 @@ export async function verifyIngestionWeb(page) {
   assert.match(JSON.stringify(busyPayload), /activeTask/);
 
   // Other entries can still be prepared and reviewed while execution is serialized.
-  await page.getByTestId('ingestion-file-issue30-other.mp4').click();
+  await page.getByTestId(`ingestion-row-${reboundManifestId}`).click();
   assert.equal(await page.getByTestId('ingestion-title-input').isDisabled(), false);
   await page.getByTestId('ingestion-title-input').fill('Prepared during rename');
   await page.getByTestId('ingestion-approve-btn').click();
