@@ -428,6 +428,109 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
     }
   });
 
+  it('Issue #39 B2 & B3: falls back to exact active tags/aliases for performers, flags multi-tag collisions ambiguous, keeps explicit rules authoritative, and sorts fetched normal tags existing-before-new', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-perf-fallback-'));
+    try {
+      const { tempDir, dbPath, roots, fileOps } = setupEnv(tmpDir);
+      const file1 = path.join(tempDir, 'FC2-PPV-5011111.mp4');
+      fs.writeFileSync(file1, 'video-fallback');
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        await migrateDatabase(db, { dbPath, appVersion: '0.7.4' });
+        const nowIso = '2026-11-20T00:00:00.000Z';
+        db.prepare(
+          `INSERT INTO media_roots (id, name, canonical_unc_root, enabled, created_at)
+           VALUES ('nas-main', 'NAS', ?, 1, ?)`,
+        ).run(roots[0]!.canonicalUncRoot, nowIso);
+
+        // 1) Existing active tag with exact performer name (NO performer_aliases row)
+        const exactPerf = createTag(db, { name: '既存女優A' });
+        assert.equal(exactPerf.ok, true);
+        if (!exactPerf.ok) return;
+
+        // 1b) Existing active tag with fullwidth Latin characters (stored via normalizeLabel without NFKC)
+        const fullwidthPerf = createTag(db, { name: 'Ａｌｉｃｅ　ＦＷ' });
+        assert.equal(fullwidthPerf.ok, true);
+        if (!fullwidthPerf.ok) return;
+
+        // 2) Existing active tag matched via tag_aliases (NO performer_aliases row)
+        const aliasPerf = createTag(db, { name: '別名女優Canonical' });
+        assert.equal(aliasPerf.ok, true);
+        if (!aliasPerf.ok) return;
+        db.prepare(
+          `INSERT INTO tag_aliases (tag_id, alias, normalized_alias) VALUES (?, ?, ?)`,
+        ).run(aliasPerf.tagId, '別名女優B', '別名女優b');
+
+        // 3) Ambiguous shared tag_alias across two active tags (NO performer_aliases row)
+        const dupA = createTag(db, { name: '同名候補1' });
+        const dupB = createTag(db, { name: '同名候補2' });
+        assert.equal(dupA.ok && dupB.ok, true);
+        if (!dupA.ok || !dupB.ok) return;
+        db.prepare(`INSERT INTO tag_aliases (tag_id, alias, normalized_alias) VALUES (?, ?, ?)`).run(dupA.tagId, '衝突女優', '衝突女優');
+        db.prepare(`INSERT INTO tag_aliases (tag_id, alias, normalized_alias) VALUES (?, ?, ?)`).run(dupB.tagId, '衝突女優', '衝突女優');
+
+        // 4) Explicit always_ask rule overrides exact active tag match
+        const askPerf = createTag(db, { name: '確認必須女優' });
+        assert.equal(askPerf.ok, true);
+        if (!askPerf.ok) return;
+        upsertPerformerAlias(db, { rawAlias: '確認必須女優', tagId: askPerf.tagId, policy: 'always_ask' });
+
+        // Normal tags for B2 sorting check: new tags listed first in fetcher, existing & alias after
+        const existingNormal = createTag(db, { name: '既存タグ' });
+        const aliasedNormal = createTag(db, { name: '正規タグ' });
+        assert.equal(existingNormal.ok && aliasedNormal.ok, true);
+        if (!existingNormal.ok || !aliasedNormal.ok) return;
+        db.prepare(`INSERT INTO tag_aliases (tag_id, alias, normalized_alias) VALUES (?, ?, ?)`).run(aliasedNormal.tagId, '別名タグ', '別名タグ');
+
+        const m = await ensureManifestForStagingFile(db, {
+          tempPath: file1,
+          targetRootId: 'nas-main',
+          targetSubdir: 'ingested',
+          roots,
+          fileOps,
+        });
+        const fetched = await fetchMetadataForManifest(
+          db,
+          m.id,
+          makeMockCmadbFetcher(
+            '5011111',
+            'Fallback Test',
+            ['既存女優A', 'Ａｌｉｃｅ　ＦＷ', '別名女優B', '衝突女優', '確認必須女優', '未知女優Z'],
+            ['新規タグ1', '別名タグ', '既存タグ', '新規タグ2'],
+          ),
+        );
+        assert.equal(fetched.ok, true);
+        // B2: persisted manifest.tags places exact-name existing tags first, then alias-matched, then new tags
+        assert.deepEqual(
+          fetched.manifest?.tags.map((t) => t.name),
+          ['既存タグ', '正規タグ', '新規タグ1', '新規タグ2'],
+        );
+
+        // B3: performer fallback verification
+        const preview = evaluateManifestPerformers(db, m.id);
+        const autoByNorm = new Map(preview.autoMatched.map((a) => [a.normalizedName, a]));
+        assert.equal(autoByNorm.get(normalizePerformerName('既存女優A'))?.tagId, exactPerf.tagId);
+        assert.equal(autoByNorm.get(normalizePerformerName('既存女優A'))?.source, 'performer-rule');
+        assert.equal(autoByNorm.get(normalizePerformerName('Alice FW'))?.tagId, fullwidthPerf.tagId);
+        assert.equal(autoByNorm.get(normalizePerformerName('別名女優B'))?.tagId, aliasPerf.tagId);
+
+        const pendingByRaw = new Map(preview.pendingReview.map((p) => [p.rawName, p]));
+        assert.equal(pendingByRaw.get('衝突女優')?.reason, 'ambiguous');
+        assert.deepEqual(
+          pendingByRaw.get('衝突女優')?.candidateTags.map((c) => c.id),
+          [dupA.tagId, dupB.tagId],
+        );
+        assert.equal(pendingByRaw.get('確認必須女優')?.reason, 'ambiguous');
+        assert.equal(pendingByRaw.get('未知女優Z')?.reason, 'unknown');
+      } finally {
+        db.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('upgrades an existing v5 database cleanly to v6 with performer_aliases, performer_review_queue, and actresses_json', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-perf-v5-to-v6-'));
     try {

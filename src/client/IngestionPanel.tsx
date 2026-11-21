@@ -240,8 +240,33 @@ export function IngestionPanel({
     return list;
   }, [stagedFiles, manifests, tasks]);
 
-  const selected = entries.find((e) => e.key === selectedKey) ?? null;
+  const selected = useMemo(() => {
+    if (!selectedKey) return null;
+    const exact = entries.find((e) => e.key === selectedKey);
+    if (exact) return exact;
+    if (selectedKey.startsWith('f:')) {
+      const targetTempLower = selectedKey.slice(2).toLowerCase();
+      return entries.find((e) => e.tempPath.toLowerCase() === targetTempLower) ?? null;
+    }
+    return null;
+  }, [entries, selectedKey]);
   const selectedManifestId = selected?.manifest?.id ?? null;
+
+  // Smoothly migrate selection and any unsubmitted draft when a staged file gains a manifest ID
+  // (e.g., after Fetch completes while the user switched away from the panel).
+  useEffect(() => {
+    if (!selected || !selectedKey || selected.key === selectedKey) return;
+    const oldKey = selectedKey;
+    const nextKey = selected.key;
+    setSelectedKey(nextKey);
+    setDirtyDrafts((prev) => {
+      if (!(oldKey in prev) || nextKey in prev) return prev;
+      const next = { ...prev, [nextKey]: prev[oldKey]! };
+      delete next[oldKey];
+      sessionCache.dirtyDrafts = next;
+      return next;
+    });
+  }, [selected, selectedKey, setSelectedKey]);
 
   const reloadSelectedPreview = useCallback(async () => {
     if (selectedManifestId === null) {
@@ -262,27 +287,6 @@ export function IngestionPanel({
     void reloadSelectedPreview();
   }, [reloadSelectedPreview, manifests, performerAliases, pendingQueue]);
 
-  const serverFallback: DraftFields = useMemo(
-    () => ({
-      title: selected?.manifest?.title ?? '',
-      mediaDate: selected?.manifest?.mediaDate ?? '',
-      tagsText: selected?.manifest?.tags.map((tag) => tag.name).join(', ') ?? '',
-    }),
-    [selected],
-  );
-  const selectedFrozen = Boolean(selected && (executing?.key === selected.key ||
-    (selected.manifest && frozenManifestIds.includes(selected.manifest.id))));
-  const activeDraft = selected ? dirtyDrafts[selected.key] ?? serverFallback : serverFallback;
-
-  const draftTagList = useMemo(
-    () =>
-      activeDraft.tagsText
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean),
-    [activeDraft.tagsText],
-  );
-
   const previewTagByLower = useMemo(() => {
     const map = new Map<string, { matchedVia: 'name' | 'alias' | 'new'; matchedTagName: string | null }>();
     for (const entry of performerPreview?.normalTags ?? []) {
@@ -294,12 +298,55 @@ export function IngestionPanel({
     return map;
   }, [performerPreview]);
 
+  const manifestKnownTagLower = useMemo(() => {
+    const set = new Set<string>();
+    for (const tag of selected?.manifest?.tags ?? []) {
+      if (tag.tagId !== undefined) set.add(tag.name.toLowerCase());
+    }
+    return set;
+  }, [selected]);
+
+  const rankTagMatch = (via: 'name' | 'alias' | 'new') => (via === 'name' ? 0 : via === 'alias' ? 1 : 2);
+
+  const serverFallback: DraftFields = useMemo(() => {
+    const orderedTags = (selected?.manifest?.tags ?? [])
+      .map((tag, idx) => {
+        const lower = tag.name.toLowerCase();
+        const info = previewTagByLower.get(lower);
+        const matchedVia: 'name' | 'alias' | 'new' =
+          info?.matchedVia ?? (manifestKnownTagLower.has(lower) ? 'name' : 'new');
+        return { name: tag.name, idx, matchedVia };
+      })
+      .sort((a, b) => rankTagMatch(a.matchedVia) - rankTagMatch(b.matchedVia) || a.idx - b.idx)
+      .map((entry) => entry.name);
+    return {
+      title: selected?.manifest?.title ?? '',
+      mediaDate: selected?.manifest?.mediaDate ?? '',
+      tagsText: orderedTags.join(', '),
+    };
+  }, [selected, previewTagByLower, manifestKnownTagLower]);
+  const selectedFrozen = Boolean(selected && (executing?.key === selected.key ||
+    (selected.manifest && frozenManifestIds.includes(selected.manifest.id))));
+  const activeDraft = selected
+    ? dirtyDrafts[selected.key] ?? (selectedKey ? dirtyDrafts[selectedKey] : undefined) ?? serverFallback
+    : serverFallback;
+
+  const draftTagList = useMemo(
+    () =>
+      activeDraft.tagsText
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    [activeDraft.tagsText],
+  );
+
   const sortedTagPills = useMemo(() => {
-    const rank = (via: 'name' | 'alias' | 'new') => (via === 'name' ? 0 : via === 'alias' ? 1 : 2);
     return draftTagList
       .map((tagName, idx) => {
-        const info = previewTagByLower.get(tagName.toLowerCase());
-        const matchedVia: 'name' | 'alias' | 'new' = info?.matchedVia ?? 'new';
+        const lower = tagName.toLowerCase();
+        const info = previewTagByLower.get(lower);
+        const matchedVia: 'name' | 'alias' | 'new' =
+          info?.matchedVia ?? (manifestKnownTagLower.has(lower) ? 'name' : 'new');
         return {
           tagName,
           idx,
@@ -307,8 +354,8 @@ export function IngestionPanel({
           matchedTagName: info?.matchedTagName ?? null,
         };
       })
-      .sort((a, b) => rank(a.matchedVia) - rank(b.matchedVia) || a.idx - b.idx);
-  }, [draftTagList, previewTagByLower]);
+      .sort((a, b) => rankTagMatch(a.matchedVia) - rankTagMatch(b.matchedVia) || a.idx - b.idx);
+  }, [draftTagList, previewTagByLower, manifestKnownTagLower]);
 
   const removeDraftTag = useCallback(
     (indexToRemove: number) => {
@@ -589,7 +636,7 @@ export function IngestionPanel({
                   width: '100%',
                   textAlign: 'left',
                   cursor: 'pointer',
-                  background: entry.key === selectedKey ? 'rgba(59,130,246,0.16)' : 'transparent',
+                  background: entry.key === selected?.key ? 'rgba(59,130,246,0.16)' : 'transparent',
                 }}
               >
                 <strong>{entry.filename}</strong> ·{' '}

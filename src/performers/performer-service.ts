@@ -46,6 +46,70 @@ interface AliasRuleRow {
   readonly archived_at: string | null;
 }
 
+function queryExactActiveTagMatches(
+  db: DatabaseSync,
+  rawPerformerName: string,
+  normalizedPerformerName: string,
+): Array<{ id: number; name: string }> {
+  const labelNorm = normalizeLabel(rawPerformerName);
+  const lookupKeys = labelNorm && labelNorm !== normalizedPerformerName
+    ? [normalizedPerformerName, labelNorm]
+    : [normalizedPerformerName];
+  const placeholders = lookupKeys.map(() => '?').join(', ');
+  const byId = new Map<number, string>();
+
+  const directRows = db
+    .prepare(`SELECT id, name FROM tags WHERE normalized_name IN (${placeholders}) AND archived_at IS NULL ORDER BY id ASC`)
+    .all(...lookupKeys) as Array<{ id: number; name: string }>;
+  for (const r of directRows) {
+    byId.set(Number(r.id), String(r.name));
+  }
+
+  const aliasRows = db
+    .prepare(
+      `SELECT t.id, t.name
+       FROM tag_aliases ta
+       JOIN tags t ON t.id = ta.tag_id
+       WHERE ta.normalized_alias IN (${placeholders}) AND t.archived_at IS NULL
+       ORDER BY t.id ASC`,
+    )
+    .all(...lookupKeys) as Array<{ id: number; name: string }>;
+  for (const r of aliasRows) {
+    if (!byId.has(Number(r.id))) {
+      byId.set(Number(r.id), String(r.name));
+    }
+  }
+
+  // Fallback for NFKC-equivalent active tags/aliases (e.g., fullwidth Latin or halfwidth Katakana
+  // stored via non-NFKC `normalizeLabel`) when the indexed exact lookup finds no match.
+  if (byId.size === 0) {
+    const allTags = db
+      .prepare('SELECT id, name FROM tags WHERE archived_at IS NULL ORDER BY id ASC')
+      .all() as Array<{ id: number; name: string }>;
+    for (const r of allTags) {
+      if (normalizePerformerName(String(r.name)) === normalizedPerformerName) {
+        byId.set(Number(r.id), String(r.name));
+      }
+    }
+    const allAliases = db
+      .prepare(
+        `SELECT t.id, t.name, ta.alias
+         FROM tag_aliases ta
+         JOIN tags t ON t.id = ta.tag_id
+         WHERE t.archived_at IS NULL
+         ORDER BY t.id ASC`,
+      )
+      .all() as Array<{ id: number; name: string; alias: string }>;
+    for (const r of allAliases) {
+      if (!byId.has(Number(r.id)) && normalizePerformerName(String(r.alias)) === normalizedPerformerName) {
+        byId.set(Number(r.id), String(r.name));
+      }
+    }
+  }
+
+  return [...byId.entries()].map(([id, name]) => ({ id, name }));
+}
+
 function queryAliasesByNormalized(db: DatabaseSync, normalizedName: string): AliasRuleRow[] {
   return db
     .prepare(
@@ -460,14 +524,8 @@ export function evaluateManifestPerformers(
       }
     }
 
-    // Evaluate deterministic performer_aliases rules.
-    const rules = queryAliasesByNormalized(db, norm);
-    const activeRules = rules.filter((r) => !r.archived_at);
-    const archivedRules = rules.filter((r) => Boolean(r.archived_at));
-
-    if (activeRules.length === 1 && activeRules[0]!.policy === 'auto' && archivedRules.length === 0) {
-      const match = activeRules[0]!;
-      // If a pending queue entry existed previously before the rule was added, clear it automatically.
+    const recordAutoMatch = (tagId: number, tagName: string): void => {
+      // If a pending queue entry existed previously before the match was found, clear it automatically.
       if (existingQueue && String(existingQueue.status) === 'pending') {
         db.prepare('DELETE FROM performer_review_queue WHERE id = ?').run(Number(existingQueue.id));
       }
@@ -475,19 +533,41 @@ export function evaluateManifestPerformers(
         reviewId: null,
         rawName: trimmed,
         normalizedName: norm,
-        tagId: Number(match.tag_id),
-        tagName: String(match.tag_name),
+        tagId,
+        tagName,
         source: 'performer-rule',
         confidence: 1.0,
         resolutionMode: null,
-        alreadyManual: isAlreadyManualOnMedia(Number(match.tag_id)),
+        alreadyManual: isAlreadyManualOnMedia(tagId),
       });
+    };
+
+    // Evaluate deterministic performer_aliases rules first; explicit rules always win.
+    const rules = queryAliasesByNormalized(db, norm);
+    const activeRules = rules.filter((r) => !r.archived_at);
+    const archivedRules = rules.filter((r) => Boolean(r.archived_at));
+
+    if (activeRules.length === 1 && activeRules[0]!.policy === 'auto' && archivedRules.length === 0) {
+      const match = activeRules[0]!;
+      recordAutoMatch(Number(match.tag_id), String(match.tag_name));
       continue;
     }
 
     let reason: PerformerReviewReason = 'unknown';
     let candidateIds: number[] = [];
-    if (activeRules.length >= 2 || (activeRules.length === 1 && activeRules[0]!.policy === 'always_ask')) {
+    if (rules.length === 0) {
+      // No explicit performer_aliases rule: fall back to deterministic exact-name match on active tags / tag_aliases.
+      const exactMatches = queryExactActiveTagMatches(db, trimmed, norm);
+      if (exactMatches.length === 1) {
+        const match = exactMatches[0]!;
+        recordAutoMatch(match.id, match.name);
+        continue;
+      }
+      if (exactMatches.length >= 2) {
+        reason = 'ambiguous';
+        candidateIds = exactMatches.map((m) => m.id);
+      }
+    } else if (activeRules.length >= 2 || (activeRules.length === 1 && activeRules[0]!.policy === 'always_ask')) {
       reason = 'ambiguous';
       candidateIds = activeRules.map((r) => Number(r.tag_id));
     } else if (activeRules.length === 0 && archivedRules.length > 0) {

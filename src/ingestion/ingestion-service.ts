@@ -530,9 +530,30 @@ export async function fetchMetadataForManifest(
   const meta = lookup.metadata;
   const actressNormSet = new Set(meta.actresses.map((a) => normalizePerformerName(a)).filter(Boolean));
   const mergedActresses = [...new Set([...manifest.actresses, ...meta.actresses].map((a) => a.trim()).filter(Boolean))];
-  const mergedTagNames = new Map<string, IngestionManifestTag>();
+  const mergedTagNames = new Map<string, { tag: IngestionManifestTag; rank: number; order: number }>();
+  let order = 0;
+  const rankForTag = (name: string): number => {
+    const norm = normalizeLabel(name);
+    if (!norm) return 2;
+    const direct = db
+      .prepare('SELECT 1 FROM tags WHERE normalized_name = ? AND archived_at IS NULL LIMIT 1')
+      .get(norm);
+    if (direct) return 0;
+    const viaAlias = db
+      .prepare(
+        `SELECT 1
+         FROM tag_aliases ta
+         JOIN tags tg ON tg.id = ta.tag_id
+         WHERE ta.normalized_alias = ? AND tg.archived_at IS NULL
+         LIMIT 1`,
+      )
+      .get(norm);
+    return viaAlias ? 1 : 2;
+  };
   for (const t of manifest.tags) {
-    mergedTagNames.set(normalizeLabel(t.name), t);
+    const norm = normalizeLabel(t.name);
+    if (!norm) continue;
+    mergedTagNames.set(norm, { tag: t, rank: rankForTag(t.name), order: order++ });
   }
   for (const name of meta.candidateTags) {
     // Route fetched performers through `performer_aliases` + `performer_review_queue` instead of auto-creating normal tags.
@@ -540,11 +561,16 @@ export async function fetchMetadataForManifest(
     const norm = normalizeLabel(name);
     if (!norm || mergedTagNames.has(norm)) continue;
     const existingTag = resolveExistingTagByNameOrAlias(db, norm);
-    mergedTagNames.set(
-      norm,
-      existingTag ? { tagId: existingTag.id, name: existingTag.name } : { name },
-    );
+    const resolved = existingTag ? { tagId: existingTag.id, name: existingTag.name } : { name };
+    mergedTagNames.set(norm, {
+      tag: resolved,
+      rank: existingTag ? (normalizeLabel(existingTag.name) === norm ? 0 : 1) : 2,
+      order: order++,
+    });
   }
+  const sortedMergedTags = [...mergedTagNames.values()]
+    .sort((a, b) => a.rank - b.rank || a.order - b.order)
+    .map((entry) => entry.tag);
 
   const ts = now().toISOString();
   db.prepare(
@@ -560,7 +586,7 @@ export async function fetchMetadataForManifest(
     meta.title,
     meta.mediaDate ?? '',
     JSON.stringify(mergedActresses),
-    JSON.stringify([...mergedTagNames.values()]),
+    JSON.stringify(sortedMergedTags),
     meta.sourceUrl,
     ts,
     manifest.id,
