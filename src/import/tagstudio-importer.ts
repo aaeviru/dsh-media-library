@@ -308,31 +308,51 @@ function prepareScopedForceReimport(
     }
   }
 
-  // 2. Refuse if any incoming tag collides with a manually archived or merged tag.
+  // 2. Refuse if any incoming tag collides with a manually edited (`revision > 1`), archived, or merged tag
+  //    — checking BOTH `legacy_ids` (catches renamed tags) and `normalized_name` (catches edited aliases/metadata).
   const tagCols = new Set(
     (db.prepare('PRAGMA table_info("tags")').all() as Array<{ name: string }>).map(r => String(r.name)),
   )
-  if (tagCols.has('archived_at') || tagCols.has('merged_into_id')) {
-    const checkTagStateStmt = db.prepare(
-      `SELECT name,
-              ${tagCols.has('archived_at') ? 'archived_at' : 'NULL AS archived_at'},
-              ${tagCols.has('merged_into_id') ? 'merged_into_id' : 'NULL AS merged_into_id'}
-       FROM tags
-       WHERE normalized_name = ?`,
-    )
-    const seenNormNames = new Set<string>()
-    for (const tag of sourceTags) {
-      const norm = normalizeLookupKey(String(tag.name))
-      if (seenNormNames.has(norm)) continue
-      seenNormNames.add(norm)
-      const existing = checkTagStateStmt.get(norm) as
-        | { name: string; archived_at: string | null; merged_into_id: number | null }
-        | undefined
-      if (existing && (existing.archived_at !== null || existing.merged_into_id !== null)) {
-        throw new Error(
-          `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": existing tag "${existing.name}" was manually archived or merged.`,
-        )
-      }
+  const selectTagGuardCols = `
+    t.name,
+    t.revision,
+    ${tagCols.has('archived_at') ? 't.archived_at' : 'NULL AS archived_at'},
+    ${tagCols.has('merged_into_id') ? 't.merged_into_id' : 'NULL AS merged_into_id'}
+  `
+  const checkTagByNameStmt = db.prepare(`SELECT ${selectTagGuardCols} FROM tags t WHERE t.normalized_name = ?`)
+  const checkTagByLegacyStmt = db.prepare(
+    `SELECT ${selectTagGuardCols}
+     FROM legacy_ids l
+     JOIN tags t ON t.id = l.entity_id
+     WHERE l.source_type = 'tagstudio' AND l.entity_type = 'tag' AND l.source_id = ?`,
+  )
+  const seenNormNames = new Set<string>()
+  for (const tag of sourceTags) {
+    const legacyTag = checkTagByLegacyStmt.get(String(tag.id)) as
+      | { name: string; revision: number; archived_at: string | null; merged_into_id: number | null }
+      | undefined
+    if (
+      legacyTag &&
+      (Number(legacyTag.revision) > 1 || legacyTag.archived_at !== null || legacyTag.merged_into_id !== null)
+    ) {
+      throw new Error(
+        `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": previously imported tag "${legacyTag.name}" (source_id=${tag.id}) was manually edited, archived, or merged.`,
+      )
+    }
+
+    const norm = normalizeLookupKey(String(tag.name))
+    if (seenNormNames.has(norm)) continue
+    seenNormNames.add(norm)
+    const existing = checkTagByNameStmt.get(norm) as
+      | { name: string; revision: number; archived_at: string | null; merged_into_id: number | null }
+      | undefined
+    if (
+      existing &&
+      (Number(existing.revision) > 1 || existing.archived_at !== null || existing.merged_into_id !== null)
+    ) {
+      throw new Error(
+        `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": existing tag "${existing.name}" was manually edited, archived, or merged.`,
+      )
     }
   }
 
@@ -421,6 +441,8 @@ function prepareScopedForceReimport(
     }
 
     // 4. Delete ONLY the verified TagStudio-owned media rows & dependent rows for `rootId`.
+    //    Never physically delete `tags`, `tag_aliases`, or `tag_parents` during `--force`:
+    //    preserves manually created tags that share names with TagStudio tags and aligns with M3's no-hard-delete invariant.
     db.exec(`
       DELETE FROM legacy_ids
       WHERE source_type = 'tagstudio'
@@ -441,61 +463,6 @@ function prepareScopedForceReimport(
       DELETE FROM media_files
       WHERE id IN (SELECT id FROM temp._force_scoped_media);
     `)
-
-    // 5. Prune strictly unreferenced, unmodified TagStudio-origin tags ONLY when no other TagStudio root exists.
-    const otherTagStudioRoots = Number(
-      (
-        db
-          .prepare(
-            `SELECT COUNT(DISTINCT root_id) AS cnt
-             FROM media_files
-             WHERE root_id <> ? AND source_key LIKE 'tagstudio:%'`,
-          )
-          .get(rootId) as { cnt: number }
-      ).cnt,
-    )
-    if (otherTagStudioRoots === 0) {
-      const hasPerformerAliases = hasTable(db, 'performer_aliases')
-      const hasPerformerQueue = hasTable(db, 'performer_review_queue')
-      db.exec('DROP TABLE IF EXISTS temp._force_prunable_tags;')
-      db.exec('CREATE TEMP TABLE _force_prunable_tags (id INTEGER PRIMARY KEY);')
-      db.exec(`
-        INSERT INTO temp._force_prunable_tags (id)
-        SELECT t.id
-        FROM tags t
-        WHERE t.revision = 1
-          ${tagCols.has('archived_at') ? 'AND t.archived_at IS NULL' : ''}
-          ${tagCols.has('merged_into_id') ? 'AND t.merged_into_id IS NULL' : ''}
-          AND EXISTS (
-            SELECT 1 FROM legacy_ids l
-            WHERE l.source_type = 'tagstudio' AND l.entity_type = 'tag' AND l.entity_id = t.id
-          )
-          AND NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.tag_id = t.id)
-          ${tagCols.has('merged_into_id') ? 'AND NOT EXISTS (SELECT 1 FROM tags t2 WHERE t2.merged_into_id = t.id)' : ''}
-          ${hasPerformerAliases ? 'AND NOT EXISTS (SELECT 1 FROM performer_aliases pa WHERE pa.tag_id = t.id)' : ''}
-          ${hasPerformerQueue ? 'AND NOT EXISTS (SELECT 1 FROM performer_review_queue prq WHERE prq.resolved_tag_id = t.id)' : ''};
-
-        DELETE FROM tag_parents
-        WHERE tag_id IN (SELECT id FROM temp._force_prunable_tags)
-           OR parent_tag_id IN (SELECT id FROM temp._force_prunable_tags);
-        DELETE FROM legacy_ids
-        WHERE source_type = 'tagstudio'
-          AND entity_type = 'tag_alias'
-          AND entity_id IN (
-            SELECT ta.id FROM tag_aliases ta
-            JOIN temp._force_prunable_tags pt ON pt.id = ta.tag_id
-          );
-        DELETE FROM tag_aliases
-        WHERE tag_id IN (SELECT id FROM temp._force_prunable_tags);
-        DELETE FROM legacy_ids
-        WHERE source_type = 'tagstudio'
-          AND entity_type = 'tag'
-          AND entity_id IN (SELECT id FROM temp._force_prunable_tags);
-        DELETE FROM tags
-        WHERE id IN (SELECT id FROM temp._force_prunable_tags);
-        DROP TABLE IF EXISTS temp._force_prunable_tags;
-      `)
-    }
   } finally {
     db.exec('DROP TABLE IF EXISTS temp._force_scoped_media;')
   }

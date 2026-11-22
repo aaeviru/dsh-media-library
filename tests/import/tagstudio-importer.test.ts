@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { after, before, describe, it } from 'node:test'
 import { runImportCli } from '../../scripts/import-tagstudio.ts'
 import { collectDatabaseTableCounts, restoreDatabaseFromBackup } from '../../src/db/backup.ts'
@@ -567,8 +568,127 @@ describe('TagStudio Importer & Reconciliation Rules D2.1..D2.5 (Issue #3 B3..B8)
             canonicalUncRoot: '\\\\SynologyNAS\\Media',
             force: true,
           }),
-        /FORCE_REIMPORT_REFUSED.*manually archived or merged/,
+        /FORCE_REIMPORT_REFUSED.*manually edited, archived, or merged/,
       )
+    }
+
+    // Case 2e: Manually renamed TagStudio tag (revision > 1, legacy_ids still points to it) -> must refuse so old name does not reappear
+    const renamedTagDbPath = path.join(tempRoot, 'guarded-renamed-tag', 'library.sqlite3')
+    await importTagStudioDatabase({
+      sourceDbPath: fixtureDbPath,
+      targetDbPath: renamedTagDbPath,
+      mode: 'import',
+      rootId: 'nas-main',
+      canonicalUncRoot: '\\\\SynologyNAS\\Media',
+    })
+    {
+      const { db } = openMediaLibraryDatabase({ dbPath: renamedTagDbPath })
+      try {
+        db.prepare(
+          "UPDATE tags SET name = 'Studio Renamed', normalized_name = 'studio renamed', revision = 2 WHERE normalized_name = 'studio alpha'",
+        ).run()
+      } finally {
+        db.close()
+      }
+      await assert.rejects(
+        () =>
+          importTagStudioDatabase({
+            sourceDbPath: fixtureDbPath,
+            targetDbPath: renamedTagDbPath,
+            mode: 'import',
+            rootId: 'nas-main',
+            canonicalUncRoot: '\\\\SynologyNAS\\Media',
+            force: true,
+          }),
+        /FORCE_REIMPORT_REFUSED.*manually edited, archived, or merged/,
+      )
+      const verify = openMediaLibraryDatabase({ dbPath: renamedTagDbPath })
+      try {
+        const oldName = verify.db.prepare("SELECT id FROM tags WHERE normalized_name = 'studio alpha'").get()
+        const keptRenamed = verify.db.prepare("SELECT id FROM tags WHERE normalized_name = 'studio renamed'").get()
+        assert.equal(oldName, undefined, 'Old TagStudio tag name must not reappear')
+        assert.ok(keptRenamed, 'Manually renamed tag must be preserved')
+      } finally {
+        verify.db.close()
+      }
+    }
+
+    // Case 2f: Manually deleted alias on a TagStudio tag (revision > 1) -> must refuse so deleted alias is not restored
+    const aliasEditedDbPath = path.join(tempRoot, 'guarded-alias-edited', 'library.sqlite3')
+    await importTagStudioDatabase({
+      sourceDbPath: fixtureDbPath,
+      targetDbPath: aliasEditedDbPath,
+      mode: 'import',
+      rootId: 'nas-main',
+      canonicalUncRoot: '\\\\SynologyNAS\\Media',
+    })
+    {
+      const { db } = openMediaLibraryDatabase({ dbPath: aliasEditedDbPath })
+      try {
+        const tag = db.prepare("SELECT id FROM tags WHERE normalized_name = 'studio alpha'").get() as { id: number }
+        db.prepare('DELETE FROM tag_aliases WHERE tag_id = ?').run(tag.id)
+        db.prepare('UPDATE tags SET revision = 2 WHERE id = ?').run(tag.id)
+      } finally {
+        db.close()
+      }
+      await assert.rejects(
+        () =>
+          importTagStudioDatabase({
+            sourceDbPath: fixtureDbPath,
+            targetDbPath: aliasEditedDbPath,
+            mode: 'import',
+            rootId: 'nas-main',
+            canonicalUncRoot: '\\\\SynologyNAS\\Media',
+            force: true,
+          }),
+        /FORCE_REIMPORT_REFUSED.*manually edited, archived, or merged/,
+      )
+      const verify = openMediaLibraryDatabase({ dbPath: aliasEditedDbPath })
+      try {
+        const tag = verify.db.prepare("SELECT id FROM tags WHERE normalized_name = 'studio alpha'").get() as { id: number }
+        const aliases = verify.db.prepare('SELECT id FROM tag_aliases WHERE tag_id = ?').all(tag.id)
+        assert.equal(aliases.length, 0, 'Manually deleted alias must not be restored')
+      } finally {
+        verify.db.close()
+      }
+    }
+
+    // Case 2g: Manually created tag sharing name with a TagStudio tag is NEVER deleted on --force even if removed from a later TagStudio DB
+    const manualSameNameDbPath = path.join(tempRoot, 'manual-same-name', 'library.sqlite3')
+    const reducedFixturePath = path.join(tempRoot, 'source-reduced', 'ts_library.sqlite')
+    createM2ImportTagStudioFixture(reducedFixturePath)
+    {
+      const src = new DatabaseSync(reducedFixturePath)
+      try {
+        src.exec('DELETE FROM tag_entries WHERE tag_id IN (1001, 1002); DELETE FROM tag_aliases WHERE tag_id IN (1001, 1002); DELETE FROM tag_parents WHERE parent_id IN (1001, 1002) OR child_id IN (1001, 1002); DELETE FROM tags WHERE id IN (1001, 1002);')
+      } finally {
+        src.close()
+      }
+    }
+    await importTagStudioDatabase({
+      sourceDbPath: fixtureDbPath,
+      targetDbPath: manualSameNameDbPath,
+      mode: 'import',
+      rootId: 'nas-main',
+      canonicalUncRoot: '\\\\SynologyNAS\\Media',
+    })
+    const reducedRun = await importTagStudioDatabase({
+      sourceDbPath: reducedFixturePath,
+      targetDbPath: manualSameNameDbPath,
+      mode: 'import',
+      rootId: 'nas-main',
+      canonicalUncRoot: '\\\\SynologyNAS\\Media',
+      force: true,
+    })
+    assert.equal(reducedRun.status, 'succeeded')
+    {
+      const verify = openMediaLibraryDatabase({ dbPath: manualSameNameDbPath })
+      try {
+        const keptTag = verify.db.prepare("SELECT id FROM tags WHERE normalized_name = 'studio alpha'").get()
+        assert.ok(keptTag, 'Existing tag must never be physically deleted during --force re-import')
+      } finally {
+        verify.db.close()
+      }
     }
 
     assert.deepEqual(snapshotFileFingerprint(fixtureDbPath), beforeSource, 'Source TagStudio DB SHA-256 must remain unchanged')
