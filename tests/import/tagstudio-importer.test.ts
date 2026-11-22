@@ -691,6 +691,56 @@ describe('TagStudio Importer & Reconciliation Rules D2.1..D2.5 (Issue #3 B3..B8)
       }
     }
 
+    // Case 2h: Manually renamed tag that was later REMOVED from the new TagStudio snapshot -> must STILL refuse so existing media-tag links are preserved
+    const removedEditedTagDbPath = path.join(tempRoot, 'guarded-removed-edited-tag', 'library.sqlite3')
+    await importTagStudioDatabase({
+      sourceDbPath: fixtureDbPath,
+      targetDbPath: removedEditedTagDbPath,
+      mode: 'import',
+      rootId: 'nas-main',
+      canonicalUncRoot: '\\\\SynologyNAS\\Media',
+    })
+    {
+      const { db } = openMediaLibraryDatabase({ dbPath: removedEditedTagDbPath })
+      try {
+        db.prepare(
+          "UPDATE tags SET name = '我的收藏', normalized_name = '我的收藏', revision = 2 WHERE normalized_name = 'studio alpha'",
+        ).run()
+      } finally {
+        db.close()
+      }
+      await assert.rejects(
+        () =>
+          importTagStudioDatabase({
+            sourceDbPath: reducedFixturePath,
+            targetDbPath: removedEditedTagDbPath,
+            mode: 'import',
+            rootId: 'nas-main',
+            canonicalUncRoot: '\\\\SynologyNAS\\Media',
+            force: true,
+          }),
+        /FORCE_REIMPORT_REFUSED.*linked to existing TagStudio media rows were manually edited/,
+      )
+      const verify = openMediaLibraryDatabase({ dbPath: removedEditedTagDbPath })
+      try {
+        const linkedCount = Number(
+          (
+            verify.db
+              .prepare(
+                `SELECT COUNT(*) AS cnt
+                 FROM media_tags mt
+                 JOIN tags t ON t.id = mt.tag_id
+                 WHERE t.normalized_name = '我的收藏'`,
+              )
+              .get() as { cnt: number }
+          ).cnt,
+        )
+        assert.ok(linkedCount > 0, 'Media associations on a manually renamed tag removed from the new snapshot must be preserved')
+      } finally {
+        verify.db.close()
+      }
+    }
+
     assert.deepEqual(snapshotFileFingerprint(fixtureDbPath), beforeSource, 'Source TagStudio DB SHA-256 must remain unchanged')
   })
 })

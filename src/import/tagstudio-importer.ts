@@ -402,6 +402,27 @@ function prepareScopedForceReimport(
       )
     }
 
+    const editedLinkedTagCount = Number(
+      (
+        db
+          .prepare(
+            `SELECT COUNT(DISTINCT mt.tag_id) AS cnt
+             FROM media_tags mt
+             JOIN temp._force_scoped_media sm ON sm.id = mt.media_id
+             JOIN tags t ON t.id = mt.tag_id
+             WHERE t.revision > 1
+               ${tagCols.has('archived_at') ? 'OR t.archived_at IS NOT NULL' : ''}
+               ${tagCols.has('merged_into_id') ? 'OR t.merged_into_id IS NOT NULL' : ''}`,
+          )
+          .get() as { cnt: number }
+      ).cnt,
+    )
+    if (editedLinkedTagCount > 0) {
+      throw new Error(
+        `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": ${editedLinkedTagCount} tag(s) linked to existing TagStudio media rows were manually edited, archived, or merged.`,
+      )
+    }
+
     if (hasTable(db, 'ingestion_manifests')) {
       const manifestRefCount = Number(
         (
