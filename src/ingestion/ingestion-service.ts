@@ -472,14 +472,48 @@ export async function scanStagingDirectory(
   };
 }
 
+/**
+ * Resolve a client-supplied relative staging identifier strictly inside the Host-configured `stagingDir` (`Issue #29`).
+ * Rejects empty input, NUL bytes, leading slashes, drive letters, traversal segments, and non-video extensions.
+ */
+export function resolveStagingRelativePath(stagingDir: string, relativePath: string): string {
+  const cleanStaging = stagingDir?.trim() ?? '';
+  if (!cleanStaging) {
+    throw new Error('PATH_TRAVERSAL_REJECTED: Host staging directory is not configured; configure stagingDir and rescan.');
+  }
+  const rawRel = typeof relativePath === 'string' ? relativePath : '';
+  const normalizedRel = rawRel.replace(/\\/g, '/');
+  const segments = normalizedRel.split('/').filter(Boolean);
+  if (
+    !rawRel.trim() ||
+    rawRel.includes('\0') ||
+    rawRel.startsWith('/') ||
+    rawRel.startsWith('\\') ||
+    /^[a-zA-Z]:/.test(rawRel) ||
+    segments.length === 0 ||
+    segments.some((s) => s === '.' || s === '..')
+  ) {
+    throw new Error(`PATH_TRAVERSAL_REJECTED: Rejected staging relative path '${rawRel}': must be a relative video file inside stagingDir.`);
+  }
+  const isWinStyle = cleanStaging.startsWith('\\\\') || /^[a-zA-Z]:[\\/]/.test(cleanStaging);
+  const api = isWinStyle ? path.win32 : path;
+  const resolved = api.resolve(cleanStaging, ...segments);
+  validateStagingPath(cleanStaging, resolved);
+  return resolved;
+}
+
 /** Both paths are Host owned/validated before any external I/O. */
 export function validateStagingPath(stagingDir: string, source: string): void {
-  const api = stagingDir.startsWith('\\\\') || /^[a-zA-Z]:[\\/]/.test(stagingDir) ? path.win32 : path;
-  const base = api.resolve(stagingDir);
+  const cleanStaging = stagingDir?.trim() ?? '';
+  if (!cleanStaging) {
+    throw new Error('PATH_TRAVERSAL_REJECTED: Host staging directory is not configured; refusing file operation. Configure stagingDir and rescan.');
+  }
+  const api = cleanStaging.startsWith('\\\\') || /^[a-zA-Z]:[\\/]/.test(cleanStaging) ? path.win32 : path;
+  const base = api.resolve(cleanStaging);
   const relative = api.relative(base, api.resolve(source));
   if (!relative || relative === '..' || relative.startsWith(`..${api.sep}`) || api.isAbsolute(relative) || source.includes('\0')
       || !VIDEO_EXTENSIONS.has(api.extname(source).toLowerCase())) {
-    throw new Error('PATH_TRAVERSAL_REJECTED: source must be a video inside the Host staging directory.');
+    throw new Error('PATH_TRAVERSAL_REJECTED: source must be a video inside the Host staging directory. Re-scan staging or update stagingDir before retrying.');
   }
 }
 
@@ -506,8 +540,10 @@ async function checkExistingTarget(fileOps: IngestionFileOps, source: string, de
   }
 }
 
-function validateManifestPaths(manifest: IngestionManifest, stagingDir?: string): void {
-  if (stagingDir) validateStagingPath(stagingDir, manifest.tempPath);
+function validateManifestPaths(manifest: IngestionManifest, stagingDir?: string, requireStagingDir = false): void {
+  if (requireStagingDir || stagingDir !== undefined) {
+    validateStagingPath(stagingDir ?? '', manifest.tempPath);
+  }
   if (path.win32.basename(manifest.targetRelativePath) !== manifest.filename || path.win32.basename(manifest.tempPath) !== manifest.filename) {
     throw new Error('PATH_TRAVERSAL_REJECTED: recorded source and destination filenames must match.');
   }
@@ -520,7 +556,8 @@ function validateManifestPaths(manifest: IngestionManifest, stagingDir?: string)
 export async function ensureManifestForStagingFile(
   db: DatabaseSync,
   options: {
-    readonly tempPath: string;
+    readonly tempPath?: string | undefined;
+    readonly relativePath?: string | undefined;
     readonly targetRootId: string;
     readonly targetSubdir: string;
     readonly roots: readonly MediaRootConfig[];
@@ -531,8 +568,15 @@ export async function ensureManifestForStagingFile(
 ): Promise<IngestionManifest> {
   const fileOps = options.fileOps ?? defaultIngestionFileOps;
   const now = (options.now ?? (() => new Date()))().toISOString();
-  const tempPath = options.tempPath;
-  if (options.stagingDir) validateStagingPath(options.stagingDir, tempPath);
+  let tempPath: string;
+  if (options.relativePath !== undefined) {
+    tempPath = resolveStagingRelativePath(options.stagingDir ?? '', options.relativePath);
+  } else if (options.tempPath) {
+    tempPath = options.tempPath;
+    validateStagingPath(options.stagingDir ?? '', tempPath);
+  } else {
+    throw new Error('PATH_TRAVERSAL_REJECTED: Either relativePath or Host-resolved tempPath is required.');
+  }
   const filename = path.win32.basename(tempPath);
   const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
   const targetRel = cleanSubdir ? `${cleanSubdir}/${filename}` : filename;
@@ -1151,7 +1195,7 @@ export async function commitIngestionManifest(
   const destPath = resolution.resolvedUncPath;
   let usedCopyFallback = false;
   try {
-    validateManifestPaths(manifest, options.stagingDir);
+    validateManifestPaths(manifest, options.stagingDir, true);
     options.onPhase?.('validation');
     const destAlreadyPresent = (await fileOps.exists(destPath)) && (await fileOps.statSize(destPath)) === manifest.fileSize;
     if (!destAlreadyPresent) {
@@ -1243,6 +1287,7 @@ export async function commitIngestionManifest(
   if (usedCopyFallback) {
     options.onPhase?.('cleanup');
     try {
+      validateManifestPaths(manifest, options.stagingDir, true);
       if (await fileOps.exists(manifest.tempPath)) await fileOps.removeFile(manifest.tempPath);
     } catch (rmErr) {
       warning = `copied-not-deleted: indexed media #${mediaId}, but failed to remove temp file (${rmErr instanceof Error ? rmErr.message : String(rmErr)})`;
@@ -1293,7 +1338,6 @@ export async function reconcileIngestionManifests(
 
   for (const m of candidates) {
     try {
-      validateManifestPaths(m, options.stagingDir);
       const resolution = resolveAllowlistedUncPath(options.roots, m.targetRootId, m.targetRelativePath);
       if (!resolution.ok) throw new Error(resolution.message);
       if (m.reviewDecision !== 'approved') throw new Error('REVIEW_REQUIRED: recovery requires human approval.');
@@ -1307,6 +1351,7 @@ export async function reconcileIngestionManifests(
         indexedButMissingMarked += 1;
         continue;
       }
+      validateManifestPaths(m, options.stagingDir, true);
       if (!destExists || await fileOps.statSize(destPath) !== m.fileSize) {
         throw new Error('Destination missing or size mismatched; recovery remains unresolved.');
       }
@@ -1324,6 +1369,7 @@ export async function reconcileIngestionManifests(
       }
       if (sourceExists) {
         options.onPhase?.('cleanup');
+        validateManifestPaths(m, options.stagingDir, true);
         await fileOps.removeFile(m.tempPath);
         db.prepare(`UPDATE ingestion_manifests SET last_error = NULL, updated_at = ? WHERE id = ?`).run(nowFn().toISOString(), m.id);
         if (alreadyIndexed) copiedNotDeletedFixed += 1;

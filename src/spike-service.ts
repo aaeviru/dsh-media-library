@@ -964,9 +964,12 @@ export class MediaLibrarySpikeService {
     let taskId: number | null = null;
     try {
       let manifestId = input.manifestId;
-      if (!manifestId && input.tempPath) {
+      if (!manifestId && (input as { readonly tempPath?: unknown }).tempPath !== undefined) {
+        throw new Error('PATH_TRAVERSAL_REJECTED: Client must submit manifestId or staging relativePath, not raw tempPath.');
+      }
+      if (!manifestId && input.relativePath) {
         const created = await ensureManifestForStagingFile(db, {
-          tempPath: input.tempPath,
+          relativePath: input.relativePath,
           stagingDir: this.ingestionStagingDir(),
           targetRootId: DEFAULT_M1_ROOT_ID,
           targetSubdir,
@@ -981,7 +984,7 @@ export class MediaLibrarySpikeService {
           ok: false,
           provider: null,
           category: 'client_error',
-          reason: 'Either manifestId or tempPath is required.',
+          reason: 'Either manifestId or relativePath is required.',
           sourceUrl: '',
           title: null,
           writer: null,
@@ -1043,9 +1046,12 @@ export class MediaLibrarySpikeService {
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
     return this.withInitializedDatabase(async (db) => {
       let manifestId = input.manifestId;
-      if (!manifestId && input.tempPath) {
+      if (!manifestId && (input as { readonly tempPath?: unknown }).tempPath !== undefined) {
+        throw new Error('PATH_TRAVERSAL_REJECTED: Client must submit manifestId or staging relativePath, not raw tempPath.');
+      }
+      if (!manifestId && input.relativePath) {
         const created = await ensureManifestForStagingFile(db, {
-          tempPath: input.tempPath,
+          relativePath: input.relativePath,
           stagingDir: this.ingestionStagingDir(),
           targetRootId: DEFAULT_M1_ROOT_ID,
           targetSubdir,
@@ -1056,7 +1062,7 @@ export class MediaLibrarySpikeService {
         manifestId = created.id;
       }
       if (!manifestId) {
-        return { ok: false, code: 'INVALID_INPUT', message: 'Either manifestId or tempPath is required.' };
+        return { ok: false, code: 'INVALID_INPUT', message: 'Either manifestId or relativePath is required.' };
       }
       const active = findManifestTask(db, manifestId);
       if (active) return { ok: false, code: 'IN_PROGRESS', message: `Task #${active.id} freezes this Manifest until it finishes.` };

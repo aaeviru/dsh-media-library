@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, test } from 'node:test';
 import { MediaLibrarySpikeService, type SpikeServiceOptions } from '../../src/spike-service.ts';
-import { defaultIngestionFileOps, MetadataFetcher, type IngestionFileOps } from '../../src/ingestion/index.ts';
+import { defaultIngestionFileOps, ensureManifestForStagingFile, MetadataFetcher, type IngestionFileOps } from '../../src/ingestion/index.ts';
 
 const cleanups: string[] = [];
 afterEach(() => { for (const dir of cleanups.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -33,8 +34,9 @@ function fixture(overrides: Partial<IngestionFileOps> = {}, options: Partial<Spi
   });
   const prepare = async (name = 'sample.mp4', bytes = Buffer.from('sample video')) => {
     const source = path.join(staging, name);
+    fs.mkdirSync(path.dirname(source), { recursive: true });
     fs.writeFileSync(source, bytes);
-    const reviewed = await service.reviewIngestion({ tempPath: source, decision: 'approved', title: name });
+    const reviewed = await service.reviewIngestion({ relativePath: name, decision: 'approved', title: name });
     assert.equal(reviewed.ok, true);
     assert.ok(reviewed.manifest);
     return { id: reviewed.manifest.id, source, destination: path.join(target, name) };
@@ -344,13 +346,91 @@ test('reconcile refuses incomplete targets and never cleans an unapproved source
   assert.equal((await f.service.searchMedia({})).items.length, 0);
 });
 
-test('Host rejects staging paths outside its configuration before touching files', async () => {
+test('Host rejects staging paths outside its configuration before touching files (Issue #29)', async () => {
   const f = fixture();
   const outside = path.join(f.dir, 'outside.mp4');
   fs.writeFileSync(outside, 'private');
-  await assert.rejects(f.service.reviewIngestion({ tempPath: outside, decision: 'approved' }), /PATH_TRAVERSAL_REJECTED/);
+  await assert.rejects(f.service.reviewIngestion({ relativePath: '../outside.mp4', decision: 'approved' }), /PATH_TRAVERSAL_REJECTED/);
+  await assert.rejects(f.service.reviewIngestion({ relativePath: outside, decision: 'approved' }), /PATH_TRAVERSAL_REJECTED/);
+  await assert.rejects(f.service.reviewIngestion({ relativePath: '\\\\NAS\\Other\\outside.mp4', decision: 'approved' }), /PATH_TRAVERSAL_REJECTED/);
+  await assert.rejects(f.service.reviewIngestion({ relativePath: 'note.txt', decision: 'approved' }), /PATH_TRAVERSAL_REJECTED/);
+  await assert.rejects(
+    f.service.reviewIngestion({ tempPath: outside, decision: 'approved' } as unknown as Parameters<MediaLibrarySpikeService['reviewIngestion']>[0]),
+    /PATH_TRAVERSAL_REJECTED/,
+  );
+  await assert.rejects(f.service.fetchIngestionMetadata({ relativePath: '../outside.mp4' }), /PATH_TRAVERSAL_REJECTED/);
+  await assert.rejects(
+    f.service.fetchIngestionMetadata({ tempPath: outside } as unknown as Parameters<MediaLibrarySpikeService['fetchIngestionMetadata']>[0]),
+    /PATH_TRAVERSAL_REJECTED/,
+  );
   assert.equal((await f.service.listIngestionManifests()).length, 0);
   assert.equal(fs.readFileSync(outside, 'utf8'), 'private');
+
+  // Valid nested relativePath inside stagingDir resolves cleanly on Host.
+  const nested = await f.prepare('sub/nested.mp4');
+  assert.equal(fs.existsSync(nested.source), true);
+  assert.equal((await f.service.listIngestionManifests()).length, 1);
+
+  // Leading-space filename must NOT be trimmed onto a sibling file without leading space.
+  const plainFile = path.join(f.staging, 'clip.mp4');
+  const spacedFile = path.join(f.staging, ' clip.mp4');
+  fs.writeFileSync(plainFile, 'plain-video');
+  fs.writeFileSync(spacedFile, 'spaced-video-longer');
+  const spacedReview = await f.service.reviewIngestion({ relativePath: ' clip.mp4', decision: 'approved', title: 'Spaced' });
+  assert.equal(spacedReview.ok, true);
+  assert.equal(spacedReview.manifest?.filename, ' clip.mp4');
+  assert.equal(spacedReview.manifest?.tempPath, spacedFile);
+  assert.equal(spacedReview.manifest?.fileSize, Buffer.byteLength('spaced-video-longer'));
+
+  // Direct ensureManifestForStagingFile with tempPath and missing stagingDir must reject before touching files.
+  const db = new DatabaseSync(f.service.getSpikeStatus().localDatabasePath);
+  try {
+    await assert.rejects(
+      ensureManifestForStagingFile(db, {
+        tempPath: plainFile,
+        targetRootId: 'nas-main',
+        targetSubdir: 'ingested',
+        roots: f.service.getSpikeStatus().roots,
+        fileOps: f.ops,
+      }),
+      /PATH_TRAVERSAL_REJECTED/,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('Host re-validates legacy/out-of-staging manifest paths on commit and reconcile, preserving records with actionable hints (Issue #29)', async () => {
+  const f = fixture();
+  const item = await f.prepare('legacy.mp4');
+  const outside = path.join(f.dir, 'outside-legacy.mp4');
+  fs.writeFileSync(outside, 'do-not-touch');
+
+  // Simulate an older/tampered manifest whose recorded temp_path escapes the current stagingDir.
+  const db = new DatabaseSync(f.service.getSpikeStatus().localDatabasePath);
+  try {
+    db.prepare('UPDATE ingestion_manifests SET temp_path = ? WHERE id = ?').run(outside, item.id);
+  } finally {
+    db.close();
+  }
+
+  const commitRes = await f.service.commitIngestion({ manifestId: item.id });
+  assert.equal(commitRes.ok, false);
+  assert.match(commitRes.message, /PATH_TRAVERSAL_REJECTED/);
+  assert.match(commitRes.message, /Re-scan staging|stagingDir/i);
+  assert.equal(fs.existsSync(outside), true, 'Host must not move or delete files outside stagingDir');
+  assert.equal(fs.existsSync(item.destination), false);
+
+  // Reconcile must also reject out-of-staging temp_path while preserving the manifest and actionable error.
+  fs.mkdirSync(path.dirname(item.destination), { recursive: true });
+  fs.writeFileSync(item.destination, Buffer.from('sample video'));
+  const reconcileRes = await f.service.reconcileIngestion();
+  assert.equal(reconcileRes.ok, false);
+  assert.match(reconcileRes.errors.join(' '), /PATH_TRAVERSAL_REJECTED/);
+  assert.equal(fs.existsSync(outside), true, 'Reconcile must never remove files outside stagingDir');
+  const preserved = (await f.service.listIngestionManifests()).find((m) => m.id === item.id);
+  assert.ok(preserved, 'Unverifiable manifest must be preserved');
+  assert.match(preserved.lastError ?? '', /PATH_TRAVERSAL_REJECTED/);
 });
 
 test('tag changes during a move are revalidated at indexing; failed indexing remains recoverable', async () => {
@@ -491,7 +571,7 @@ test('changing the configured database cannot admit another move while this Host
   let competing: ReturnType<MediaLibrarySpikeService['commitIngestion']> | undefined;
   try {
     const replacement = new MediaLibrarySpikeService({ baseDir: f.dir, dataDirName: 'other-library', configuredStagingDir: f.staging, configuredUncRoot: '\\\\NAS\\MediaTest', autoDailyBackup: false, ingestionFileOps: f.ops });
-    const review = await replacement.reviewIngestion({ tempPath: second.source, decision: 'approved' });
+    const review = await replacement.reviewIngestion({ relativePath: 'second.mp4', decision: 'approved' });
     assert.ok(review.manifest);
     competing = replacement.commitIngestion({ manifestId: review.manifest.id });
     const result = await Promise.race([competing, new Promise<null>(resolve => setTimeout(() => resolve(null), 500))]);

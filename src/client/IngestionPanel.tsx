@@ -512,7 +512,7 @@ export function IngestionPanel({
     setError(null);
     try {
       const res = await mediaLibrary.fetchIngestionMetadata(
-        entry.manifest ? { manifestId: entry.manifest.id } : { tempPath: entry.tempPath },
+        entry.manifest ? { manifestId: entry.manifest.id } : { relativePath: entry.relativePath },
       );
       if (!res.ok) {
         setError(res.error.message || t('rpcError'));
@@ -538,7 +538,7 @@ export function IngestionPanel({
 
   const approveEntry = async (entry: UnifiedStagingEntry): Promise<IngestionManifest | null> => {
     const result = await mediaLibrary.reviewIngestion({
-      manifestId: entry.manifest?.id, tempPath: entry.manifest ? undefined : entry.tempPath,
+      manifestId: entry.manifest?.id, relativePath: entry.manifest ? undefined : entry.relativePath,
       decision: 'approved', title: activeDraft.title, mediaDate: activeDraft.mediaDate,
       newTagNames: activeDraft.tagsText.split(',').map(s => s.trim()).filter(Boolean),
     });
