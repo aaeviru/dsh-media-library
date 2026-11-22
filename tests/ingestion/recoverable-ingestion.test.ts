@@ -269,6 +269,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         // Manifest is created lazily only when user acts on fileA.
         const mA = await ensureManifestForStagingFile(db, {
           tempPath: fileA,
+          stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,
@@ -276,6 +277,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         });
         const mB = await ensureManifestForStagingFile(db, {
           tempPath: fileB,
+          stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,
@@ -283,6 +285,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         });
         const mC = await ensureManifestForStagingFile(db, {
           tempPath: fileC,
+          stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,
@@ -550,6 +553,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
 
         const ensured = await ensureManifestForStagingFile(db, {
           tempPath: sampleFile,
+          stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,

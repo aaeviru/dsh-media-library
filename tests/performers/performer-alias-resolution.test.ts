@@ -138,6 +138,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         // 1) Manifest 1 has: known stage-name ('new stage name'), ambiguous ('ここあ'), and unknown ('新人ちゃん')
         const m1 = await ensureManifestForStagingFile(db, {
           tempPath: file1,
+          stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,
@@ -271,6 +272,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         // 2) Durable reuse on later manifest (file2): '新人ちゃん' now auto-matches deterministically!
         const m2 = await ensureManifestForStagingFile(db, {
           tempPath: file2,
+          stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,
@@ -308,6 +310,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         upsertPerformerAlias(db, { rawAlias: 'みな', tagId: soloTag.tagId, policy: 'always_ask' });
         const m3 = await ensureManifestForStagingFile(db, {
           tempPath: file3,
+          stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,
@@ -406,6 +409,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
 
         const m = await ensureManifestForStagingFile(db, {
           tempPath: sampleFile,
+          stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,
@@ -485,6 +489,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
 
         const m = await ensureManifestForStagingFile(db, {
           tempPath: file1,
+          stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
           roots,

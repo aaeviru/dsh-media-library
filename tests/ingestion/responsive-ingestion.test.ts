@@ -5,7 +5,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, test } from 'node:test';
 import { MediaLibrarySpikeService, type SpikeServiceOptions } from '../../src/spike-service.ts';
-import { defaultIngestionFileOps, MetadataFetcher, type IngestionFileOps } from '../../src/ingestion/index.ts';
+import { defaultIngestionFileOps, ensureManifestForStagingFile, MetadataFetcher, type IngestionFileOps } from '../../src/ingestion/index.ts';
 
 const cleanups: string[] = [];
 afterEach(() => { for (const dir of cleanups.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -370,6 +370,34 @@ test('Host rejects staging paths outside its configuration before touching files
   const nested = await f.prepare('sub/nested.mp4');
   assert.equal(fs.existsSync(nested.source), true);
   assert.equal((await f.service.listIngestionManifests()).length, 1);
+
+  // Leading-space filename must NOT be trimmed onto a sibling file without leading space.
+  const plainFile = path.join(f.staging, 'clip.mp4');
+  const spacedFile = path.join(f.staging, ' clip.mp4');
+  fs.writeFileSync(plainFile, 'plain-video');
+  fs.writeFileSync(spacedFile, 'spaced-video-longer');
+  const spacedReview = await f.service.reviewIngestion({ relativePath: ' clip.mp4', decision: 'approved', title: 'Spaced' });
+  assert.equal(spacedReview.ok, true);
+  assert.equal(spacedReview.manifest?.filename, ' clip.mp4');
+  assert.equal(spacedReview.manifest?.tempPath, spacedFile);
+  assert.equal(spacedReview.manifest?.fileSize, Buffer.byteLength('spaced-video-longer'));
+
+  // Direct ensureManifestForStagingFile with tempPath and missing stagingDir must reject before touching files.
+  const db = new DatabaseSync(f.service.getSpikeStatus().localDatabasePath);
+  try {
+    await assert.rejects(
+      ensureManifestForStagingFile(db, {
+        tempPath: plainFile,
+        targetRootId: 'nas-main',
+        targetSubdir: 'ingested',
+        roots: f.service.getSpikeStatus().roots,
+        fileOps: f.ops,
+      }),
+      /PATH_TRAVERSAL_REJECTED/,
+    );
+  } finally {
+    db.close();
+  }
 });
 
 test('Host re-validates legacy/out-of-staging manifest paths on commit and reconcile, preserving records with actionable hints (Issue #29)', async () => {

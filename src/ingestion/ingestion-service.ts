@@ -481,11 +481,11 @@ export function resolveStagingRelativePath(stagingDir: string, relativePath: str
   if (!cleanStaging) {
     throw new Error('PATH_TRAVERSAL_REJECTED: Host staging directory is not configured; configure stagingDir and rescan.');
   }
-  const rawRel = typeof relativePath === 'string' ? relativePath.trim() : '';
+  const rawRel = typeof relativePath === 'string' ? relativePath : '';
   const normalizedRel = rawRel.replace(/\\/g, '/');
   const segments = normalizedRel.split('/').filter(Boolean);
   if (
-    !rawRel ||
+    !rawRel.trim() ||
     rawRel.includes('\0') ||
     rawRel.startsWith('/') ||
     rawRel.startsWith('\\') ||
@@ -573,7 +573,7 @@ export async function ensureManifestForStagingFile(
     tempPath = resolveStagingRelativePath(options.stagingDir ?? '', options.relativePath);
   } else if (options.tempPath) {
     tempPath = options.tempPath;
-    if (options.stagingDir !== undefined) validateStagingPath(options.stagingDir, tempPath);
+    validateStagingPath(options.stagingDir ?? '', tempPath);
   } else {
     throw new Error('PATH_TRAVERSAL_REJECTED: Either relativePath or Host-resolved tempPath is required.');
   }
