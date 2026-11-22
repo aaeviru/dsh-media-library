@@ -175,7 +175,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
 
         // Policy 1: approve normal review, then commit must FAIL with PERFORMER_REVIEW_REQUIRED
         reviewIngestionManifest(db, { manifestId: m1.id, decision: 'approved', newTagNames: ['巨乳'] });
-        const blockedCommit = await commitIngestionManifest(db, { manifestId: m1.id, roots, fileOps });
+        const blockedCommit = await commitIngestionManifest(db, { manifestId: m1.id, stagingDir: tempDir, roots, fileOps });
         assert.equal(blockedCommit.ok, false);
         assert.equal(blockedCommit.code, 'PERFORMER_REVIEW_REQUIRED');
         assert.equal(fs.existsSync(file1), true, 'Staging file must NOT move while performer review is pending');
@@ -222,7 +222,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         const previewReady = evaluateManifestPerformers(db, m1.id);
         assert.equal(previewReady.canCommit, true);
         assert.equal(previewReady.humanResolved.length, 2);
-        const committed1 = await commitIngestionManifest(db, { manifestId: m1.id, roots, fileOps });
+        const committed1 = await commitIngestionManifest(db, { manifestId: m1.id, stagingDir: tempDir, roots, fileOps });
         assert.equal(committed1.ok, true);
         assert.ok(committed1.mediaId);
 
@@ -264,7 +264,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         }
 
         // Re-commit is idempotent
-        const replay1 = await commitIngestionManifest(db, { manifestId: m1.id, roots, fileOps });
+        const replay1 = await commitIngestionManifest(db, { manifestId: m1.id, stagingDir: tempDir, roots, fileOps });
         assert.equal(replay1.ok, true);
         assert.equal(replay1.idempotentReplay, true);
 
@@ -284,7 +284,7 @@ describe('Performer Alias Resolution & Human Review Queue (Issue #8 B1..B7)', ()
         assert.equal(preview2.autoMatched[0]!.source, 'performer-rule');
 
         reviewIngestionManifest(db, { manifestId: m2.id, decision: 'approved', newTagNames: ['巨乳'] });
-        const committed2 = await commitIngestionManifest(db, { manifestId: m2.id, roots, fileOps });
+        const committed2 = await commitIngestionManifest(db, { manifestId: m2.id, stagingDir: tempDir, roots, fileOps });
         assert.equal(committed2.ok, true);
         assert.ok(committed2.mediaId);
 

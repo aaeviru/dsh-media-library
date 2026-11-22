@@ -461,7 +461,7 @@ export interface ScanStagingResult {
 
 export interface FetchIngestionMetadataInput {
   readonly manifestId?: number | undefined;
-  readonly tempPath?: string | undefined;
+  readonly relativePath?: string | undefined;
 }
 
 export interface FetchedMetadataCandidate {
@@ -480,7 +480,7 @@ export interface FetchedMetadataCandidate {
 
 export interface ReviewIngestionInput {
   readonly manifestId?: number | undefined;
-  readonly tempPath?: string | undefined;
+  readonly relativePath?: string | undefined;
   readonly decision: 'approved' | 'rejected';
   readonly title?: string | undefined;
   readonly catalogNumber?: string | undefined;
