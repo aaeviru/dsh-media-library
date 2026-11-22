@@ -6,10 +6,13 @@ import { describe, it } from 'node:test'
 import { DatabaseSync } from 'node:sqlite'
 import { restoreDatabaseFromBackup } from '../../src/db/backup.ts'
 import {
+  classifyBackupFilename,
   createOperationalBackup,
   exportPortableMappingReport,
   listManagedBackups,
   maybeRunDailyAutoBackup,
+  parseManagedBackupFilename,
+  pruneManagedBackups,
 } from '../../src/db/ops.ts'
 import { CURRENT_SCHEMA_VERSION, migrateDatabase } from '../../src/db/schema.ts'
 import { listTagsInDatabase, searchMediaInDatabase } from '../../src/search/search-repository.ts'
@@ -246,6 +249,79 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
         assert.ok(csvReport.content.includes("'=CMD(\"\"calc\"\")") || csvReport.content.includes('=CMD'))
       } finally {
         db.close()
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('Issue #36 B1..B3: rotates only strictly plugin-named backups and sorts pre-migrate v9/v10/v11 by parsed timestamp', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ops-issue36-'))
+    try {
+      // Strictly reject manual snapshots even when they share prefixes and .sqlite3 extension.
+      assert.equal(classifyBackupFilename('library-backup-manual.sqlite3'), null)
+      assert.equal(classifyBackupFilename('library-backup-2026-02-31T00-00-00-000Z.sqlite3'), null)
+      assert.equal(classifyBackupFilename('pre-migrate-manual-copy.sqlite3'), null)
+      assert.equal(classifyBackupFilename('pre-migrate-v9-2026-11-20T00-00-00-000Z.sqlite3'), null)
+      assert.equal(parseManagedBackupFilename('library-backup-2026-11-20T01-02-03-004Z.sqlite3')?.kind, 'daily')
+      assert.equal(parseManagedBackupFilename('pre-migrate-v9-to-v10-2026-11-20T01-02-03-004Z.sqlite3')?.kind, 'pre-migrate')
+
+      const manualFiles = [
+        'library-backup-manual-snapshot.sqlite3',
+        'pre-migrate-handcrafted.sqlite3',
+        'custom-backup.sqlite3',
+      ]
+      for (const name of manualFiles) {
+        fs.writeFileSync(path.join(tmpDir, name), 'manual')
+      }
+
+      // Daily backups: 3 valid plugin backups (retention=2 -> keep newest 2 by timestamp).
+      const dailyOld = 'library-backup-2026-11-18T10-00-00-000Z.sqlite3'
+      const dailyMid = 'library-backup-2026-11-19T10-00-00-000Z.sqlite3'
+      const dailyNew = 'library-backup-2026-11-20T10-00-00-000Z.sqlite3'
+      for (const name of [dailyOld, dailyMid, dailyNew]) {
+        fs.writeFileSync(path.join(tmpDir, name), name)
+      }
+
+      // Pre-migrate backups crossing v9 -> v10 -> v11:
+      // Lexicographically 'v9' > 'v10' > 'v11', so raw filename sorting would wrongly keep v9 and delete v10/v11!
+      const pmV8 = 'pre-migrate-v8-to-v9-2026-11-18T00-00-00-000Z.sqlite3'
+      const pmV9 = 'pre-migrate-v9-to-v10-2026-11-19T00-00-00-000Z.sqlite3'
+      const pmV10 = 'pre-migrate-v10-to-v11-2026-11-20T00-00-00-000Z.sqlite3'
+      const pmV11 = 'pre-migrate-v11-to-v12-2026-11-21T00-00-00-000Z.sqlite3'
+      for (const name of [pmV8, pmV9, pmV10, pmV11]) {
+        fs.writeFileSync(path.join(tmpDir, name), name)
+      }
+
+      const beforeList = listManagedBackups(tmpDir)
+      assert.deepEqual(
+        beforeList.filter(b => b.kind === 'pre-migrate').map(b => b.filename),
+        [pmV11, pmV10, pmV9, pmV8],
+      )
+      assert.deepEqual(
+        beforeList.filter(b => b.kind === 'daily').map(b => b.filename),
+        [dailyNew, dailyMid, dailyOld],
+      )
+
+      const removed = pruneManagedBackups(tmpDir, { dailyRetention: 2, preMigrateRetention: 2 })
+      assert.equal(removed.length, 3)
+
+      const afterList = listManagedBackups(tmpDir)
+      assert.deepEqual(
+        afterList.filter(b => b.kind === 'daily').map(b => b.filename),
+        [dailyNew, dailyMid],
+      )
+      assert.deepEqual(
+        afterList.filter(b => b.kind === 'pre-migrate').map(b => b.filename),
+        [pmV11, pmV10],
+      )
+      assert.equal(fs.existsSync(path.join(tmpDir, dailyOld)), false)
+      assert.equal(fs.existsSync(path.join(tmpDir, pmV8)), false)
+      assert.equal(fs.existsSync(path.join(tmpDir, pmV9)), false)
+
+      // All manual snapshots must remain untouched.
+      for (const name of manualFiles) {
+        assert.equal(fs.existsSync(path.join(tmpDir, name)), true, `Manual file ${name} must be preserved`)
       }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true })
