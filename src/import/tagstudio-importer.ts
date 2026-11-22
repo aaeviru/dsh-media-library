@@ -259,6 +259,237 @@ interface SourceDatetimeFieldRow {
 }
 
 /**
+ * Restrict `--force` re-import to TagStudio-owned rows under `rootId` (`Issue #33`, `#3 B6`).
+ * Refuses and throws before mutating if ownership cannot be safely separated from manual edits,
+ * M4 ingestion records, non-TagStudio path collisions, or manually archived/merged tags.
+ */
+function prepareScopedForceReimport(
+  db: DatabaseSync,
+  options: {
+    readonly rootId: string
+    readonly rootName: string
+    readonly canonicalUncRoot: string
+    readonly sourceEntries: readonly SourceEntryRow[]
+    readonly sourceTags: readonly SourceTagRow[]
+  },
+): void {
+  const { rootId, rootName, canonicalUncRoot, sourceEntries, sourceTags } = options
+  const allowlistRoots = [{ rootId, label: rootName, canonicalUncRoot, enabled: true }]
+
+  // 1. Collect incoming non-sidecar normalized relative paths under `rootId` to detect collisions with non-TagStudio rows.
+  const incomingPathsLower = new Set<string>()
+  for (const entry of sourceEntries) {
+    const normPath = normalizeRelativeMediaPath(String(entry.path ?? ''))
+    if (!normPath.ok) continue
+    const uncRes = resolveAllowlistedUncPath(allowlistRoots, rootId, normPath.relativeWin32Path)
+    if (!uncRes.ok) continue
+    const filename = path.win32.basename(uncRes.normalizedRelativePath)
+    const ext =
+      path.win32.extname(filename).replace(/^\./, '').toLowerCase() ||
+      String(entry.suffix ?? '').replace(/^\./, '').toLowerCase()
+    if (ext === 'db' || ext === 'vsmeta') continue
+    incomingPathsLower.add(uncRes.normalizedRelativePath.toLowerCase())
+  }
+
+  const nonTagStudioRows = db
+    .prepare(
+      `SELECT relative_path
+       FROM media_files
+       WHERE root_id = ?
+         AND (source_key IS NULL OR source_key NOT LIKE 'tagstudio:%')`,
+    )
+    .all(rootId) as Array<{ relative_path: string }>
+  for (const row of nonTagStudioRows) {
+    const rel = String(row.relative_path)
+    if (incomingPathsLower.has(rel.toLowerCase())) {
+      throw new Error(
+        `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": incoming TagStudio path "${rel}" collides with an existing non-TagStudio media entry.`,
+      )
+    }
+  }
+
+  // 2. Refuse if any incoming tag collides with a manually edited (`revision > 1`), archived, or merged tag
+  //    — checking BOTH `legacy_ids` (catches renamed tags) and `normalized_name` (catches edited aliases/metadata).
+  const tagCols = new Set(
+    (db.prepare('PRAGMA table_info("tags")').all() as Array<{ name: string }>).map(r => String(r.name)),
+  )
+  const selectTagGuardCols = `
+    t.name,
+    t.revision,
+    ${tagCols.has('archived_at') ? 't.archived_at' : 'NULL AS archived_at'},
+    ${tagCols.has('merged_into_id') ? 't.merged_into_id' : 'NULL AS merged_into_id'}
+  `
+  const checkTagByNameStmt = db.prepare(`SELECT ${selectTagGuardCols} FROM tags t WHERE t.normalized_name = ?`)
+  const checkTagByLegacyStmt = db.prepare(
+    `SELECT ${selectTagGuardCols}
+     FROM legacy_ids l
+     JOIN tags t ON t.id = l.entity_id
+     WHERE l.source_type = 'tagstudio' AND l.entity_type = 'tag' AND l.source_id = ?`,
+  )
+  const seenNormNames = new Set<string>()
+  for (const tag of sourceTags) {
+    const legacyTag = checkTagByLegacyStmt.get(String(tag.id)) as
+      | { name: string; revision: number; archived_at: string | null; merged_into_id: number | null }
+      | undefined
+    if (
+      legacyTag &&
+      (Number(legacyTag.revision) > 1 || legacyTag.archived_at !== null || legacyTag.merged_into_id !== null)
+    ) {
+      throw new Error(
+        `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": previously imported tag "${legacyTag.name}" (source_id=${tag.id}) was manually edited, archived, or merged.`,
+      )
+    }
+
+    const norm = normalizeLookupKey(String(tag.name))
+    if (seenNormNames.has(norm)) continue
+    seenNormNames.add(norm)
+    const existing = checkTagByNameStmt.get(norm) as
+      | { name: string; revision: number; archived_at: string | null; merged_into_id: number | null }
+      | undefined
+    if (
+      existing &&
+      (Number(existing.revision) > 1 || existing.archived_at !== null || existing.merged_into_id !== null)
+    ) {
+      throw new Error(
+        `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": existing tag "${existing.name}" was manually edited, archived, or merged.`,
+      )
+    }
+  }
+
+  // 3. Stage the exact set of TagStudio-owned media_files under `rootId` in a temp table (avoids SQLite bind limits).
+  db.exec('DROP TABLE IF EXISTS temp._force_scoped_media;')
+  db.exec('CREATE TEMP TABLE _force_scoped_media (id INTEGER PRIMARY KEY);')
+  db.prepare(
+    `INSERT INTO temp._force_scoped_media (id)
+     SELECT id FROM media_files
+     WHERE root_id = ? AND source_key LIKE 'tagstudio:%'`,
+  ).run(rootId)
+
+  try {
+    const editedCount = Number(
+      (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS cnt
+             FROM media_files mf
+             JOIN temp._force_scoped_media sm ON sm.id = mf.id
+             WHERE mf.revision > 1`,
+          )
+          .get() as { cnt: number }
+      ).cnt,
+    )
+    if (editedCount > 0) {
+      throw new Error(
+        `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": ${editedCount} previously imported TagStudio media row(s) have manual edits (revision > 1).`,
+      )
+    }
+
+    const mixedTagCount = Number(
+      (
+        db
+          .prepare(
+            `SELECT COUNT(DISTINCT mt.media_id) AS cnt
+             FROM media_tags mt
+             JOIN temp._force_scoped_media sm ON sm.id = mt.media_id
+             WHERE mt.source <> 'tagstudio-import'`,
+          )
+          .get() as { cnt: number }
+      ).cnt,
+    )
+    if (mixedTagCount > 0) {
+      throw new Error(
+        `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": ${mixedTagCount} previously imported TagStudio media row(s) have non-TagStudio tag associations (manual/ingestion/performer-rule).`,
+      )
+    }
+
+    const editedLinkedTagCount = Number(
+      (
+        db
+          .prepare(
+            `SELECT COUNT(DISTINCT mt.tag_id) AS cnt
+             FROM media_tags mt
+             JOIN temp._force_scoped_media sm ON sm.id = mt.media_id
+             JOIN tags t ON t.id = mt.tag_id
+             WHERE t.revision > 1
+               ${tagCols.has('archived_at') ? 'OR t.archived_at IS NOT NULL' : ''}
+               ${tagCols.has('merged_into_id') ? 'OR t.merged_into_id IS NOT NULL' : ''}`,
+          )
+          .get() as { cnt: number }
+      ).cnt,
+    )
+    if (editedLinkedTagCount > 0) {
+      throw new Error(
+        `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": ${editedLinkedTagCount} tag(s) linked to existing TagStudio media rows were manually edited, archived, or merged.`,
+      )
+    }
+
+    if (hasTable(db, 'ingestion_manifests')) {
+      const manifestRefCount = Number(
+        (
+          db
+            .prepare(
+              `SELECT COUNT(*) AS cnt
+               FROM ingestion_manifests im
+               JOIN temp._force_scoped_media sm ON sm.id = im.indexed_media_id`,
+            )
+            .get() as { cnt: number }
+        ).cnt,
+      )
+      if (manifestRefCount > 0) {
+        throw new Error(
+          `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": ${manifestRefCount} media row(s) are referenced by ingestion_manifests.`,
+        )
+      }
+    }
+
+    if (hasTable(db, 'performer_review_queue')) {
+      const queueRefCount = Number(
+        (
+          db
+            .prepare(
+              `SELECT COUNT(*) AS cnt
+               FROM performer_review_queue prq
+               JOIN temp._force_scoped_media sm ON sm.id = prq.media_id`,
+            )
+            .get() as { cnt: number }
+        ).cnt,
+      )
+      if (queueRefCount > 0) {
+        throw new Error(
+          `FORCE_REIMPORT_REFUSED: Cannot safely force re-import root "${rootId}": ${queueRefCount} media row(s) are referenced by performer_review_queue.`,
+        )
+      }
+    }
+
+    // 4. Delete ONLY the verified TagStudio-owned media rows & dependent rows for `rootId`.
+    //    Never physically delete `tags`, `tag_aliases`, or `tag_parents` during `--force`:
+    //    preserves manually created tags that share names with TagStudio tags and aligns with M3's no-hard-delete invariant.
+    db.exec(`
+      DELETE FROM legacy_ids
+      WHERE source_type = 'tagstudio'
+        AND entity_type = 'text_field'
+        AND entity_id IN (
+          SELECT mtf.id FROM media_text_fields mtf
+          JOIN temp._force_scoped_media sm ON sm.id = mtf.media_id
+        );
+      DELETE FROM legacy_ids
+      WHERE source_type = 'tagstudio'
+        AND entity_type = 'entry'
+        AND entity_id IN (SELECT id FROM temp._force_scoped_media);
+      DELETE FROM media_tags
+      WHERE media_id IN (SELECT id FROM temp._force_scoped_media)
+        AND source = 'tagstudio-import';
+      DELETE FROM media_text_fields
+      WHERE media_id IN (SELECT id FROM temp._force_scoped_media);
+      DELETE FROM media_files
+      WHERE id IN (SELECT id FROM temp._force_scoped_media);
+    `)
+  } finally {
+    db.exec('DROP TABLE IF EXISTS temp._force_scoped_media;')
+  }
+}
+
+/**
  * Import or dry-run a TagStudio `.sqlite` read-only copy into the local DSH media library SQLite database (`B3..B6`, `B8`).
  */
 export async function importTagStudioDatabase(
@@ -482,17 +713,15 @@ export async function importTagStudioDatabase(
     // Begin atomic import transaction (`B5`)
     db.exec('BEGIN IMMEDIATE;')
     try {
-      // If force=true on an existing DB, clear previous tagstudio imported rows cleanly before re-importing
+      // If force=true on an existing DB, only replace TagStudio-owned rows scoped to `rootId` (`Issue #33`)
       if (options.force) {
-        db.exec(`
-          DELETE FROM media_tags;
-          DELETE FROM media_text_fields;
-          DELETE FROM tag_parents;
-          DELETE FROM tag_aliases;
-          DELETE FROM media_files;
-          DELETE FROM tags;
-          DELETE FROM legacy_ids WHERE source_type = 'tagstudio';
-        `)
+        prepareScopedForceReimport(db, {
+          rootId,
+          rootName,
+          canonicalUncRoot,
+          sourceEntries: sourceSnapshot.entries,
+          sourceTags: sourceSnapshot.tags,
+        })
       }
 
       // 1. Ensure media_root exists
