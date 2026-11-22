@@ -17,7 +17,6 @@ export const DEFAULT_PRE_MIGRATE_BACKUP_RETENTION = 5
 export const DAILY_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 const DAILY_PREFIX = 'library-backup-'
-const PRE_MIGRATE_PREFIX = 'pre-migrate-'
 const BACKUP_EXT = '.sqlite3'
 const STATE_FILENAME = '.backup-state.json'
 
@@ -35,38 +34,71 @@ export interface AutoBackupStateFile {
   readonly watermark: ChangeWatermark
 }
 
-export function classifyBackupFilename(filename: string): BackupKind | null {
-  if (!filename.endsWith(BACKUP_EXT)) return null
-  if (filename.startsWith(DAILY_PREFIX)) return 'daily'
-  if (filename.startsWith(PRE_MIGRATE_PREFIX)) return 'pre-migrate'
-  return null
+const DAILY_BACKUP_FILENAME_RE = /^library-backup-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.sqlite3$/
+const PRE_MIGRATE_BACKUP_FILENAME_RE = /^pre-migrate-v\d+-to-v\d+-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.sqlite3$/
+
+export interface ParsedBackupFilename {
+  readonly kind: BackupKind
+  readonly timestampMs: number
+  readonly timestampIso: string
 }
 
 /**
- * List plugin-managed `.sqlite3` backups in `backupDir`, newest first.
+ * Strictly parse plugin-generated backup filenames and extract their UTC timestamp (`Issue #36`).
+ * Returns `null` for manual/unrelated files even if they share prefixes or `.sqlite3` extension.
+ */
+export function parseManagedBackupFilename(filename: string): ParsedBackupFilename | null {
+  let kind: BackupKind
+  let match = DAILY_BACKUP_FILENAME_RE.exec(filename)
+  if (match) {
+    kind = 'daily'
+  } else {
+    match = PRE_MIGRATE_BACKUP_FILENAME_RE.exec(filename)
+    if (!match) return null
+    kind = 'pre-migrate'
+  }
+  const iso = `${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5]}Z`
+  const timestampMs = Date.parse(iso)
+  if (!Number.isFinite(timestampMs)) return null
+  // Guard against calendar rollovers such as 2026-02-31.
+  if (new Date(timestampMs).toISOString() !== iso) return null
+  return { kind, timestampMs, timestampIso: iso }
+}
+
+export function classifyBackupFilename(filename: string): BackupKind | null {
+  return parseManagedBackupFilename(filename)?.kind ?? null
+}
+
+/**
+ * List plugin-managed `.sqlite3` backups in `backupDir`, newest first by parsed backup timestamp.
  * Ignores unrelated or user-placed files so retention pruning never touches them.
  */
 export function listManagedBackups(backupDir: string): ManagedBackupEntry[] {
   if (!fs.existsSync(backupDir)) return []
   const entries = fs.readdirSync(backupDir, { withFileTypes: true })
-  const result: ManagedBackupEntry[] = []
+  const result: Array<ManagedBackupEntry & { readonly parsedTimestampMs: number }> = []
   for (const entry of entries) {
     if (!entry.isFile()) continue
-    const kind = classifyBackupFilename(entry.name)
-    if (!kind) continue
+    const parsed = parseManagedBackupFilename(entry.name)
+    if (!parsed) continue
     const fullPath = path.join(backupDir, entry.name)
     const stat = fs.statSync(fullPath)
     result.push({
       filename: entry.name,
       path: fullPath,
-      kind,
+      kind: parsed.kind,
       size: stat.size,
       mtimeIso: stat.mtime.toISOString(),
+      parsedTimestampMs: parsed.timestampMs,
     })
   }
-  // Filenames embed ISO timestamps (`YYYY-MM-DDTHH-mm-ss-sssZ`), so descending name order aligns with newest-first.
-  result.sort((a, b) => b.filename.localeCompare(a.filename) || b.mtimeIso.localeCompare(a.mtimeIso))
-  return result
+  result.sort(
+    (a, b) =>
+      b.parsedTimestampMs - a.parsedTimestampMs ||
+      b.mtimeIso.localeCompare(a.mtimeIso) ||
+      b.filename.localeCompare(a.filename),
+  )
+  return result.map(({ parsedTimestampMs: _ignored, ...entry }) => entry)
 }
 
 /**
