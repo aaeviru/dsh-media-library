@@ -131,6 +131,7 @@ import type {
   UpsertPerformerAliasInput,
   UpsertPerformerAliasResult,
 } from './types.ts';
+import { APP_VERSION } from './version.ts';
 import {
   normalizeCanonicalUncRoot,
   resolveAllowlistedUncPath,
@@ -525,7 +526,7 @@ export class MediaLibrarySpikeService {
         const mig = await migrateDatabase(db, {
           dbPath,
           backupDir: this.backupDir,
-          appVersion: '0.7.10',
+          appVersion: APP_VERSION,
           now: this.now,
         });
         if (!mig.health.ok) {
@@ -885,7 +886,7 @@ export class MediaLibrarySpikeService {
       return await this.withInitializedDatabase((db) =>
         exportPortableMappingReport(db, {
           format: input.format,
-          appVersion: '0.7.10',
+          appVersion: APP_VERSION,
           now: this.now,
         }),
       );

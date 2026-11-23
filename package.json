@@ -33,7 +33,7 @@
   "scripts": {
     "bundle": "bash ./scripts/build-bundle.sh",
     "pack:tgz": "bash ./scripts/pack.sh",
-    "test": "node --test tests/inventory/*.test.ts tests/host/*.test.ts",
+    "test": "node --experimental-strip-types --test tests/inventory/*.test.ts tests/host/*.test.ts tests/db/*.test.ts tests/import/*.test.ts tests/search/*.test.ts tests/mutations/*.test.ts tests/ingestion/*.test.ts tests/performers/*.test.ts",
     "verify": "bash ./scripts/verify.sh"
   },
   "dependencies": {},

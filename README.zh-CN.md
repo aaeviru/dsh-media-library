@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**M1–M4 已全部实现**（当前基线：`v0.7.3`，SQLite Schema `v7`）。
+**M1–M4 已全部实现**（当前基线：`v0.7.10`，SQLite Schema `v7`）。
 
 - **M1（Host / UNC 边界与盘点）**：白名单 Windows UNC 路径安全解析、原生默认应用打开（如 PotPlayer）与 Explorer `/select` 定位、TagStudio 只读数据库盘点。
 - **M2（只读迁移、搜索与打开）**：从 TagStudio `ts_library.sqlite` 无损只读导入（导入前后校验源库 SHA-256 不变）、版本化 SQLite 迁移、支持标签/别名（多标签交集）、番号（精确/前缀）、日期范围与关键词的 keyset 分页搜索，以及右键菜单/快捷键原生打开与定位。
@@ -78,6 +78,7 @@ DSH Host（唯一可信边界 & 唯一 SQLite 写入者）
   - [ADR 0001：M1 UNC 路径打开实现](docs/adr/0001-m1-unc-path-opener.md)
   - [ADR 0002：暂存扫描与可恢复移库](docs/adr/0002-staging-scan-and-move.md)
   - [ADR 0003：非阻塞 Host 与串行化入库](docs/adr/0003-responsive-host-and-serialized-ingestion.md)
+  - [ADR 0004：标签层级 DAG 与分类角色正交设计](docs/adr/0004-tag-hierarchy-and-kind.md)
 
 ## 参考项目
 

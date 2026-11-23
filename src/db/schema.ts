@@ -2,6 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
+import { APP_VERSION } from '../version.ts'
 
 export const CURRENT_SCHEMA_VERSION = 7
 
@@ -462,7 +463,7 @@ export async function migrateDatabase(
   ensureSchemaVersionsTable(db)
 
   const migrations = [...(options?.migrations ?? DEFAULT_MIGRATIONS)].sort((a, b) => a.version - b.version)
-  const appVersion = options?.appVersion ?? '0.7.10'
+  const appVersion = options?.appVersion ?? APP_VERSION
   const nowFn = options?.now ?? (() => new Date())
 
   const previousVersion = getCurrentSchemaVersion(db)
