@@ -14,7 +14,12 @@ import {
   parseManagedBackupFilename,
   pruneManagedBackups,
 } from '../../src/db/ops.ts'
-import { CURRENT_SCHEMA_VERSION, migrateDatabase } from '../../src/db/schema.ts'
+import {
+  CURRENT_SCHEMA_VERSION,
+  migrateDatabase,
+  V1_SCHEMA_MIGRATION,
+  V2_MEDIA_STATUS_MIGRATION,
+} from '../../src/db/schema.ts'
 import { listTagsInDatabase, searchMediaInDatabase } from '../../src/search/search-repository.ts'
 import { MediaLibrarySpikeService } from '../../src/spike-service.ts'
 import { createM2ImportTagStudioFixture } from '../../src/inventory/fixture-builder.ts'
@@ -328,6 +333,201 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
     }
   })
 
+  it('Issue #35: previewManifestPerformers does not write in READ_ONLY_DEGRADED mode and keeps in-memory preview consistent', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ops-issue35-preview-'))
+    try {
+      const { dbPath } = await createPopulatedService(tmpDir)
+      const db = new DatabaseSync(dbPath)
+      let manifestId = 0
+      let beforeQueue: Array<Record<string, unknown>> = []
+      try {
+        await migrateDatabase(db, { dbPath })
+        // 1) Active tag + auto rule for performer that has a stale pending queue row (tests DELETE guard + no duplicate).
+        const autoTagId = Number(
+          db
+            .prepare(
+              `INSERT INTO tags (name, normalized_name, kind, created_at, updated_at, revision)
+               VALUES ('AutoPerformer', 'autoperformer', 'performer', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z', 1)`,
+            )
+            .run().lastInsertRowid,
+        )
+        db.prepare(
+          `INSERT INTO performer_aliases (normalized_name, raw_alias, tag_id, policy, note, created_at, updated_at)
+           VALUES ('stale pending performer', 'Stale Pending Performer', ?, 'auto', '', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z')`,
+        ).run(autoTagId)
+
+        // 2) Archived tag for a previously resolved queue row (tests UPDATE guard).
+        const archivedTagId = Number(
+          db
+            .prepare(
+              `INSERT INTO tags (name, normalized_name, kind, archived_at, created_at, updated_at, revision)
+               VALUES ('ArchivedPerformer', 'archivedperformer', 'performer', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z', 1)`,
+            )
+            .run().lastInsertRowid,
+        )
+
+        // 3) Manifest with all three cases: stale pending -> auto, resolved -> archived, plus brand-new unknown (INSERT guard).
+        const res = db
+          .prepare(
+            `INSERT INTO ingestion_manifests (
+               source_id, temp_path, target_root_id, target_relative_path, filename, title,
+               catalog_number, media_date, tags_json, actresses_json, metadata_source,
+               checksum_sha256, file_size, state, review_decision, created_at, updated_at
+             ) VALUES (
+               'src-deg-1', '/tmp/deg.mp4', 'nas-main', 'ingested/deg.mp4', 'deg.mp4', 'Degraded Preview',
+               'DEG-001', NULL, '[]', '["Stale Pending Performer", "Archived Resolved Performer", "Unknown Performer X", "Unknown Performer Y"]', 'manual',
+               'sha-deg-1', 100, 'planned', 'pending', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z'
+             )`,
+          )
+          .run()
+        manifestId = Number(res.lastInsertRowid)
+
+        db.prepare(
+          `INSERT INTO performer_review_queue
+             (manifest_id, media_id, raw_name, normalized_name, reason, candidate_tag_ids_json, status, created_at, updated_at)
+           VALUES (?, NULL, 'Stale Pending Performer', 'stale pending performer', 'unknown', '[]', 'pending', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z')`,
+        ).run(manifestId)
+        db.prepare(
+          `INSERT INTO performer_review_queue
+             (manifest_id, media_id, raw_name, normalized_name, reason, candidate_tag_ids_json, status, resolution_mode, resolved_tag_id, created_at, updated_at)
+           VALUES (?, NULL, 'Archived Resolved Performer', 'archived resolved performer', 'unknown', '[]', 'resolved', 'bind_existing', ?, '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z')`,
+        ).run(manifestId, archivedTagId)
+
+        beforeQueue = db
+          .prepare('SELECT * FROM performer_review_queue ORDER BY id ASC')
+          .all() as Array<Record<string, unknown>>
+
+        db.prepare('INSERT INTO schema_versions (version, applied_at, app_version, description) VALUES (99, ?, ?, ?)').run(
+          new Date().toISOString(),
+          '9.9.9',
+          'Simulated future schema',
+        )
+      } finally {
+        db.close()
+      }
+
+      const degradedService = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        supportedMaxVersion: CURRENT_SCHEMA_VERSION,
+        autoDailyBackup: false,
+      })
+
+      const preview = await degradedService.previewManifestPerformers({ manifestId })
+      assert.equal(preview.manifestId, manifestId)
+      assert.equal(preview.canCommit, false)
+      // Auto-matched performer must NOT also appear in pendingReview.
+      assert.deepEqual(
+        preview.autoMatched.map(a => a.rawName),
+        ['Stale Pending Performer'],
+      )
+      assert.deepEqual(
+        preview.pendingReview.map(p => ({ rawName: p.rawName, reason: p.reason })),
+        [
+          { rawName: 'Archived Resolved Performer', reason: 'archived_target' },
+          { rawName: 'Unknown Performer X', reason: 'unknown' },
+          { rawName: 'Unknown Performer Y', reason: 'unknown' },
+        ],
+      )
+      // Every pending item (including multiple newly unresolved performers) must have a unique id for React keys.
+      assert.equal(new Set(preview.pendingReview.map(p => p.id)).size, preview.pendingReview.length)
+
+      // Verify performer_review_queue rows and contents are byte-for-byte unchanged (INSERT/UPDATE/DELETE all guarded).
+      const verifyDb = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const afterQueue = verifyDb
+          .prepare('SELECT * FROM performer_review_queue ORDER BY id ASC')
+          .all() as Array<Record<string, unknown>>
+        assert.deepEqual(afterQueue, beforeQueue)
+      } finally {
+        verifyDb.close()
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('Issue #35: v2 fixture with failed upgrade enters READ_ONLY_DEGRADED while listTags and mapping export work on v2 schema', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ops-issue35-v2-'))
+    try {
+      const dbPath = path.join(tmpDir, 'media-library', 'library.sqlite3')
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+      const db = new DatabaseSync(dbPath)
+      try {
+        await migrateDatabase(db, {
+          dbPath,
+          migrations: [V1_SCHEMA_MIGRATION, V2_MEDIA_STATUS_MIGRATION],
+          appVersion: '0.2.0',
+        })
+        db.prepare(
+          `INSERT INTO media_roots (id, name, canonical_unc_root, enabled, created_at)
+           VALUES ('nas-main', 'NAS Main', '\\\\NAS\\MediaTest', 1, '2026-11-01T00:00:00.000Z')`,
+        ).run()
+        const mediaId = Number(
+          db
+            .prepare(
+              `INSERT INTO media_files (root_id, relative_path, filename, extension, title, catalog_number, media_date, status, revision)
+               VALUES ('nas-main', 'videos/V2-001.mp4', 'V2-001.mp4', '.mp4', 'Legacy V2 Video', 'V2-001', '2026-11-01', 'indexed', 1)`,
+            )
+            .run().lastInsertRowid,
+        )
+        const tagId = Number(
+          db
+            .prepare(
+              `INSERT INTO tags (name, normalized_name, shorthand, kind, created_at, updated_at, revision)
+               VALUES ('LegacyTag', 'legacytag', 'lt', 'custom', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', 1)`,
+            )
+            .run().lastInsertRowid,
+        )
+        db.prepare(
+          `INSERT INTO tag_aliases (tag_id, alias, normalized_alias) VALUES (?, 'LegacyAlias', 'legacyalias')`,
+        ).run(tagId)
+        db.prepare(
+          `INSERT INTO media_tags (media_id, tag_id, source, created_at) VALUES (?, ?, 'tagstudio-import', '2026-11-01T00:00:00.000Z')`,
+        ).run(mediaId, tagId)
+
+        // Cause V3_TAG_MANAGEMENT_MIGRATION to fail cleanly and roll back, leaving DB at v2.
+        db.exec('CREATE TABLE mutation_log (id INTEGER PRIMARY KEY);')
+      } finally {
+        db.close()
+      }
+
+      const degradedService = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        autoDailyBackup: false,
+      })
+
+      const ops = await degradedService.getOpsStatus()
+      assert.equal(ops.degradedState.degraded, true)
+      assert.equal(ops.degradedState.schemaVersion, 2)
+
+      // Read-only tag query works without archived_at / merged_into_id columns.
+      const listed = await degradedService.listTags({ query: 'legacyalias' })
+      assert.equal(listed.tags.length, 1)
+      assert.equal(listed.tags[0]!.name, 'LegacyTag')
+      assert.equal(listed.tags[0]!.archived, false)
+      assert.equal(listed.tags[0]!.mergedIntoId, null)
+
+      // JSON and CSV mapping exports work on v2 schema.
+      const jsonExport = await degradedService.exportMappingReport({ format: 'json' })
+      assert.equal(jsonExport.ok, true)
+      assert.equal(jsonExport.rowCount, 1)
+      assert.match(jsonExport.content, /LegacyTag/)
+
+      const csvExport = await degradedService.exportMappingReport({ format: 'csv' })
+      assert.equal(csvExport.ok, true)
+      assert.equal(csvExport.rowCount, 1)
+      assert.match(csvExport.content, /LegacyTag/)
+
+      // Preview on v2 degraded DB returns safe empty non-committable result without writing.
+      const preview = await degradedService.previewManifestPerformers({ manifestId: 1 })
+      assert.equal(preview.canCommit, false)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it('Issue #34: continuous Host writes trigger daily auto-backup across 24h without restart, skip idle/failed writes, and deduplicate repeat triggers', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ops-issue34-'))
     try {
@@ -351,7 +551,7 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
 
       // Advance >24h with NO committed writes (failed write does not advance watermark) -> skipped.
       nowMs += 25 * 60 * 60 * 1000
-      const failedWrite = await service.renameTag({ tagId: 999_999, newName: 'MissingTag', expectedRevision: 1 })
+      const failedWrite = await service.renameTag({ tagId: 999_999, name: 'MissingTag', expectedRevision: 1 })
       assert.equal(failedWrite.ok, false)
       assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 1)
 

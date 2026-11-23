@@ -102,6 +102,11 @@ function computeAsciiPrefixUpperBound(prefix: string): string | null {
   return prefix.slice(0, -1) + String.fromCharCode(lastCode + 1)
 }
 
+function getTableColumns(db: DatabaseSync, tableName: string): Set<string> {
+  const rows = db.prepare(`PRAGMA table_info("${tableName}")`).all() as Array<{ name: string }>
+  return new Set(rows.map(r => String(r.name)))
+}
+
 /**
  * List tags and their aliases, supporting search by tag name, shorthand, or alias (`B1`).
  */
@@ -112,8 +117,13 @@ export function listTagsInDatabase(
   const limit = Math.min(Math.max(Number(input?.limit ?? 100), 1), 500)
   const rawQuery = input?.query?.trim() ?? ''
   const normQuery = normalizeLookupKey(rawQuery)
+  const tagCols = getTableColumns(db, 'tags')
+  const hasArchivedAt = tagCols.has('archived_at')
+  const hasMergedIntoId = tagCols.has('merged_into_id')
   // Archived tags stay readable (existing associations, search) but are not offered by default (B5).
-  const archivedFilter = input?.includeArchived ? '' : 't.archived_at IS NULL'
+  const archivedFilter = hasArchivedAt && !input?.includeArchived ? 't.archived_at IS NULL' : ''
+  const archivedSelect = hasArchivedAt ? 't.archived_at' : 'NULL AS archived_at'
+  const mergedSelect = hasMergedIntoId ? 't.merged_into_id' : 'NULL AS merged_into_id'
 
   let tagRows: Array<{
     id: number
@@ -138,8 +148,8 @@ export function listTagsInDatabase(
            (SELECT COUNT(*) FROM media_tags mt WHERE mt.tag_id = t.id) AS media_count,
            0 AS exact_match,
            t.revision,
-           t.archived_at,
-           t.merged_into_id
+           ${archivedSelect},
+           ${mergedSelect}
          FROM tags t
          ${archivedFilter ? `WHERE ${archivedFilter}` : ''}
          ORDER BY media_count DESC, t.normalized_name ASC, t.id ASC
@@ -166,8 +176,8 @@ export function listTagsInDatabase(
              ELSE 1
            END AS exact_match,
            t.revision,
-           t.archived_at,
-           t.merged_into_id
+           ${archivedSelect},
+           ${mergedSelect}
          FROM tags t
          WHERE (t.normalized_name LIKE ? ESCAPE '\\'
             OR LOWER(COALESCE(t.shorthand, '')) LIKE ? ESCAPE '\\'

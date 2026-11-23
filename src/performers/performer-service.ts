@@ -405,6 +405,13 @@ function buildNormalTagPreview(db: DatabaseSync, rawTagsJson: string): NormalTag
   return out;
 }
 
+function tableExists(db: DatabaseSync, tableName: string): boolean {
+  const row = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(tableName);
+  return row !== undefined;
+}
+
 /**
  * Evaluate performer aliases for a manifest idempotently (`B1`, `B2`).
  * - Unique active `auto` rule -> `autoMatched` (`performer-rule`, confidence 1.0).
@@ -414,12 +421,25 @@ function buildNormalTagPreview(db: DatabaseSync, rawTagsJson: string): NormalTag
 export function evaluateManifestPerformers(
   db: DatabaseSync,
   manifestId: number,
-  options?: { readonly now?: (() => Date) | undefined },
+  options?: { readonly now?: (() => Date) | undefined; readonly readOnly?: boolean | undefined },
 ): ManifestPerformerPreview {
+  const readOnly = Boolean(options?.readOnly);
+  if (!tableExists(db, 'ingestion_manifests') || !tableExists(db, 'performer_review_queue') || !tableExists(db, 'performer_aliases')) {
+    return {
+      manifestId,
+      canCommit: false,
+      autoMatched: [],
+      humanResolved: [],
+      skipped: [],
+      skippedEntries: [],
+      pendingReview: [],
+      normalTags: [],
+    };
+  }
   const manifestRow = db
-    .prepare('SELECT id, actresses_json, tags_json, indexed_media_id FROM ingestion_manifests WHERE id = ?')
+    .prepare('SELECT id, filename, actresses_json, tags_json, indexed_media_id FROM ingestion_manifests WHERE id = ?')
     .get(manifestId) as
-    | { id: number; actresses_json: string; tags_json: string; indexed_media_id: number | null }
+    | { id: number; filename: string; actresses_json: string; tags_json: string; indexed_media_id: number | null }
     | undefined;
 
   if (!manifestRow) {
@@ -464,6 +484,8 @@ export function evaluateManifestPerformers(
   const humanResolved: PerformerPreviewEntry[] = [];
   const skipped: string[] = [];
   const skippedEntries: PerformerSkippedEntry[] = [];
+  const readOnlyPending: PerformerReviewItem[] = [];
+  let nextSyntheticPendingId = -1;
 
   for (const rawName of rawActresses) {
     const trimmed = rawName.trim();
@@ -514,19 +536,38 @@ export function evaluateManifestPerformers(
           continue;
         }
         // Previously resolved tag was archived -> reopen as pending remediation.
-        db.prepare(
-          `UPDATE performer_review_queue
-           SET status = 'pending', reason = 'archived_target', candidate_tag_ids_json = '[]',
-               resolution_mode = NULL, resolved_tag_id = NULL, updated_at = ?
-           WHERE id = ?`,
-        ).run(ts, Number(existingQueue.id));
+        if (!readOnly) {
+          db.prepare(
+            `UPDATE performer_review_queue
+             SET status = 'pending', reason = 'archived_target', candidate_tag_ids_json = '[]',
+                 resolution_mode = NULL, resolved_tag_id = NULL, updated_at = ?
+             WHERE id = ?`,
+          ).run(ts, Number(existingQueue.id));
+        } else {
+          readOnlyPending.push({
+            id: Number(existingQueue.id),
+            manifestId,
+            manifestFilename: String(manifestRow.filename),
+            mediaId: indexedMediaId,
+            rawName: trimmed,
+            normalizedName: norm,
+            reason: 'archived_target',
+            candidateTags: [],
+            status: 'pending',
+            resolutionMode: null,
+            resolvedTagId: null,
+            resolvedTagName: null,
+            createdAt: String(existingQueue.created_at ?? ts),
+            updatedAt: String(existingQueue.updated_at ?? ts),
+          });
+        }
         continue;
       }
     }
 
     const recordAutoMatch = (tagId: number, tagName: string): void => {
       // If a pending queue entry existed previously before the match was found, clear it automatically.
-      if (existingQueue && String(existingQueue.status) === 'pending') {
+      if (!readOnly && existingQueue && String(existingQueue.status) === 'pending') {
         db.prepare('DELETE FROM performer_review_queue WHERE id = ?').run(Number(existingQueue.id));
       }
       autoMatched.push({
@@ -578,25 +619,44 @@ export function evaluateManifestPerformers(
       candidateIds = activeRules.map((r) => Number(r.tag_id));
     }
 
-    db.prepare(
-      `INSERT INTO performer_review_queue
-         (manifest_id, media_id, raw_name, normalized_name, reason, candidate_tag_ids_json, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-       ON CONFLICT(manifest_id, normalized_name) DO UPDATE SET
-         raw_name = excluded.raw_name,
-         reason = excluded.reason,
-         candidate_tag_ids_json = excluded.candidate_tag_ids_json,
-         status = 'pending',
-         updated_at = excluded.updated_at`,
-    ).run(manifestId, indexedMediaId, trimmed, norm, reason, JSON.stringify(candidateIds), ts, ts);
+    if (!readOnly) {
+      db.prepare(
+        `INSERT INTO performer_review_queue
+           (manifest_id, media_id, raw_name, normalized_name, reason, candidate_tag_ids_json, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+         ON CONFLICT(manifest_id, normalized_name) DO UPDATE SET
+           raw_name = excluded.raw_name,
+           reason = excluded.reason,
+           candidate_tag_ids_json = excluded.candidate_tag_ids_json,
+           status = 'pending',
+           updated_at = excluded.updated_at`,
+      ).run(manifestId, indexedMediaId, trimmed, norm, reason, JSON.stringify(candidateIds), ts, ts);
+    } else {
+      readOnlyPending.push({
+        id: existingQueue ? Number(existingQueue.id) : nextSyntheticPendingId--,
+        manifestId,
+        manifestFilename: String(manifestRow.filename),
+        mediaId: indexedMediaId,
+        rawName: trimmed,
+        normalizedName: norm,
+        reason,
+        candidateTags: hydrateCandidateTags(db, JSON.stringify(candidateIds)),
+        status: 'pending',
+        resolutionMode: null,
+        resolvedTagId: null,
+        resolvedTagName: null,
+        createdAt: existingQueue ? String(existingQueue.created_at ?? ts) : ts,
+        updatedAt: existingQueue ? String(existingQueue.updated_at ?? ts) : ts,
+      });
+    }
   }
 
-  const pendingReview = listPerformerReviewQueue(db, { status: 'pending', manifestId });
+  const pendingReview = readOnly ? readOnlyPending : listPerformerReviewQueue(db, { status: 'pending', manifestId });
   const normalTags = buildNormalTagPreview(db, manifestRow.tags_json);
 
   return {
     manifestId,
-    canCommit: pendingReview.length === 0,
+    canCommit: !readOnly && pendingReview.length === 0,
     autoMatched,
     humanResolved,
     skipped,
