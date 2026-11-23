@@ -1,0 +1,17 @@
+{
+  "extends": "/home/aaevi/projects/project/deepseek-harness/tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "typeRoots": [
+      "/home/aaevi/projects/project/deepseek-harness/node_modules/@types"
+    ]
+  },
+  "include": [
+    "tests/**/*.ts"
+  ]
+}
