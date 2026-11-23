@@ -437,9 +437,9 @@ export function evaluateManifestPerformers(
     };
   }
   const manifestRow = db
-    .prepare('SELECT id, actresses_json, tags_json, indexed_media_id FROM ingestion_manifests WHERE id = ?')
+    .prepare('SELECT id, filename, actresses_json, tags_json, indexed_media_id FROM ingestion_manifests WHERE id = ?')
     .get(manifestId) as
-    | { id: number; actresses_json: string; tags_json: string; indexed_media_id: number | null }
+    | { id: number; filename: string; actresses_json: string; tags_json: string; indexed_media_id: number | null }
     | undefined;
 
   if (!manifestRow) {
@@ -484,6 +484,7 @@ export function evaluateManifestPerformers(
   const humanResolved: PerformerPreviewEntry[] = [];
   const skipped: string[] = [];
   const skippedEntries: PerformerSkippedEntry[] = [];
+  const readOnlyPending: PerformerReviewItem[] = [];
 
   for (const rawName of rawActresses) {
     const trimmed = rawName.trim();
@@ -541,6 +542,23 @@ export function evaluateManifestPerformers(
                  resolution_mode = NULL, resolved_tag_id = NULL, updated_at = ?
              WHERE id = ?`,
           ).run(ts, Number(existingQueue.id));
+        } else {
+          readOnlyPending.push({
+            id: Number(existingQueue.id),
+            manifestId,
+            manifestFilename: String(manifestRow.filename),
+            mediaId: indexedMediaId,
+            rawName: trimmed,
+            normalizedName: norm,
+            reason: 'archived_target',
+            candidateTags: [],
+            status: 'pending',
+            resolutionMode: null,
+            resolvedTagId: null,
+            resolvedTagName: null,
+            createdAt: String(existingQueue.created_at ?? ts),
+            updatedAt: String(existingQueue.updated_at ?? ts),
+          });
         }
         continue;
       }
@@ -612,10 +630,27 @@ export function evaluateManifestPerformers(
            status = 'pending',
            updated_at = excluded.updated_at`,
       ).run(manifestId, indexedMediaId, trimmed, norm, reason, JSON.stringify(candidateIds), ts, ts);
+    } else {
+      readOnlyPending.push({
+        id: existingQueue ? Number(existingQueue.id) : 0,
+        manifestId,
+        manifestFilename: String(manifestRow.filename),
+        mediaId: indexedMediaId,
+        rawName: trimmed,
+        normalizedName: norm,
+        reason,
+        candidateTags: hydrateCandidateTags(db, JSON.stringify(candidateIds)),
+        status: 'pending',
+        resolutionMode: null,
+        resolvedTagId: null,
+        resolvedTagName: null,
+        createdAt: existingQueue ? String(existingQueue.created_at ?? ts) : ts,
+        updatedAt: existingQueue ? String(existingQueue.updated_at ?? ts) : ts,
+      });
     }
   }
 
-  const pendingReview = listPerformerReviewQueue(db, { status: 'pending', manifestId });
+  const pendingReview = readOnly ? readOnlyPending : listPerformerReviewQueue(db, { status: 'pending', manifestId });
   const normalTags = buildNormalTagPreview(db, manifestRow.tags_json);
 
   return {

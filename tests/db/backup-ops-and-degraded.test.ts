@@ -333,14 +333,40 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
     }
   })
 
-  it('Issue #35: previewManifestPerformers does not write in READ_ONLY_DEGRADED mode', async () => {
+  it('Issue #35: previewManifestPerformers does not write in READ_ONLY_DEGRADED mode and keeps in-memory preview consistent', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ops-issue35-preview-'))
     try {
       const { dbPath } = await createPopulatedService(tmpDir)
       const db = new DatabaseSync(dbPath)
       let manifestId = 0
+      let beforeQueue: Array<Record<string, unknown>> = []
       try {
         await migrateDatabase(db, { dbPath })
+        // 1) Active tag + auto rule for performer that has a stale pending queue row (tests DELETE guard + no duplicate).
+        const autoTagId = Number(
+          db
+            .prepare(
+              `INSERT INTO tags (name, normalized_name, kind, created_at, updated_at, revision)
+               VALUES ('AutoPerformer', 'autoperformer', 'performer', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z', 1)`,
+            )
+            .run().lastInsertRowid,
+        )
+        db.prepare(
+          `INSERT INTO performer_aliases (normalized_name, raw_alias, tag_id, policy, note, created_at, updated_at)
+           VALUES ('stale pending performer', 'Stale Pending Performer', ?, 'auto', '', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z')`,
+        ).run(autoTagId)
+
+        // 2) Archived tag for a previously resolved queue row (tests UPDATE guard).
+        const archivedTagId = Number(
+          db
+            .prepare(
+              `INSERT INTO tags (name, normalized_name, kind, archived_at, created_at, updated_at, revision)
+               VALUES ('ArchivedPerformer', 'archivedperformer', 'performer', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z', 1)`,
+            )
+            .run().lastInsertRowid,
+        )
+
+        // 3) Manifest with all three cases: stale pending -> auto, resolved -> archived, plus brand-new unknown (INSERT guard).
         const res = db
           .prepare(
             `INSERT INTO ingestion_manifests (
@@ -349,12 +375,28 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
                checksum_sha256, file_size, state, review_decision, created_at, updated_at
              ) VALUES (
                'src-deg-1', '/tmp/deg.mp4', 'nas-main', 'ingested/deg.mp4', 'deg.mp4', 'Degraded Preview',
-               'DEG-001', NULL, '[]', '["Unknown Performer X"]', 'manual',
+               'DEG-001', NULL, '[]', '["Stale Pending Performer", "Archived Resolved Performer", "Unknown Performer X"]', 'manual',
                'sha-deg-1', 100, 'planned', 'pending', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z'
              )`,
           )
           .run()
         manifestId = Number(res.lastInsertRowid)
+
+        db.prepare(
+          `INSERT INTO performer_review_queue
+             (manifest_id, media_id, raw_name, normalized_name, reason, candidate_tag_ids_json, status, created_at, updated_at)
+           VALUES (?, NULL, 'Stale Pending Performer', 'stale pending performer', 'unknown', '[]', 'pending', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z')`,
+        ).run(manifestId)
+        db.prepare(
+          `INSERT INTO performer_review_queue
+             (manifest_id, media_id, raw_name, normalized_name, reason, candidate_tag_ids_json, status, resolution_mode, resolved_tag_id, created_at, updated_at)
+           VALUES (?, NULL, 'Archived Resolved Performer', 'archived resolved performer', 'unknown', '[]', 'resolved', 'bind_existing', ?, '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z')`,
+        ).run(manifestId, archivedTagId)
+
+        beforeQueue = db
+          .prepare('SELECT * FROM performer_review_queue ORDER BY id ASC')
+          .all() as Array<Record<string, unknown>>
+
         db.prepare('INSERT INTO schema_versions (version, applied_at, app_version, description) VALUES (99, ?, ?, ?)').run(
           new Date().toISOString(),
           '9.9.9',
@@ -374,12 +416,26 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
       const preview = await degradedService.previewManifestPerformers({ manifestId })
       assert.equal(preview.manifestId, manifestId)
       assert.equal(preview.canCommit, false)
+      // Auto-matched performer must NOT also appear in pendingReview.
+      assert.deepEqual(
+        preview.autoMatched.map(a => a.rawName),
+        ['Stale Pending Performer'],
+      )
+      assert.deepEqual(
+        preview.pendingReview.map(p => ({ rawName: p.rawName, reason: p.reason })),
+        [
+          { rawName: 'Archived Resolved Performer', reason: 'archived_target' },
+          { rawName: 'Unknown Performer X', reason: 'unknown' },
+        ],
+      )
 
-      // Verify performer_review_queue was NOT written to at all.
+      // Verify performer_review_queue rows and contents are byte-for-byte unchanged (INSERT/UPDATE/DELETE all guarded).
       const verifyDb = new DatabaseSync(dbPath, { readOnly: true })
       try {
-        const rows = verifyDb.prepare('SELECT * FROM performer_review_queue').all()
-        assert.equal(rows.length, 0)
+        const afterQueue = verifyDb
+          .prepare('SELECT * FROM performer_review_queue ORDER BY id ASC')
+          .all() as Array<Record<string, unknown>>
+        assert.deepEqual(afterQueue, beforeQueue)
       } finally {
         verifyDb.close()
       }
