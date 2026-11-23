@@ -332,7 +332,7 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ops-issue34-'))
     try {
       let nowMs = Date.UTC(2026, 10, 20, 0, 0, 0)
-      const clock = () => new Date(nowMs)
+      const clock = () => new Date(++nowMs)
       const { dbPath, backupDir, nasBackupDir } = await createPopulatedService(tmpDir, clock)
 
       const service = new MediaLibrarySpikeService({
@@ -366,11 +366,9 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
       assert.equal(created2.ok, true)
       assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 2)
 
-      // Advance another >24h with a monotonic per-call clock so any duplicate backup attempt would create
-      // a distinct timestamped file, proving process-local single-flight deduplication across writes & replacement startup.
+      // Advance another >24h with the shared monotonic clock across both service instances so any
+      // duplicate backup attempt would create a distinct timestamped file.
       nowMs += 25 * 60 * 60 * 1000
-      let tickOffset = 0
-      const monotonicClock = () => new Date(nowMs + (++tickOffset))
       const replacementService = new MediaLibrarySpikeService({
         baseDir: tmpDir,
         dbPath,
@@ -378,7 +376,7 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
         backupRetentionCount: 5,
         preMigrateRetentionCount: 2,
         autoDailyBackup: true,
-        now: monotonicClock,
+        now: clock,
       })
       const [c3, c4] = await Promise.all([
         service.createTag({ name: 'Issue34Concurrent1' }),
