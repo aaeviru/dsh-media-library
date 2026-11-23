@@ -619,17 +619,35 @@ export async function ensureManifestForStagingFile(
   const fileSize = (await fileOps.statSize(tempPath));
   const sourceId = `staging:${targetRel.toLowerCase()}:${fileSize}`;
 
-  // B1: Match existing unindexed manifest by case-insensitive filename first (or source_id / temp_path),
-  // rebinding temp_path and target fields when the file moved to a new stagingDir.
-  const existingUnindexed = db
+  // B1: Match existing unindexed manifest by exact temp_path first.
+  // Only fall back to filename/source_id rebinding when the previously bound temp_path no longer exists on disk
+  // (i.e. moved to a new stagingDir per Issue #45), so a live sibling in another subfolder is never stolen.
+  let existingUnindexed = db
     .prepare(
       `SELECT * FROM ingestion_manifests
-       WHERE state <> 'indexed'
-         AND (LOWER(filename) = LOWER(?) OR source_id = ? OR LOWER(temp_path) = LOWER(?))
-       ORDER BY CASE WHEN LOWER(filename) = LOWER(?) THEN 0 ELSE 1 END, updated_at DESC, id DESC
+       WHERE state <> 'indexed' AND LOWER(temp_path) = LOWER(?)
+       ORDER BY updated_at DESC, id DESC
        LIMIT 1`,
     )
-    .get(filename, sourceId, tempPath, filename) as Record<string, unknown> | undefined;
+    .get(tempPath) as Record<string, unknown> | undefined;
+
+  if (!existingUnindexed) {
+    const candidates = db
+      .prepare(
+        `SELECT * FROM ingestion_manifests
+         WHERE state <> 'indexed' AND (LOWER(filename) = LOWER(?) OR source_id = ?)
+         ORDER BY CASE WHEN LOWER(filename) = LOWER(?) THEN 0 ELSE 1 END, updated_at DESC, id DESC`,
+      )
+      .all(filename, sourceId, filename) as Array<Record<string, unknown>>;
+    for (const row of candidates) {
+      const candidate = mapManifestRow(row);
+      if (!(await fileOps.exists(candidate.tempPath))) {
+        existingUnindexed = row;
+        break;
+      }
+    }
+  }
+
   if (existingUnindexed) {
     const mapped = mapManifestRow(existingUnindexed);
     const tempChanged = mapped.tempPath.toLowerCase() !== tempPath.toLowerCase();
@@ -680,11 +698,16 @@ export async function ensureManifestForStagingFile(
   }
 
   const existingIndexed = db
-    .prepare('SELECT * FROM ingestion_manifests WHERE source_id = ? OR LOWER(temp_path) = LOWER(?) LIMIT 1')
-    .get(sourceId, tempPath) as Record<string, unknown> | undefined;
+    .prepare('SELECT * FROM ingestion_manifests WHERE LOWER(temp_path) = LOWER(?) LIMIT 1')
+    .get(tempPath) as Record<string, unknown> | undefined;
   if (existingIndexed) {
     return mapManifestRow(existingIndexed);
   }
+
+  const existingSourceId = db
+    .prepare('SELECT id FROM ingestion_manifests WHERE source_id = ? LIMIT 1')
+    .get(sourceId) as { id: number } | undefined;
+  const insertSourceId = existingSourceId ? `${sourceId}#${crypto.randomBytes(4).toString('hex')}` : sourceId;
 
   const ext = path.extname(filename);
   const fc2 = parseFc2Code(path.basename(filename, ext));
@@ -700,7 +723,7 @@ export async function ensureManifestForStagingFile(
         indexed_media_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, '[]', NULL, '', ?, 'planned', 'pending', NULL, NULL, ?, ?)`,
     )
-    .run(sourceId, tempPath, options.targetRootId, targetRel, filename, catalogNumber, inferredDate, fileSize, now, now);
+    .run(insertSourceId, tempPath, options.targetRootId, targetRel, filename, catalogNumber, inferredDate, fileSize, now, now);
 
   return getIngestionManifestById(db, Number(info.lastInsertRowid))!;
 }

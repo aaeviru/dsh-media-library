@@ -143,13 +143,16 @@ import {
 // Keep process-local ownership across module reloads; a true Host restart starts with an empty registry.
 const LIVE_TASKS_KEY = Symbol.for('dsh-media-library.live-ingestion-tasks');
 const FILE_EXECUTION_KEY = Symbol.for('dsh-media-library.file-ingestion-execution');
+const STAGING_MANIFEST_OPS_KEY = Symbol.for('dsh-media-library.staging-manifest-ops');
 const DAILY_BACKUP_IN_FLIGHT_KEY = Symbol.for('dsh-media-library.daily-backup-in-flight');
 const hostRuntime = globalThis as typeof globalThis & {
   [LIVE_TASKS_KEY]?: Map<string, Set<number>>;
   [FILE_EXECUTION_KEY]?: { databasePath: string; task: IngestionTask; isStagingDelete?: boolean };
+  [STAGING_MANIFEST_OPS_KEY]?: Map<string, number>;
   [DAILY_BACKUP_IN_FLIGHT_KEY]?: Map<string, Promise<void>>;
 };
 const liveIngestionTasks = hostRuntime[LIVE_TASKS_KEY] ??= new Map<string, Set<number>>();
+const stagingManifestOpsInFlight = hostRuntime[STAGING_MANIFEST_OPS_KEY] ??= new Map<string, number>();
 const dailyBackupInFlightByDb = hostRuntime[DAILY_BACKUP_IN_FLIGHT_KEY] ??= new Map<string, Promise<void>>();
 
 export const DEFAULT_M1_ROOT_ID = 'nas-main';
@@ -1015,6 +1018,11 @@ export class MediaLibrarySpikeService {
         manifest: null,
       };
     }
+    // Synchronously register in-flight manifest op before any await so deleteStagingFile cannot overlap.
+    stagingManifestOpsInFlight.set(
+      this.localDatabasePath,
+      (stagingManifestOpsInFlight.get(this.localDatabasePath) ?? 0) + 1,
+    );
     const fetcher = this.createMetadataFetcher();
     const { roots } = this.getEffectiveRootsAndItems();
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
@@ -1088,6 +1096,9 @@ export class MediaLibrarySpikeService {
       throw err;
     } finally {
       if (taskId !== null) this.releaseIngestionTask(taskId);
+      const nextCount = (stagingManifestOpsInFlight.get(this.localDatabasePath) ?? 1) - 1;
+      if (nextCount <= 0) stagingManifestOpsInFlight.delete(this.localDatabasePath);
+      else stagingManifestOpsInFlight.set(this.localDatabasePath, nextCount);
       db.close();
     }
     if (fetchResult) {
@@ -1116,30 +1127,41 @@ export class MediaLibrarySpikeService {
     }
     const { roots } = this.getEffectiveRootsAndItems();
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
-    const reviewRes = await this.withInitializedDatabase(async (db) => {
-      let manifestId = input.manifestId;
-      if (!manifestId && (input as { readonly tempPath?: unknown }).tempPath !== undefined) {
-        throw new Error('PATH_TRAVERSAL_REJECTED: Client must submit manifestId or staging relativePath, not raw tempPath.');
-      }
-      if (!manifestId && input.relativePath) {
-        const created = await ensureManifestForStagingFile(db, {
-          relativePath: input.relativePath,
-          stagingDir: this.ingestionStagingDir(),
-          targetRootId: DEFAULT_M1_ROOT_ID,
-          targetSubdir,
-          roots,
-          fileOps: this.ingestionFileOps,
-          now: this.now,
-        });
-        manifestId = created.id;
-      }
-      if (!manifestId) {
-        return { ok: false as const, code: 'INVALID_INPUT' as const, message: 'Either manifestId or relativePath is required.' };
-      }
-      const active = findManifestTask(db, manifestId);
-      if (active) return { ok: false as const, code: 'IN_PROGRESS' as const, message: `Task #${active.id} freezes this Manifest until it finishes.` };
-      return reviewIngestionManifest(db, { ...input, manifestId }, this.now);
-    });
+    stagingManifestOpsInFlight.set(
+      this.localDatabasePath,
+      (stagingManifestOpsInFlight.get(this.localDatabasePath) ?? 0) + 1,
+    );
+    let reviewRes: ReviewIngestionResult;
+    try {
+      reviewRes = await this.withInitializedDatabase(async (db) => {
+        let manifestId = input.manifestId;
+        if (!manifestId && (input as { readonly tempPath?: unknown }).tempPath !== undefined) {
+          throw new Error('PATH_TRAVERSAL_REJECTED: Client must submit manifestId or staging relativePath, not raw tempPath.');
+        }
+        if (!manifestId && input.relativePath) {
+          const created = await ensureManifestForStagingFile(db, {
+            relativePath: input.relativePath,
+            stagingDir: this.ingestionStagingDir(),
+            targetRootId: DEFAULT_M1_ROOT_ID,
+            targetSubdir,
+            roots,
+            fileOps: this.ingestionFileOps,
+            now: this.now,
+          });
+          manifestId = created.id;
+        }
+        if (!manifestId) {
+          return { ok: false as const, code: 'INVALID_INPUT' as const, message: 'Either manifestId or relativePath is required.' };
+        }
+        const active = findManifestTask(db, manifestId);
+        if (active) return { ok: false as const, code: 'IN_PROGRESS' as const, message: `Task #${active.id} freezes this Manifest until it finishes.` };
+        return reviewIngestionManifest(db, { ...input, manifestId }, this.now);
+      });
+    } finally {
+      const nextCount = (stagingManifestOpsInFlight.get(this.localDatabasePath) ?? 1) - 1;
+      if (nextCount <= 0) stagingManifestOpsInFlight.delete(this.localDatabasePath);
+      else stagingManifestOpsInFlight.set(this.localDatabasePath, nextCount);
+    }
     if (reviewRes.ok) await this.maybeTriggerDailyAutoBackup();
     return reviewRes;
   }
@@ -1415,6 +1437,13 @@ export class MediaLibrarySpikeService {
         ok: false,
         code: 'IN_PROGRESS',
         message: `Task #${active.task.id}: ${active.task.message || 'Another file ingestion operation is already running.'}`,
+      };
+    }
+    if ((stagingManifestOpsInFlight.get(this.localDatabasePath) ?? 0) > 0) {
+      return {
+        ok: false,
+        code: 'IN_PROGRESS',
+        message: 'Another staging metadata fetch or review operation is currently in progress.',
       };
     }
 

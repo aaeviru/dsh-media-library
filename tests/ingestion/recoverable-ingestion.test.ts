@@ -1348,14 +1348,14 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         dbRollback.close();
       }
 
-      // 8. Same-named staged files in distinct subfolders never share one manifestId on scan
+      // 8. Same-named staged files in distinct subfolders never share or steal each other's manifest
       fs.mkdirSync(path.join(stagingDir, 'dir1'), { recursive: true });
       fs.mkdirSync(path.join(stagingDir, 'dir2'), { recursive: true });
       const dup1 = path.join(stagingDir, 'dir1', 'same.mp4');
       const dup2 = path.join(stagingDir, 'dir2', 'same.mp4');
       fs.writeFileSync(dup1, 'dup-one');
       fs.writeFileSync(dup2, 'dup-two-longer');
-      const revDup1 = await service.reviewIngestion({ relativePath: 'dir1/same.mp4', decision: 'rejected' });
+      const revDup1 = await service.reviewIngestion({ relativePath: 'dir1/same.mp4', decision: 'rejected', title: 'Dir1 Title' });
       assert.equal(revDup1.ok, true);
       const dupScan = await service.scanStagingFiles();
       assert.equal(dupScan.ok, true);
@@ -1363,13 +1363,22 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
       const scannedDup2 = dupScan.files.find((f) => f.relativePath === 'dir2/same.mp4');
       assert.equal(scannedDup1?.manifestId, revDup1.manifest!.id);
       assert.equal(scannedDup2?.manifestId, null, 'Second same-named file in another folder must not steal manifestId');
+      // Reviewing dir2/same.mp4 must create its own manifest instead of rebinding dir1's manifest
+      const revDup2 = await service.reviewIngestion({ relativePath: 'dir2/same.mp4', decision: 'rejected', title: 'Dir2 Title' });
+      assert.equal(revDup2.ok, true);
+      assert.notEqual(revDup2.manifest!.id, revDup1.manifest!.id);
       const delDup2 = await service.deleteStagingFile({
+        manifestId: revDup2.manifest!.id,
         relativePath: 'dir2/same.mp4',
         expectedFileSize: 'dup-two-longer'.length,
       });
       assert.equal(delDup2.ok, true);
       assert.equal(fs.existsSync(dup1), true, 'Deleting dir2/same.mp4 must leave dir1/same.mp4 untouched');
       assert.equal(fs.existsSync(dup2), false);
+      const manifestsAfterDup = await service.listIngestionManifests();
+      const survivingDup1 = manifestsAfterDup.find((m) => m.id === revDup1.manifest!.id);
+      assert.ok(survivingDup1, 'dir1 manifest must remain intact after deleting dir2 sibling');
+      assert.equal(survivingDup1.title, 'Dir1 Title');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
