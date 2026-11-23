@@ -959,7 +959,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
           );
         }
 
-        // 4) Later page manifest (>500): copied-not-deleted with identical dir/name/size (dedup rule preserved).
+        // 4) Later page manifest (>500): copied-not-deleted with identical dir/name/size/content (dedup rule preserved).
         const payloadLate = 'late-page-dedup-payload-518';
         const tempLate = path.join(tempDir, 'LATE-518.mp4');
         const destLate = path.join(targetDir, 'LATE-518.mp4');
@@ -980,12 +980,35 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         );
         const lateId = Number(rLate.lastInsertRowid);
 
+        // 5) Same-size but different-content pair: checkExistingTarget must fail and retain the staging copy.
+        const tempMismatch = path.join(tempDir, 'LATE-519-MISMATCH.mp4');
+        const destMismatch = path.join(targetDir, 'LATE-519-MISMATCH.mp4');
+        const mismatchSrc = 'AAAA-same-size-payload-519';
+        const mismatchDst = 'BBBB-same-size-payload-519';
+        assert.equal(Buffer.byteLength(mismatchSrc), Buffer.byteLength(mismatchDst));
+        fs.writeFileSync(tempMismatch, mismatchSrc);
+        fs.writeFileSync(destMismatch, mismatchDst);
+        const rMismatch = insertManifest.run(
+          'src-late-519-mismatch',
+          tempMismatch,
+          'ingested/LATE-519-MISMATCH.mp4',
+          'LATE-519-MISMATCH.mp4',
+          'Late Page Size Match Content Mismatch 519',
+          'LATE-519',
+          'sha-late-519',
+          Buffer.byteLength(mismatchSrc),
+          'moving',
+          '2026-11-20T00:01:00.000Z',
+          '2026-11-20T00:01:00.000Z',
+        );
+        const mismatchId = Number(rMismatch.lastInsertRowid);
+
         const totalManifests = Number(
           (db.prepare('SELECT COUNT(*) AS c FROM ingestion_manifests').get() as { c: number }).c,
         );
         assert.ok(totalManifests > 500, `Expected >500 manifests, got ${totalManifests}`);
 
-        // Use pageSize=2 so the 3 pending reconcile records span multiple pages across the >500 table.
+        // Use pageSize=2 so the 4 pending reconcile records span multiple pages across the >500 table.
         const res = await reconcileIngestionManifests(db, {
           roots,
           stagingDir: tempDir,
@@ -995,8 +1018,9 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
 
         assert.equal(res.ok, false);
         assert.equal(res.movedNotIndexedFixed, 2);
-        assert.equal(res.errors.length, 1);
-        assert.match(res.errors[0]!, new RegExp(`Manifest #${oldFailId}:`));
+        assert.equal(res.errors.length, 2);
+        assert.ok(res.errors.some((e) => new RegExp(`Manifest #${oldFailId}:`).test(e)));
+        assert.ok(res.errors.some((e) => new RegExp(`Manifest #${mismatchId}:`).test(e)));
 
         // Older interrupted manifest #1 was indexed despite >500 newer manifests.
         const row1 = db.prepare('SELECT state, indexed_media_id FROM ingestion_manifests WHERE id = ?').get(oldOkId) as {
@@ -1015,6 +1039,25 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         assert.ok(rowLate.indexed_media_id !== null);
         assert.equal(fs.existsSync(tempLate), false);
         assert.equal(fs.existsSync(destLate), true);
+
+        // Same-size different-content manifest was NOT indexed and its staging copy was retained.
+        const rowMismatch = db.prepare('SELECT state, indexed_media_id FROM ingestion_manifests WHERE id = ?').get(mismatchId) as {
+          state: string;
+          indexed_media_id: number | null;
+        };
+        assert.equal(rowMismatch.state, 'moving');
+        assert.equal(rowMismatch.indexed_media_id, null);
+        assert.equal(fs.existsSync(tempMismatch), true);
+        assert.equal(fs.existsSync(destMismatch), true);
+
+        // Non-finite pageSize falls back cleanly to default instead of throwing a SQLite datatype mismatch.
+        const nanRes = await reconcileIngestionManifests(db, {
+          roots,
+          stagingDir: tempDir,
+          fileOps,
+          pageSize: Number.NaN,
+        });
+        assert.equal(nanRes.errors.length, 2);
       } finally {
         db.close();
       }

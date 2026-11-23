@@ -1346,7 +1346,10 @@ export async function reconcileIngestionManifests(
 ): Promise<ReconcileIngestionResult> {
   const fileOps = options.fileOps ?? defaultIngestionFileOps;
   const nowFn = options.now ?? (() => new Date());
-  const pageSize = Math.min(Math.max(Math.trunc(Number(options.pageSize ?? 200)), 1), 500);
+  const rawPageSize = Number(options.pageSize ?? 200);
+  const pageSize = Number.isFinite(rawPageSize)
+    ? Math.min(Math.max(Math.trunc(rawPageSize), 1), 500)
+    : 200;
 
   let copiedNotDeletedFixed = 0;
   let movedNotIndexedFixed = 0;
