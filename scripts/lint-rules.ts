@@ -61,6 +61,107 @@ function skipWhitespaceAndComments(source: string, start: number): number {
   return k;
 }
 
+const REGEX_PREFIX_KEYWORDS = new Set([
+  'return', 'case', 'throw', 'typeof', 'void', 'in', 'of',
+  'delete', 'yield', 'await', 'new', 'else', 'do',
+]);
+
+function canStartRegexLiteral(source: string, slashIdx: number): boolean {
+  let prevIdx = slashIdx - 1;
+  while (prevIdx >= 0 && (source[prevIdx] === ' ' || source[prevIdx] === '\t')) prevIdx--;
+  if (prevIdx < 0) return true;
+  const prevChar = source[prevIdx]!;
+  if ('=(,[{:;!&|?+-*%^~<>\n\r'.includes(prevChar)) return true;
+  if (/[A-Za-z0-9_$]/.test(prevChar)) {
+    let wordStart = prevIdx;
+    while (wordStart > 0 && /[A-Za-z0-9_$]/.test(source[wordStart - 1]!)) wordStart--;
+    return REGEX_PREFIX_KEYWORDS.has(source.slice(wordStart, prevIdx + 1));
+  }
+  return false;
+}
+
+function scanRegexLiteralEnd(source: string, slashIdx: number): number {
+  let j = slashIdx + 1;
+  let inClass = false;
+  while (j < source.length && source[j] !== '\n') {
+    const rc = source[j]!;
+    if (rc === '\\') {
+      j += 2;
+      continue;
+    }
+    if (rc === '[') {
+      inClass = true;
+    } else if (rc === ']') {
+      inClass = false;
+    } else if (rc === '/' && !inClass) {
+      return j + 1;
+    }
+    j++;
+  }
+  return -1;
+}
+
+/**
+ * Strip JS/TS comments while preserving newline positions and keeping string/template/regex literals intact.
+ */
+function stripCommentsPreservingLines(source: string): string {
+  let out = '';
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i]!;
+    const next = source[i + 1];
+    if (ch === '/' && next === '/') {
+      while (i < source.length && source[i] !== '\n') {
+        out += ' ';
+        i++;
+      }
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      out += '  ';
+      i += 2;
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) {
+        out += source[i] === '\n' ? '\n' : ' ';
+        i++;
+      }
+      if (i < source.length) {
+        out += '  ';
+        i += 2;
+      }
+      continue;
+    }
+    if (ch === '/' && next !== '/' && next !== '*' && canStartRegexLiteral(source, i)) {
+      const end = scanRegexLiteralEnd(source, i);
+      if (end !== -1) {
+        out += source.slice(i, end);
+        i = end;
+        continue;
+      }
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch;
+      let j = i + 1;
+      while (j < source.length) {
+        if (source[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (source[j] === quote) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      out += source.slice(i, j);
+      i = j;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
 /**
  * Strip JS/TS comments while preserving newline positions, and blank out string/template contents
  * except for quoted object property keys `'tempPath'`, `"tempPath"`, `'uncPath'`, `"uncPath"`
@@ -95,37 +196,13 @@ function sanitizeForRpcKeyScan(source: string): string {
       }
       continue;
     }
-    // Regex literal (e.g. /[/*]/): skip so /* or quotes inside a regex never masquerade as comments/strings.
-    if (ch === '/' && next !== '/' && next !== '*') {
-      let prevIdx = i - 1;
-      while (prevIdx >= 0 && (source[prevIdx] === ' ' || source[prevIdx] === '\t')) prevIdx--;
-      const prevChar = prevIdx >= 0 ? source[prevIdx]! : '';
-      if (!prevChar || '=(,[{:;!&|?+-*%^~<>\n\r'.includes(prevChar)) {
-        let j = i + 1;
-        let inClass = false;
-        let closed = false;
-        while (j < source.length && source[j] !== '\n') {
-          const rc = source[j]!;
-          if (rc === '\\') {
-            j += 2;
-            continue;
-          }
-          if (rc === '[') {
-            inClass = true;
-          } else if (rc === ']') {
-            inClass = false;
-          } else if (rc === '/' && !inClass) {
-            j++;
-            closed = true;
-            break;
-          }
-          j++;
-        }
-        if (closed) {
-          out += ' '.repeat(j - i);
-          i = j;
-          continue;
-        }
+    // Regex literal (e.g. /[/*]/ or `return /[/*]/;`): skip so /* or quotes inside a regex never masquerade as comments/strings.
+    if (ch === '/' && next !== '/' && next !== '*' && canStartRegexLiteral(source, i)) {
+      const end = scanRegexLiteralEnd(source, i);
+      if (end !== -1) {
+        out += ' '.repeat(end - i);
+        i = end;
+        continue;
       }
     }
     // String or template literal
@@ -260,11 +337,11 @@ export function runLintRules(repoRoot: string): LintRulesResult {
     });
 
     if (isCode && !isLocales) {
+      const noComments = stripCommentsPreservingLines(content);
       stringRawUncLiteralRe.lastIndex = 0;
       let rawMatch: RegExpExecArray | null;
-      while ((rawMatch = stringRawUncLiteralRe.exec(content)) !== null) {
-        const lineNo = lineNumberAt(content, rawMatch.index);
-        if (isCommentLine(lines[lineNo - 1] ?? '')) continue;
+      while ((rawMatch = stringRawUncLiteralRe.exec(noComments)) !== null) {
+        const lineNo = lineNumberAt(noComments, rawMatch.index);
         violations.push(
           `${relPath}:${lineNo} forbidden raw UNC literal in client code (Issue #28): ${rawMatch[0].replace(/\s+/g, ' ').trim()}`,
         );
