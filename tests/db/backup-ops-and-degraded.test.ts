@@ -366,11 +366,24 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
       assert.equal(created2.ok, true)
       assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 2)
 
-      // Advance another >24h and issue concurrent writes -> single-flight deduplication produces exactly 1 more backup.
+      // Advance another >24h with a monotonic per-call clock so any duplicate backup attempt would create
+      // a distinct timestamped file, proving process-local single-flight deduplication across writes & replacement startup.
       nowMs += 25 * 60 * 60 * 1000
+      let tickOffset = 0
+      const monotonicClock = () => new Date(nowMs + (++tickOffset))
+      const replacementService = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        configuredNasBackupDir: nasBackupDir,
+        backupRetentionCount: 5,
+        preMigrateRetentionCount: 2,
+        autoDailyBackup: true,
+        now: monotonicClock,
+      })
       const [c3, c4] = await Promise.all([
         service.createTag({ name: 'Issue34Concurrent1' }),
         service.createTag({ name: 'Issue34Concurrent2' }),
+        replacementService.initialize(),
       ])
       assert.equal(c3.ok, true)
       assert.equal(c4.ok, true)

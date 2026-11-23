@@ -140,11 +140,14 @@ import {
 // Keep process-local ownership across module reloads; a true Host restart starts with an empty registry.
 const LIVE_TASKS_KEY = Symbol.for('dsh-media-library.live-ingestion-tasks');
 const FILE_EXECUTION_KEY = Symbol.for('dsh-media-library.file-ingestion-execution');
+const DAILY_BACKUP_IN_FLIGHT_KEY = Symbol.for('dsh-media-library.daily-backup-in-flight');
 const hostRuntime = globalThis as typeof globalThis & {
   [LIVE_TASKS_KEY]?: Map<string, Set<number>>;
   [FILE_EXECUTION_KEY]?: { databasePath: string; task: IngestionTask };
+  [DAILY_BACKUP_IN_FLIGHT_KEY]?: Map<string, Promise<void>>;
 };
 const liveIngestionTasks = hostRuntime[LIVE_TASKS_KEY] ??= new Map<string, Set<number>>();
+const dailyBackupInFlightByDb = hostRuntime[DAILY_BACKUP_IN_FLIGHT_KEY] ??= new Map<string, Promise<void>>();
 
 export const DEFAULT_M1_ROOT_ID = 'nas-main';
 
@@ -405,7 +408,6 @@ export class MediaLibrarySpikeService {
   private readonly opener: NativeOpener;
   private readonly fileProbe: FileProbeFn;
   private initialization: Promise<void> | undefined;
-  private dailyAutoBackupInFlight: Promise<void> | null = null;
   private degradedState: DegradedModeState = {
     degraded: false,
     reason: null,
@@ -548,18 +550,6 @@ export class MediaLibrarySpikeService {
         };
 
         markInterruptedIngestionTasks(db, this.now, [...(liveIngestionTasks.get(this.localDatabasePath) ?? [])]);
-
-        if (this.autoDailyBackup) {
-          await maybeRunDailyAutoBackup({
-            db,
-            dbPath,
-            backupDir: this.backupDir,
-            nasBackupDir: this.readConfiguredNasBackupDir(),
-            dailyRetention: this.backupRetentionCount,
-            preMigrateRetention: this.preMigrateRetentionCount,
-            now: this.now,
-          });
-        }
       } catch (err) {
         let schemaVersion = 0;
         let healthOk = false;
@@ -580,6 +570,7 @@ export class MediaLibrarySpikeService {
       } finally {
         db.close();
       }
+      await this.maybeTriggerDailyAutoBackup();
     })();
     return this.initialization;
   }
@@ -624,16 +615,19 @@ export class MediaLibrarySpikeService {
 
   private async maybeTriggerDailyAutoBackup(): Promise<void> {
     if (!this.autoDailyBackup || this.degradedState.degraded) return;
-    if (this.dailyAutoBackupInFlight) {
-      await this.dailyAutoBackupInFlight;
+    const existing = dailyBackupInFlightByDb.get(this.localDatabasePath);
+    if (existing) {
+      await existing;
       return;
     }
     const run = (async () => {
-      const { db, dbPath } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+      let db: DatabaseSync | null = null;
       try {
+        const opened = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+        db = opened.db;
         await maybeRunDailyAutoBackup({
           db,
-          dbPath,
+          dbPath: opened.dbPath,
           backupDir: this.backupDir,
           nasBackupDir: this.readConfiguredNasBackupDir(),
           dailyRetention: this.backupRetentionCount,
@@ -643,15 +637,19 @@ export class MediaLibrarySpikeService {
       } catch {
         // Daily auto-backup is best-effort operational maintenance and must not fail committed writes.
       } finally {
-        db.close();
+        try {
+          db?.close();
+        } catch {
+          // Ignore close errors during best-effort daily auto-backup cleanup.
+        }
       }
     })();
-    this.dailyAutoBackupInFlight = run;
+    dailyBackupInFlightByDb.set(this.localDatabasePath, run);
     try {
       await run;
     } finally {
-      if (this.dailyAutoBackupInFlight === run) {
-        this.dailyAutoBackupInFlight = null;
+      if (dailyBackupInFlightByDb.get(this.localDatabasePath) === run) {
+        dailyBackupInFlightByDb.delete(this.localDatabasePath);
       }
     }
   }
@@ -945,8 +943,9 @@ export class MediaLibrarySpikeService {
     }
 
     const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+    let scanRes: ScanStagingResult;
     try {
-      return await scanStagingDirectory(db, {
+      scanRes = await scanStagingDirectory(db, {
         stagingDir: effectiveStagingDir,
         targetRootId: DEFAULT_M1_ROOT_ID,
         targetSubdir,
@@ -958,6 +957,8 @@ export class MediaLibrarySpikeService {
     } finally {
       db.close();
     }
+    await this.maybeTriggerDailyAutoBackup();
+    return scanRes;
   }
 
   async listIngestionManifests(): Promise<IngestionManifest[]> {
@@ -1000,6 +1001,7 @@ export class MediaLibrarySpikeService {
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
     const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
     let taskId: number | null = null;
+    let fetchResult: FetchedMetadataCandidate | null = null;
     try {
       let manifestId = input.manifestId;
       if (!manifestId && (input as { readonly tempPath?: unknown }).tempPath !== undefined) {
@@ -1059,7 +1061,7 @@ export class MediaLibrarySpikeService {
         res.ok ? `Fetched from ${res.provider}: ${res.title ?? ''}` : `[${res.category}] ${res.reason}`,
         this.now,
       );
-      return res;
+      fetchResult = res;
     } catch (err) {
       if (taskId !== null) {
         finishIngestionTask(db, taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
@@ -1069,6 +1071,11 @@ export class MediaLibrarySpikeService {
       if (taskId !== null) this.releaseIngestionTask(taskId);
       db.close();
     }
+    if (fetchResult) {
+      await this.maybeTriggerDailyAutoBackup();
+      return fetchResult;
+    }
+    throw new Error('Unexpected empty fetch result.');
   }
 
   async reviewIngestion(input: ReviewIngestionInput): Promise<ReviewIngestionResult> {
@@ -1082,7 +1089,7 @@ export class MediaLibrarySpikeService {
     }
     const { roots } = this.getEffectiveRootsAndItems();
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
-    return this.withInitializedDatabase(async (db) => {
+    const reviewRes = await this.withInitializedDatabase(async (db) => {
       let manifestId = input.manifestId;
       if (!manifestId && (input as { readonly tempPath?: unknown }).tempPath !== undefined) {
         throw new Error('PATH_TRAVERSAL_REJECTED: Client must submit manifestId or staging relativePath, not raw tempPath.');
@@ -1100,12 +1107,14 @@ export class MediaLibrarySpikeService {
         manifestId = created.id;
       }
       if (!manifestId) {
-        return { ok: false, code: 'INVALID_INPUT', message: 'Either manifestId or relativePath is required.' };
+        return { ok: false as const, code: 'INVALID_INPUT' as const, message: 'Either manifestId or relativePath is required.' };
       }
       const active = findManifestTask(db, manifestId);
-      if (active) return { ok: false, code: 'IN_PROGRESS', message: `Task #${active.id} freezes this Manifest until it finishes.` };
+      if (active) return { ok: false as const, code: 'IN_PROGRESS' as const, message: `Task #${active.id} freezes this Manifest until it finishes.` };
       return reviewIngestionManifest(db, { ...input, manifestId }, this.now);
     });
+    if (reviewRes.ok) await this.maybeTriggerDailyAutoBackup();
+    return reviewRes;
   }
 
   async commitIngestion(input: CommitIngestionInput): Promise<CommitIngestionResult> {
@@ -1320,7 +1329,9 @@ export class MediaLibrarySpikeService {
 
   async previewManifestPerformers(input: PreviewManifestPerformersInput): Promise<ManifestPerformerPreview> {
     await this.initialize();
-    return this.withInitializedDatabase((db) => evaluateManifestPerformers(db, input.manifestId, { now: this.now }));
+    const res = await this.withInitializedDatabase((db) => evaluateManifestPerformers(db, input.manifestId, { now: this.now }));
+    await this.maybeTriggerDailyAutoBackup();
+    return res;
   }
 
   async listPerformerAliases(): Promise<PerformerAliasRecord[]> {
