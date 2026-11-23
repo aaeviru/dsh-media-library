@@ -66,16 +66,20 @@ const REGEX_PREFIX_KEYWORDS = new Set([
   'delete', 'yield', 'await', 'new', 'else', 'do',
 ]);
 
-function canStartRegexLiteral(source: string, slashIdx: number): boolean {
-  let prevIdx = slashIdx - 1;
-  while (prevIdx >= 0 && (source[prevIdx] === ' ' || source[prevIdx] === '\t')) prevIdx--;
+function canStartRegexLiteral(strippedPrefix: string): boolean {
+  let prevIdx = strippedPrefix.length - 1;
+  while (prevIdx >= 0 && (strippedPrefix[prevIdx] === ' ' || strippedPrefix[prevIdx] === '\t')) prevIdx--;
   if (prevIdx < 0) return true;
-  const prevChar = source[prevIdx]!;
+  const prevChar = strippedPrefix[prevIdx]!;
   if ('=(,[{:;!&|?+-*%^~<>\n\r'.includes(prevChar)) return true;
   if (/[A-Za-z0-9_$]/.test(prevChar)) {
     let wordStart = prevIdx;
-    while (wordStart > 0 && /[A-Za-z0-9_$]/.test(source[wordStart - 1]!)) wordStart--;
-    return REGEX_PREFIX_KEYWORDS.has(source.slice(wordStart, prevIdx + 1));
+    while (wordStart > 0 && /[A-Za-z0-9_$]/.test(strippedPrefix[wordStart - 1]!)) wordStart--;
+    // Property access (e.g. `obj.of / 2`) is never a keyword prefix.
+    let beforeWord = wordStart - 1;
+    while (beforeWord >= 0 && (strippedPrefix[beforeWord] === ' ' || strippedPrefix[beforeWord] === '\t')) beforeWord--;
+    if (beforeWord >= 0 && strippedPrefix[beforeWord] === '.') return false;
+    return REGEX_PREFIX_KEYWORDS.has(strippedPrefix.slice(wordStart, prevIdx + 1));
   }
   return false;
 }
@@ -130,7 +134,7 @@ function stripCommentsPreservingLines(source: string): string {
       }
       continue;
     }
-    if (ch === '/' && next !== '/' && next !== '*' && canStartRegexLiteral(source, i)) {
+    if (ch === '/' && next !== '/' && next !== '*' && canStartRegexLiteral(out)) {
       const end = scanRegexLiteralEnd(source, i);
       if (end !== -1) {
         out += source.slice(i, end);
@@ -197,7 +201,7 @@ function sanitizeForRpcKeyScan(source: string): string {
       continue;
     }
     // Regex literal (e.g. /[/*]/ or `return /[/*]/;`): skip so /* or quotes inside a regex never masquerade as comments/strings.
-    if (ch === '/' && next !== '/' && next !== '*' && canStartRegexLiteral(source, i)) {
+    if (ch === '/' && next !== '/' && next !== '*' && canStartRegexLiteral(out)) {
       const end = scanRegexLiteralEnd(source, i);
       if (end !== -1) {
         out += ' '.repeat(end - i);

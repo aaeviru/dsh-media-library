@@ -29,6 +29,7 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
           '// void mediaLibrary.fetchIngestionMetadata({ tempPath: x });',
           '// export const commentedRaw = String.raw`\\\\NAS\\Share`;',
           'export const trailingComment = 1; // String.raw`\\\\NAS\\Share`',
+          'export const propDivision = obj.of / 2; // String.raw`\\\\NAS\\Share`',
           'void mediaLibrary.searchMedia({ text: "show uncPath: examples" });',
           'void mediaLibrary.searchMedia({ text: uncPath ? uncPath : "" });',
         ].join('\n') + '\n',
@@ -45,7 +46,7 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
         path.join(tmpDir, 'src', 'client', 'BadPanel.tsx'),
         [
           sampleUncLine.trim(),
-          'export function getSlashRe() { return /[/*]/; }',
+          'export function getSlashRe() { return /* note */ /[/*]/; }',
           'export const rawUnc = String.raw`\\\\NAS\\Share`;',
           'export const multilineRawUnc = String.raw`',
           '  \\\\NAS\\Share',
