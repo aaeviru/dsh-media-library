@@ -62,62 +62,10 @@ function skipWhitespaceAndComments(source: string, start: number): number {
 }
 
 /**
- * Strip JS/TS comments while preserving newline positions and keeping string/template literals intact.
- */
-function stripCommentsPreservingLines(source: string): string {
-  let out = '';
-  let i = 0;
-  while (i < source.length) {
-    const ch = source[i]!;
-    const next = source[i + 1];
-    if (ch === '/' && next === '/') {
-      while (i < source.length && source[i] !== '\n') {
-        out += ' ';
-        i++;
-      }
-      continue;
-    }
-    if (ch === '/' && next === '*') {
-      out += '  ';
-      i += 2;
-      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) {
-        out += source[i] === '\n' ? '\n' : ' ';
-        i++;
-      }
-      if (i < source.length) {
-        out += '  ';
-        i += 2;
-      }
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      const quote = ch;
-      let j = i + 1;
-      while (j < source.length) {
-        if (source[j] === '\\') {
-          j += 2;
-          continue;
-        }
-        if (source[j] === quote) {
-          j++;
-          break;
-        }
-        j++;
-      }
-      out += source.slice(i, j);
-      i = j;
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return out;
-}
-
-/**
- * Strip JS/TS comments while preserving newline positions, and replace non-key string values
- * so RPC payload key inspection never triggers on comments or string values like `query: "uncPath: x"`,
- * while still preserving quoted object keys like `{ "tempPath": x }` (even with comments/newlines before `:`).
+ * Strip JS/TS comments while preserving newline positions, and blank out string/template contents
+ * except for quoted object property keys `'tempPath'`, `"tempPath"`, `'uncPath'`, `"uncPath"`
+ * (even when whitespace or comments appear before `:`). Blanking all other quoted keys ensures
+ * characters like `}` inside `{ "}": 0, tempPath }` can never disrupt brace balancing.
  */
 function sanitizeForRpcKeyScan(source: string): string {
   let out = '';
@@ -147,6 +95,39 @@ function sanitizeForRpcKeyScan(source: string): string {
       }
       continue;
     }
+    // Regex literal (e.g. /[/*]/): skip so /* or quotes inside a regex never masquerade as comments/strings.
+    if (ch === '/' && next !== '/' && next !== '*') {
+      let prevIdx = i - 1;
+      while (prevIdx >= 0 && (source[prevIdx] === ' ' || source[prevIdx] === '\t')) prevIdx--;
+      const prevChar = prevIdx >= 0 ? source[prevIdx]! : '';
+      if (!prevChar || '=(,[{:;!&|?+-*%^~<>\n\r'.includes(prevChar)) {
+        let j = i + 1;
+        let inClass = false;
+        let closed = false;
+        while (j < source.length && source[j] !== '\n') {
+          const rc = source[j]!;
+          if (rc === '\\') {
+            j += 2;
+            continue;
+          }
+          if (rc === '[') {
+            inClass = true;
+          } else if (rc === ']') {
+            inClass = false;
+          } else if (rc === '/' && !inClass) {
+            j++;
+            closed = true;
+            break;
+          }
+          j++;
+        }
+        if (closed) {
+          out += ' '.repeat(j - i);
+          i = j;
+          continue;
+        }
+      }
+    }
     // String or template literal
     if (ch === "'" || ch === '"' || ch === '`') {
       const quote = ch;
@@ -163,9 +144,10 @@ function sanitizeForRpcKeyScan(source: string): string {
         j++;
       }
       const literal = source.slice(i, j);
-      // Peek ahead past whitespace and comments: if followed by ':', this string is an object property key — keep it!
+      const inner = source.slice(i + 1, Math.max(i + 1, j - 1));
+      // Peek ahead past whitespace and comments: preserve only forbidden quoted property keys followed by ':'.
       const k = skipWhitespaceAndComments(source, j);
-      if (quote !== '`' && source[k] === ':') {
+      if (quote !== '`' && (inner === 'tempPath' || inner === 'uncPath') && source[k] === ':') {
         out += literal;
       } else {
         out += quote;
@@ -184,9 +166,7 @@ function sanitizeForRpcKeyScan(source: string): string {
 }
 
 /**
- * Extract balanced `{ ... }` body starting at `openBraceIdx` in sanitized source,
- * and check whether any top-level property key is `tempPath` or `uncPath`
- * (explicit key, quoted key, or shorthand property), ignoring values such as ternary expressions.
+ * Find the matching closing `}` index for the `{` at `openBraceIdx` in sanitized source.
  */
 function findBalancedBlockEnd(source: string, openBraceIdx: number): number {
   let depth = 0;
@@ -202,6 +182,10 @@ function findBalancedBlockEnd(source: string, openBraceIdx: number): number {
   return -1;
 }
 
+/**
+ * Check whether any top-level property key in an RPC payload object body is `tempPath` or `uncPath`
+ * (explicit key, quoted key, or shorthand property), ignoring values such as ternary expressions.
+ */
 function hasForbiddenPayloadKey(objectBody: string): boolean {
   const segments: string[] = [];
   let braceDepth = 0;
@@ -276,11 +260,11 @@ export function runLintRules(repoRoot: string): LintRulesResult {
     });
 
     if (isCode && !isLocales) {
-      const noComments = stripCommentsPreservingLines(content);
       stringRawUncLiteralRe.lastIndex = 0;
       let rawMatch: RegExpExecArray | null;
-      while ((rawMatch = stringRawUncLiteralRe.exec(noComments)) !== null) {
-        const lineNo = lineNumberAt(noComments, rawMatch.index);
+      while ((rawMatch = stringRawUncLiteralRe.exec(content)) !== null) {
+        const lineNo = lineNumberAt(content, rawMatch.index);
+        if (isCommentLine(lines[lineNo - 1] ?? '')) continue;
         violations.push(
           `${relPath}:${lineNo} forbidden raw UNC literal in client code (Issue #28): ${rawMatch[0].replace(/\s+/g, ' ').trim()}`,
         );

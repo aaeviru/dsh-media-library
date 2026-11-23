@@ -44,6 +44,7 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
         path.join(tmpDir, 'src', 'client', 'BadPanel.tsx'),
         [
           sampleUncLine.trim(),
+          'export const slashRe = /[/*]/;',
           'export const rawUnc = String.raw`\\\\NAS\\Share`;',
           'export const multilineRawUnc = String.raw`',
           '  \\\\NAS\\Share',
@@ -52,6 +53,7 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
           '  void mediaLibrary.fetchIngestionMetadata({',
           '    tempPath,',
           '  },);',
+          '  void mediaLibrary.fetchIngestionMetadata({ "}": 0, tempPath });',
           '  void mediaLibrary.fetchIngestionMetadata({ "tempPath" /* staging */: tempPath });',
           '  void mediaLibrary.fetchIngestionMetadata({',
           '    "tempPath"',
@@ -83,7 +85,7 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
       );
       assert.equal(
         res.violations.filter((v) => v.includes('forbidden raw path field in client RPC call')).length,
-        4,
+        5,
       );
       assert.ok(res.violations.some((v) => v.includes('src/host-bad.ts') && v.includes('hardcoded machine path')));
       assert.ok(res.violations.some((v) => v.includes('scripts/bad-helper.mjs') && v.includes('hardcoded machine path')));
