@@ -20,14 +20,16 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
 
       const sampleUncLine = "export const hint = 'e.g. \\\\\\\\SynologyNAS\\\\Media';\n";
 
-      // Allowed: locales.ts placeholder, single-backslash ordinary string, commented-out RPC, and string value containing "uncPath:".
+      // Allowed: locales.ts placeholder, single-backslash ordinary string, commented-out RPC, string value containing "uncPath:", and ternary value referencing uncPath.
       fs.writeFileSync(path.join(tmpDir, 'src', 'client', 'locales.ts'), sampleUncLine);
       fs.writeFileSync(
         path.join(tmpDir, 'src', 'client', 'safe.ts'),
         [
           "export const label = '\\\\foo\\bar';",
           '// void mediaLibrary.fetchIngestionMetadata({ tempPath: x });',
+          '// export const commentedRaw = String.raw`\\\\NAS\\Share`;',
           'void mediaLibrary.searchMedia({ text: "show uncPath: examples" });',
+          'void mediaLibrary.searchMedia({ text: uncPath ? uncPath : "" });',
         ].join('\n') + '\n',
       );
       const cleanRes = runLintRules(tmpDir);
@@ -43,11 +45,18 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
         [
           sampleUncLine.trim(),
           'export const rawUnc = String.raw`\\\\NAS\\Share`;',
+          'export const multilineRawUnc = String.raw`',
+          '  \\\\NAS\\Share',
+          '`;',
           'export function BadPanel(tempPath: string) {',
           '  void mediaLibrary.fetchIngestionMetadata({',
           '    tempPath,',
           '  },);',
-          '  void mediaLibrary.fetchIngestionMetadata({ "tempPath": tempPath });',
+          '  void mediaLibrary.fetchIngestionMetadata({ "tempPath" /* staging */: tempPath });',
+          '  void mediaLibrary.fetchIngestionMetadata({',
+          '    "tempPath"',
+          '      : tempPath,',
+          '  });',
           '  void mediaLibrary.reviewIngestion({',
           '    uncPath: tempPath,',
           '  });',
@@ -70,11 +79,11 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
       assert.ok(res.violations.some((v) => v.includes('forbidden native <select>')));
       assert.equal(
         res.violations.filter((v) => v.includes('BadPanel.tsx') && v.includes('forbidden raw UNC literal')).length,
-        2,
+        3,
       );
       assert.equal(
         res.violations.filter((v) => v.includes('forbidden raw path field in client RPC call')).length,
-        3,
+        4,
       );
       assert.ok(res.violations.some((v) => v.includes('src/host-bad.ts') && v.includes('hardcoded machine path')));
       assert.ok(res.violations.some((v) => v.includes('scripts/bad-helper.mjs') && v.includes('hardcoded machine path')));
