@@ -1,15 +1,22 @@
 {
-  "extends": "/home/aaevi/projects/project/deepseek-harness/tsconfig.base.json",
   "compilerOptions": {
-    "composite": false,
-    "incremental": false,
-    "declaration": false,
-    "declarationMap": false,
-    "sourceMap": false,
-    "noEmit": true,
-    "typeRoots": [
-      "/home/aaevi/projects/project/deepseek-harness/node_modules/@types"
-    ]
+    "target": "es2024",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "types": ["node"],
+    "typeRoots": ["./node_modules/@types"],
+    "noEmit": true
   },
   "include": [
     "tests/**/*.ts"
