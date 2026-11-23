@@ -14,7 +14,12 @@ import {
   parseManagedBackupFilename,
   pruneManagedBackups,
 } from '../../src/db/ops.ts'
-import { CURRENT_SCHEMA_VERSION, migrateDatabase } from '../../src/db/schema.ts'
+import {
+  CURRENT_SCHEMA_VERSION,
+  migrateDatabase,
+  V1_SCHEMA_MIGRATION,
+  V2_MEDIA_STATUS_MIGRATION,
+} from '../../src/db/schema.ts'
 import { listTagsInDatabase, searchMediaInDatabase } from '../../src/search/search-repository.ts'
 import { MediaLibrarySpikeService } from '../../src/spike-service.ts'
 import { createM2ImportTagStudioFixture } from '../../src/inventory/fixture-builder.ts'
@@ -323,6 +328,142 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
       for (const name of manualFiles) {
         assert.equal(fs.existsSync(path.join(tmpDir, name)), true, `Manual file ${name} must be preserved`)
       }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('Issue #35: previewManifestPerformers does not write in READ_ONLY_DEGRADED mode', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ops-issue35-preview-'))
+    try {
+      const { dbPath } = await createPopulatedService(tmpDir)
+      const db = new DatabaseSync(dbPath)
+      let manifestId = 0
+      try {
+        await migrateDatabase(db, { dbPath })
+        const res = db
+          .prepare(
+            `INSERT INTO ingestion_manifests (
+               source_id, temp_path, target_root_id, target_relative_path, filename, title,
+               catalog_number, media_date, tags_json, actresses_json, metadata_source,
+               checksum_sha256, file_size, state, review_decision, created_at, updated_at
+             ) VALUES (
+               'src-deg-1', '/tmp/deg.mp4', 'nas-main', 'ingested/deg.mp4', 'deg.mp4', 'Degraded Preview',
+               'DEG-001', NULL, '[]', '["Unknown Performer X"]', 'manual',
+               'sha-deg-1', 100, 'planned', 'pending', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z'
+             )`,
+          )
+          .run()
+        manifestId = Number(res.lastInsertRowid)
+        db.prepare('INSERT INTO schema_versions (version, applied_at, app_version, description) VALUES (99, ?, ?, ?)').run(
+          new Date().toISOString(),
+          '9.9.9',
+          'Simulated future schema',
+        )
+      } finally {
+        db.close()
+      }
+
+      const degradedService = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        supportedMaxVersion: CURRENT_SCHEMA_VERSION,
+        autoDailyBackup: false,
+      })
+
+      const preview = await degradedService.previewManifestPerformers({ manifestId })
+      assert.equal(preview.manifestId, manifestId)
+      assert.equal(preview.canCommit, false)
+
+      // Verify performer_review_queue was NOT written to at all.
+      const verifyDb = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const rows = verifyDb.prepare('SELECT * FROM performer_review_queue').all()
+        assert.equal(rows.length, 0)
+      } finally {
+        verifyDb.close()
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('Issue #35: v2 fixture with failed upgrade enters READ_ONLY_DEGRADED while listTags and mapping export work on v2 schema', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ops-issue35-v2-'))
+    try {
+      const dbPath = path.join(tmpDir, 'media-library', 'library.sqlite3')
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+      const db = new DatabaseSync(dbPath)
+      try {
+        await migrateDatabase(db, {
+          dbPath,
+          migrations: [V1_SCHEMA_MIGRATION, V2_MEDIA_STATUS_MIGRATION],
+          appVersion: '0.2.0',
+        })
+        db.prepare(
+          `INSERT INTO media_roots (id, name, canonical_unc_root, enabled, created_at)
+           VALUES ('nas-main', 'NAS Main', '\\\\NAS\\MediaTest', 1, '2026-11-01T00:00:00.000Z')`,
+        ).run()
+        const mediaId = Number(
+          db
+            .prepare(
+              `INSERT INTO media_files (root_id, relative_path, filename, extension, title, catalog_number, media_date, status, revision)
+               VALUES ('nas-main', 'videos/V2-001.mp4', 'V2-001.mp4', '.mp4', 'Legacy V2 Video', 'V2-001', '2026-11-01', 'indexed', 1)`,
+            )
+            .run().lastInsertRowid,
+        )
+        const tagId = Number(
+          db
+            .prepare(
+              `INSERT INTO tags (name, normalized_name, shorthand, kind, created_at, updated_at, revision)
+               VALUES ('LegacyTag', 'legacytag', 'lt', 'custom', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', 1)`,
+            )
+            .run().lastInsertRowid,
+        )
+        db.prepare(
+          `INSERT INTO tag_aliases (tag_id, alias, normalized_alias) VALUES (?, 'LegacyAlias', 'legacyalias')`,
+        ).run(tagId)
+        db.prepare(
+          `INSERT INTO media_tags (media_id, tag_id, source, created_at) VALUES (?, ?, 'tagstudio-import', '2026-11-01T00:00:00.000Z')`,
+        ).run(mediaId, tagId)
+
+        // Cause V3_TAG_MANAGEMENT_MIGRATION to fail cleanly and roll back, leaving DB at v2.
+        db.exec('CREATE TABLE mutation_log (id INTEGER PRIMARY KEY);')
+      } finally {
+        db.close()
+      }
+
+      const degradedService = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        autoDailyBackup: false,
+      })
+
+      const ops = await degradedService.getOpsStatus()
+      assert.equal(ops.degradedState.degraded, true)
+      assert.equal(ops.degradedState.schemaVersion, 2)
+
+      // Read-only tag query works without archived_at / merged_into_id columns.
+      const listed = await degradedService.listTags({ query: 'legacyalias' })
+      assert.equal(listed.tags.length, 1)
+      assert.equal(listed.tags[0]!.name, 'LegacyTag')
+      assert.equal(listed.tags[0]!.archived, false)
+      assert.equal(listed.tags[0]!.mergedIntoId, null)
+
+      // JSON and CSV mapping exports work on v2 schema.
+      const jsonExport = await degradedService.exportMappingReport({ format: 'json' })
+      assert.equal(jsonExport.ok, true)
+      assert.equal(jsonExport.rowCount, 1)
+      assert.match(jsonExport.content, /LegacyTag/)
+
+      const csvExport = await degradedService.exportMappingReport({ format: 'csv' })
+      assert.equal(csvExport.ok, true)
+      assert.equal(csvExport.rowCount, 1)
+      assert.match(csvExport.content, /LegacyTag/)
+
+      // Preview on v2 degraded DB returns safe empty non-committable result without writing.
+      const preview = await degradedService.previewManifestPerformers({ manifestId: 1 })
+      assert.equal(preview.canCommit, false)
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }

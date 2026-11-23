@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import {
   openNativeAssociatedPath,
   revealNativePath,
@@ -1278,6 +1278,15 @@ export class MediaLibrarySpikeService {
 
   async previewManifestPerformers(input: PreviewManifestPerformersInput): Promise<ManifestPerformerPreview> {
     await this.initialize();
+    if (this.degradedState.degraded) {
+      const db = new DatabaseSync(this.localDatabasePath, { readOnly: true });
+      try {
+        const preview = evaluateManifestPerformers(db, input.manifestId, { now: this.now, readOnly: true });
+        return { ...preview, canCommit: false };
+      } finally {
+        db.close();
+      }
+    }
     return this.withInitializedDatabase((db) => evaluateManifestPerformers(db, input.manifestId, { now: this.now }));
   }
 

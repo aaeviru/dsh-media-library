@@ -346,9 +346,14 @@ export function exportPortableMappingReport(
     revision: number
   }>
 
+  const tagCols = new Set(
+    (db.prepare('PRAGMA table_info("tags")').all() as Array<{ name: string }>).map(r => String(r.name)),
+  )
+  const archivedSelect = tagCols.has('archived_at') ? 't.archived_at' : 'NULL AS archived_at'
+
   const tagRows = db
     .prepare(
-      `SELECT mt.media_id, t.id AS tag_id, t.name, t.archived_at, mt.source
+      `SELECT mt.media_id, t.id AS tag_id, t.name, ${archivedSelect}, mt.source
        FROM media_tags mt
        INNER JOIN tags t ON t.id = mt.tag_id
        ORDER BY mt.media_id ASC, t.normalized_name ASC, t.id ASC`,
