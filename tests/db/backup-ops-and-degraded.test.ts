@@ -551,7 +551,7 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
 
       // Advance >24h with NO committed writes (failed write does not advance watermark) -> skipped.
       nowMs += 25 * 60 * 60 * 1000
-      const failedWrite = await service.renameTag({ tagId: 999_999, newName: 'MissingTag', expectedRevision: 1 })
+      const failedWrite = await service.renameTag({ tagId: 999_999, name: 'MissingTag', expectedRevision: 1 })
       assert.equal(failedWrite.ok, false)
       assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 1)
 
