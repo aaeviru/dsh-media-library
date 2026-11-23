@@ -165,11 +165,18 @@ Blast Radius: <影响范围>
 Risks / Rollback: <风险与回退方式>
 ```
 
-### 4.2 Review 必须绑定实际 Commit SHA
+### 4.2 Review 必须绑定实际 Commit SHA 与跨模型协作协议
 
-- `[REVIEW]` 必须记录被审查的完整 commit SHA。Worker 推送新提交后，旧 SHA 的 `PASS` 自动失效，Critic 必须审查增量差异并更新绑定 SHA。
+- `[REVIEW]` 必须记录被审查的完整 commit SHA 及最终 `./scripts/verify.sh` 绑定的 SHA。Worker 推送新提交后，旧 SHA 的 `PASS` 自动失效，Critic 必须审查增量差异并更新绑定 SHA。
 - Critic 审查代码 PR 时必须对照 [CODING_STANDARDS.md](../../CODING_STANDARDS.md) 与对应 Issue Contract。
-- 在具备自动触发跨模型审查机制前，保持双层审阅：Worker 提 PR 前先由内部独立 Critic 前置拦截明显缺陷以减少人工往返；高风险或 P1 PR 可再交由外部跨模型 Reviewer 结合 `Quick Re-check` 命令做第二道复审。
+- **验证与审查顺序**：开发与跨模型 Critic 迭代阶段先跑快速检查（`./scripts/build-bundle.sh` + `tsc -p tsconfig.test.json --noEmit` + 定向单测 + 回归测试 Red-check）；待 Critic 返回 **`PASS`** 后，再对**精确 `PASS` SHA** 执行 1 次全量 `./scripts/verify.sh`（多 worktree 并行时可传 `DSH_VERIFY_PORT=<port>` 避免撞 3199 端口），通过后再推送并创建 PR。若终版 `verify.sh` 触发改码，改完后须重走复审与终版验证；并行批次合入 `main` 后，在 `main` 上执行一次整合 `./scripts/verify.sh`。
+- **Review Brief I/F**：
+  - 首审看 `base..head`，传入 `worktree`、精确 `base..head` SHA、Contract 链接与 `Allowed paths`、`CODING_STANDARDS.md` 路径、快测命令与实测结果，以及回归测试的 **Red-check**（测试名、预期捕获的 bug、最小还原方式、预期失败断言、是否已实测变红；并发/重试/冲突类测试须在内存或临时副本实测一次变红）。
+  - 复审新开独立 Critic 上下文，先看 `prev..head`（发生 rebase、解冲突或跨模块修改时保留 `base..head`），附 `prevReviewedSha` 及上轮每条 Finding 的处置（`Fixed` / `Objection` / `Out-of-scope`）与证据。
+- **反驳（Objection）与 Contract Challenge 分级**：
+  - Worker 反驳 Finding 时，每条只提 1 个可证伪事实断言（引原 Finding、钉死 SHA 与 `file:line`、引 Contract 条款、先给最小复现证据再给结论），请 Critic 返回 `upheld` / `withdrawn` / `needs human decision` + 一句话理由；单 PR 上限 **1 轮反驳、总共 3 轮**，超限或产品权衡升级给人类。
+  - 允许并鼓励 Critic 在 `Contract Challenge` 栏指出 Contract 本身的问题：涉及红线/数据安全/竞态/逻辑矛盾的硬伤标 `needs human decision` 阻塞并升级人类修订 Contract；纯权衡或已拍板偏好记为非阻塞 `Advisory Note`。高风险、`one-way` 或改 Schema 的 Issue，编码前先做一次 Pre-Contract Red-Team。
+- **GitHub 记录粒度**：完整多轮对话保留在编排线程；PR 正文 `## [REVIEW]` 只记录紧凑摘要（最终 `Verdict`、绑定 SHA、轮次、已解 P1/P2、终版 `verify.sh` 结果与 SHA、以及人类 override 理由）；仅存在待人类拍板的未解分歧时发 PR 评论，仅当 Contract/验收标准变更或拆出后续任务时写回 Issue。
 - Issue 评论中的方案讨论属于 **Issue Review**，不能替代针对实际代码 diff 和验证证据的 **PR Review**。
 
 ---
