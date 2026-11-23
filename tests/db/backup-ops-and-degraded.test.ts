@@ -327,4 +327,74 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
   })
+
+  it('Issue #34: continuous Host writes trigger daily auto-backup across 24h without restart, skip idle/failed writes, and deduplicate repeat triggers', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ops-issue34-'))
+    try {
+      let nowMs = Date.UTC(2026, 10, 20, 0, 0, 0)
+      const clock = () => new Date(++nowMs)
+      const { dbPath, backupDir, nasBackupDir } = await createPopulatedService(tmpDir, clock)
+
+      const service = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        configuredNasBackupDir: nasBackupDir,
+        backupRetentionCount: 5,
+        preMigrateRetentionCount: 2,
+        autoDailyBackup: true,
+        now: clock,
+      })
+
+      // Initial startup creates 1st daily backup.
+      await service.initialize()
+      assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 1)
+
+      // Advance >24h with NO committed writes (failed write does not advance watermark) -> skipped.
+      nowMs += 25 * 60 * 60 * 1000
+      const failedWrite = await service.renameTag({ tagId: 999_999, newName: 'MissingTag', expectedRevision: 1 })
+      assert.equal(failedWrite.ok, false)
+      assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 1)
+
+      // Same Host instance (no restart): committed write across >24h triggers 2nd daily backup.
+      const created1 = await service.createTag({ name: 'Issue34TriggerA' })
+      assert.equal(created1.ok, true)
+      assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 2)
+
+      // Repeat write within <24h (+1h) does NOT trigger a duplicate backup.
+      nowMs += 60 * 60 * 1000
+      const created2 = await service.createTag({ name: 'Issue34TriggerB' })
+      assert.equal(created2.ok, true)
+      assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 2)
+
+      // Advance another >24h with the shared monotonic clock across both service instances so any
+      // duplicate backup attempt would create a distinct timestamped file.
+      nowMs += 25 * 60 * 60 * 1000
+      const replacementService = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        configuredNasBackupDir: nasBackupDir,
+        backupRetentionCount: 5,
+        preMigrateRetentionCount: 2,
+        autoDailyBackup: true,
+        now: clock,
+      })
+      const [c3, c4] = await Promise.all([
+        service.createTag({ name: 'Issue34Concurrent1' }),
+        service.createTag({ name: 'Issue34Concurrent2' }),
+        replacementService.initialize(),
+      ])
+      assert.equal(c3.ok, true)
+      assert.equal(c4.ok, true)
+      assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 3)
+
+      // Manual backup entry and integrity verification remain intact.
+      nowMs += 1000
+      const manualRes = await service.createBackup({ reason: 'manual' })
+      assert.equal(manualRes.ok, true)
+      assert.ok(manualRes.backupPath && fs.existsSync(manualRes.backupPath))
+      assert.equal(listManagedBackups(backupDir).filter(b => b.kind === 'daily').length, 4)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
 })
