@@ -405,6 +405,7 @@ export class MediaLibrarySpikeService {
   private readonly opener: NativeOpener;
   private readonly fileProbe: FileProbeFn;
   private initialization: Promise<void> | undefined;
+  private dailyAutoBackupInFlight: Promise<void> | null = null;
   private degradedState: DegradedModeState = {
     degraded: false,
     reason: null,
@@ -621,17 +622,54 @@ export class MediaLibrarySpikeService {
     }
   }
 
+  private async maybeTriggerDailyAutoBackup(): Promise<void> {
+    if (!this.autoDailyBackup || this.degradedState.degraded) return;
+    if (this.dailyAutoBackupInFlight) {
+      await this.dailyAutoBackupInFlight;
+      return;
+    }
+    const run = (async () => {
+      const { db, dbPath } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+      try {
+        await maybeRunDailyAutoBackup({
+          db,
+          dbPath,
+          backupDir: this.backupDir,
+          nasBackupDir: this.readConfiguredNasBackupDir(),
+          dailyRetention: this.backupRetentionCount,
+          preMigrateRetention: this.preMigrateRetentionCount,
+          now: this.now,
+        });
+      } catch {
+        // Daily auto-backup is best-effort operational maintenance and must not fail committed writes.
+      } finally {
+        db.close();
+      }
+    })();
+    this.dailyAutoBackupInFlight = run;
+    try {
+      await run;
+    } finally {
+      if (this.dailyAutoBackupInFlight === run) {
+        this.dailyAutoBackupInFlight = null;
+      }
+    }
+  }
+
   private async withWritableDatabase<T>(fn: (db: DatabaseSync) => T): Promise<T | MutationError> {
     await this.initialize();
     if (this.degradedState.degraded) {
       return this.makeDegradedMutationError();
     }
     const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+    let result: T;
     try {
-      return await fn(db);
+      result = await fn(db);
     } finally {
       db.close();
     }
+    await this.maybeTriggerDailyAutoBackup();
+    return result;
   }
 
   getEffectiveRootsAndItems(): {
@@ -1080,19 +1118,19 @@ export class MediaLibrarySpikeService {
       };
     }
     const { roots } = this.getEffectiveRootsAndItems();
-    return this.withInitializedDatabase(async (db) => {
+    const res = await this.withInitializedDatabase(async (db) => {
       const targetKey = `manifest:${input.manifestId}`;
       const lock = this.startFileIngestionTask(db, targetKey, 'commit', `Moving & indexing manifest #${input.manifestId}...`);
       if (!lock.acquired) {
         return {
           ok: false,
-          code: 'IN_PROGRESS',
+          code: 'IN_PROGRESS' as const,
           activeTask: lock.existing,
           message: `Task #${lock.existing.id}: ` + lock.existing.message || 'Move & index already in progress for this item.',
         };
       }
       try {
-        const res = await commitIngestionManifest(db, {
+        const commitRes = await commitIngestionManifest(db, {
           manifestId: input.manifestId,
           allowCrossDeviceCopy: this.allowCrossDeviceCopy,
           stagingDir: this.ingestionStagingDir(),
@@ -1104,8 +1142,8 @@ export class MediaLibrarySpikeService {
           fileOps: this.ingestionFileOps,
           now: this.now,
         });
-        finishIngestionTask(db, lock.taskId, res.ok ? 'succeeded' : 'failed', res.message + (res.warning ? ` (${res.warning})` : ''), this.now);
-        return res;
+        finishIngestionTask(db, lock.taskId, commitRes.ok ? 'succeeded' : 'failed', commitRes.message + (commitRes.warning ? ` (${commitRes.warning})` : ''), this.now);
+        return commitRes;
       } catch (err) {
         finishIngestionTask(db, lock.taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
         throw err;
@@ -1113,6 +1151,8 @@ export class MediaLibrarySpikeService {
         this.releaseIngestionTask(lock.taskId);
       }
     });
+    if (res.ok) await this.maybeTriggerDailyAutoBackup();
+    return res;
   }
 
   async reconcileIngestion(): Promise<ReconcileIngestionResult> {
@@ -1129,7 +1169,7 @@ export class MediaLibrarySpikeService {
       };
     }
     const { roots } = this.getEffectiveRootsAndItems();
-    return this.withInitializedDatabase(async (db) => {
+    const res = await this.withInitializedDatabase(async (db) => {
       const lock = this.startFileIngestionTask(db, 'reconcile:all', 'reconcile', 'Reconciling interrupted ingestion manifests...');
       if (!lock.acquired) {
         return {
@@ -1144,7 +1184,7 @@ export class MediaLibrarySpikeService {
         };
       }
       try {
-        const res = await reconcileIngestionManifests(db, {
+        const reconcileRes = await reconcileIngestionManifests(db, {
           roots,
           stagingDir: this.ingestionStagingDir(),
           onPhase: phase => {
@@ -1157,11 +1197,11 @@ export class MediaLibrarySpikeService {
         finishIngestionTask(
           db,
           lock.taskId,
-          res.ok ? 'succeeded' : 'failed',
-          res.ok ? `Reconciled ${res.reconciledCount} manifest(s).` : res.errors.join('; '),
+          reconcileRes.ok ? 'succeeded' : 'failed',
+          reconcileRes.ok ? `Reconciled ${reconcileRes.reconciledCount} manifest(s).` : reconcileRes.errors.join('; '),
           this.now,
         );
-        return res;
+        return reconcileRes;
       } catch (err) {
         finishIngestionTask(db, lock.taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
         throw err;
@@ -1169,6 +1209,8 @@ export class MediaLibrarySpikeService {
         this.releaseIngestionTask(lock.taskId);
       }
     });
+    if (res.reconciledCount > 0) await this.maybeTriggerDailyAutoBackup();
+    return res;
   }
 
   /**
@@ -1321,11 +1363,13 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
-    return this.withInitializedDatabase((db) => {
+    const res = await this.withInitializedDatabase((db) => {
       const active = this.performerRuleTask(db, input.rawAlias);
-      if (active) return { ok: false, code: 'IN_PROGRESS', message: `Task #${active.id} freezes this performer input.` };
+      if (active) return { ok: false as const, code: 'IN_PROGRESS' as const, message: `Task #${active.id} freezes this performer input.` };
       return upsertPerformerAlias(db, input, { now: this.now });
     });
+    if (res.ok) await this.maybeTriggerDailyAutoBackup();
+    return res;
   }
 
   async deletePerformerAlias(input: DeletePerformerAliasInput): Promise<DeletePerformerAliasResult> {
@@ -1337,12 +1381,14 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
-    return this.withInitializedDatabase((db) => {
+    const res = await this.withInitializedDatabase((db) => {
       const alias = db.prepare('SELECT raw_alias FROM performer_aliases WHERE id = ?').get(input.aliasId) as { raw_alias: string } | undefined;
       const active = alias ? this.performerRuleTask(db, alias.raw_alias) : null;
-      if (active) return { ok: false, code: 'IN_PROGRESS', message: `Task #${active.id} freezes this performer input.` };
+      if (active) return { ok: false as const, code: 'IN_PROGRESS' as const, message: `Task #${active.id} freezes this performer input.` };
       return deletePerformerAlias(db, input, { now: this.now });
     });
+    if (res.ok) await this.maybeTriggerDailyAutoBackup();
+    return res;
   }
 
   async listPerformerReviewQueue(input?: ListPerformerReviewInput): Promise<PerformerReviewItem[]> {
@@ -1359,15 +1405,17 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
-    return this.withInitializedDatabase((db) => {
+    const res = await this.withInitializedDatabase((db) => {
       const review = input.reviewId ? db.prepare('SELECT manifest_id, raw_name FROM performer_review_queue WHERE id = ?').get(input.reviewId) as { manifest_id: number; raw_name: string } | undefined : undefined;
       const manifestId = review?.manifest_id ?? input.manifestId;
       const active = manifestId ? findManifestTask(db, manifestId) : null;
       // Remembering an alias can also affect another executing Manifest.
       const ruleTask = input.rememberRule && input.mode !== 'skip' ? this.performerRuleTask(db, review?.raw_name ?? input.rawName ?? '') : null;
-      if (active || ruleTask) return { ok: false, code: 'IN_PROGRESS', message: `Task #${(active ?? ruleTask)!.id} freezes this performer input.` };
+      if (active || ruleTask) return { ok: false as const, code: 'IN_PROGRESS' as const, message: `Task #${(active ?? ruleTask)!.id} freezes this performer input.` };
       return resolvePerformerReview(db, input, { now: this.now });
     });
+    if (res.ok) await this.maybeTriggerDailyAutoBackup();
+    return res;
   }
 
   async promotePerformerTagToManual(input: PromotePerformerTagInput): Promise<PromotePerformerTagResult> {
@@ -1379,7 +1427,9 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
-    return this.withInitializedDatabase((db) => promotePerformerTagToManual(db, input, { now: this.now }));
+    const res = await this.withInitializedDatabase((db) => promotePerformerTagToManual(db, input, { now: this.now }));
+    if (res.ok) await this.maybeTriggerDailyAutoBackup();
+    return res;
   }
 
   async importTagStudioCopy(input?: ImportTagStudioInput): Promise<ImportTagStudioResult> {
@@ -1421,6 +1471,10 @@ export class MediaLibrarySpikeService {
         canonicalUncRoot: uncRoot,
         force: input?.force ?? false,
       });
+
+      if (report.status === 'succeeded') {
+        await this.maybeTriggerDailyAutoBackup();
+      }
 
       return {
         ok: true,
