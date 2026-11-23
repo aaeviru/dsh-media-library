@@ -40,6 +40,15 @@ node --input-type=module -e '
 
 echo "==> [2/5] Building plugin bundle and verifying typecheck & external imports..."
 ./scripts/build-bundle.sh
+if [[ -n "${DSH_HARNESS_DIR:-}" ]]; then
+  HARNESS_DIR="${DSH_HARNESS_DIR}"
+elif [[ -d "/home/aaevi/projects/project/deepseek-harness" ]]; then
+  HARNESS_DIR="/home/aaevi/projects/project/deepseek-harness"
+else
+  HARNESS_DIR="/home/aaevi/projects/deepseek-harness"
+fi
+echo "==> Typechecking test sources (tsconfig.test.json, --noEmit)..."
+"$HARNESS_DIR/node_modules/.bin/tsc" -p tsconfig.test.json --noEmit
 
 echo "==> [3/5] Running unit, SQLite fixture, search, and 10k/100k benchmark tests..."
 node --experimental-strip-types --test \
