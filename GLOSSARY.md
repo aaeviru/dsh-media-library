@@ -15,3 +15,6 @@
 - **Performer Review Queue**: The human decision queue for unknown, ambiguous, or archived-target performer names so automation never silently guesses or creates performer tags.
 - **Cold Fallback**: Keeping the original TagStudio database read-only and untouched as an archive after cutover.
 - **Read-Only Degraded Mode**: A protective state where writes and moves are blocked due to schema or integrity mismatch while search and exports stay available.
+- **Tag Hierarchy**: An acyclic directed graph (DAG) of parent-child relationships organizing tags into categories, where selecting a parent tag in search transitively matches media carrying the tag or any of its descendants.
+- **Tag Kind**: The structural role of a tag (`performer`, `seller`, `custom`, `builtin`, `studio`, `series`), orthogonal to its parent categories in the Tag Hierarchy.
+- **Staging Soft Delete**: Moving an unindexed video out of the Staging Folder into an isolated same-share `.trash` directory via atomic rename, removing its unindexed Manifest while recording an audit entry.
