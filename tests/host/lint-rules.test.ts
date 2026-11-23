@@ -12,7 +12,7 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
     assert.equal(res.ok, true, `Unexpected violations:\n${res.violations.join('\n')}`);
   });
 
-  it('catches hardcoded colors, native <select>, multiline/shorthand RPC raw paths, embedded UNC literals, and bare home dirs while allowing locales placeholders', () => {
+  it('catches hardcoded colors, native <select>, multiline/quoted/trailing-comma RPC raw paths, UNC literals, and bare home dirs without false positives', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-lint-rules-'));
     try {
       fs.mkdirSync(path.join(tmpDir, 'src', 'client'), { recursive: true });
@@ -20,13 +20,20 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
 
       const sampleUncLine = "export const hint = 'e.g. \\\\\\\\SynologyNAS\\\\Media';\n";
 
-      // Allowed placeholder in src/client/locales.ts must NOT trigger a violation.
+      // Allowed: locales.ts placeholder, single-backslash ordinary string, commented-out RPC, and string value containing "uncPath:".
       fs.writeFileSync(path.join(tmpDir, 'src', 'client', 'locales.ts'), sampleUncLine);
-      // Single escaped backslash (non-UNC) must NOT be falsely flagged as UNC.
-      fs.writeFileSync(path.join(tmpDir, 'src', 'client', 'safe.ts'), "export const esc = '\\\\n';\n");
-      assert.equal(runLintRules(tmpDir).ok, true);
+      fs.writeFileSync(
+        path.join(tmpDir, 'src', 'client', 'safe.ts'),
+        [
+          "export const label = '\\\\foo\\bar';",
+          '// void mediaLibrary.fetchIngestionMetadata({ tempPath: x });',
+          'void mediaLibrary.searchMedia({ text: "show uncPath: examples" });',
+        ].join('\n') + '\n',
+      );
+      const cleanRes = runLintRules(tmpDir);
+      assert.equal(cleanRes.ok, true, `Expected safe fixtures to pass, got:\n${cleanRes.violations.join('\n')}`);
 
-      // Inject 1+ violations per rule (including identical UNC string outside locales.ts, multiline/shorthand RPC, bare /home/user).
+      // Inject violations covering every form.
       fs.writeFileSync(
         path.join(tmpDir, 'src', 'client', 'bad.module.css'),
         '.card { color: #ff00aa; background: rgba(0, 0, 0, 0.5); }\n',
@@ -35,10 +42,12 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
         path.join(tmpDir, 'src', 'client', 'BadPanel.tsx'),
         [
           sampleUncLine.trim(),
+          'export const rawUnc = String.raw`\\\\NAS\\Share`;',
           'export function BadPanel(tempPath: string) {',
           '  void mediaLibrary.fetchIngestionMetadata({',
           '    tempPath,',
-          '  });',
+          '  },);',
+          '  void mediaLibrary.fetchIngestionMetadata({ "tempPath": tempPath });',
           '  void mediaLibrary.reviewIngestion({',
           '    uncPath: tempPath,',
           '  });',
@@ -59,8 +68,14 @@ describe('Static Lint Rules Gate (Issue #28)', () => {
       assert.equal(res.ok, false);
       assert.ok(res.violations.some((v) => v.includes('hardcoded color')));
       assert.ok(res.violations.some((v) => v.includes('forbidden native <select>')));
-      assert.ok(res.violations.some((v) => v.includes('BadPanel.tsx') && v.includes('forbidden raw UNC literal')));
-      assert.ok(res.violations.filter((v) => v.includes('forbidden raw path field in client RPC call')).length === 2);
+      assert.equal(
+        res.violations.filter((v) => v.includes('BadPanel.tsx') && v.includes('forbidden raw UNC literal')).length,
+        2,
+      );
+      assert.equal(
+        res.violations.filter((v) => v.includes('forbidden raw path field in client RPC call')).length,
+        3,
+      );
       assert.ok(res.violations.some((v) => v.includes('src/host-bad.ts') && v.includes('hardcoded machine path')));
       assert.ok(res.violations.some((v) => v.includes('scripts/bad-helper.mjs') && v.includes('hardcoded machine path')));
     } finally {
