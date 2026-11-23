@@ -883,4 +883,186 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it('Issue #31: reconciles >500 manifests via SQL-filtered keyset pagination without dropping older records or skipping pages on error', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ingest-issue31-'));
+    try {
+      const { tempDir, targetDir, dbPath, roots, fileOps } = setupEnv(tmpDir);
+      fs.mkdirSync(targetDir, { recursive: true });
+      const db = new DatabaseSync(dbPath);
+      try {
+        await migrateDatabase(db, { dbPath, appVersion: '0.7.10' });
+        db.prepare(
+          `INSERT INTO media_roots (id, name, canonical_unc_root, enabled, created_at)
+           VALUES ('nas-main', 'NAS Main', '\\\\NAS\\MediaTest', 1, '2026-11-20T00:00:00.000Z')`,
+        ).run();
+
+        const insertManifest = db.prepare(
+          `INSERT INTO ingestion_manifests (
+             source_id, temp_path, target_root_id, target_relative_path, filename, title,
+             catalog_number, media_date, tags_json, metadata_source, checksum_sha256, file_size,
+             state, review_decision, last_error, indexed_media_id, created_at, updated_at
+           ) VALUES (?, ?, 'nas-main', ?, ?, ?, ?, NULL, '[]', 'manual', ?, ?, ?, 'approved', NULL, NULL, ?, ?)`,
+        );
+
+        // 1) Older interrupted manifest #1 (ID=1): moved-not-indexed (dest exists with matching size, temp gone).
+        const payload1 = 'older-interrupted-payload-1';
+        const dest1 = path.join(targetDir, 'OLD-001.mp4');
+        fs.writeFileSync(dest1, payload1);
+        const r1 = insertManifest.run(
+          'src-old-1',
+          path.join(tempDir, 'OLD-001.mp4'),
+          'ingested/OLD-001.mp4',
+          'OLD-001.mp4',
+          'Older Interrupted 1',
+          'OLD-001',
+          'sha-old-1',
+          Buffer.byteLength(payload1),
+          'moving',
+          '2026-11-01T00:00:00.000Z',
+          '2026-11-01T00:00:00.000Z',
+        );
+        const oldOkId = Number(r1.lastInsertRowid);
+
+        // 2) Older failing manifest #2 (ID=2): destination missing -> must record error without blocking later pages.
+        const r2 = insertManifest.run(
+          'src-old-fail-2',
+          path.join(tempDir, 'OLD-FAIL-002.mp4'),
+          'ingested/OLD-FAIL-002.mp4',
+          'OLD-FAIL-002.mp4',
+          'Older Failing 2',
+          'OLD-002',
+          'sha-old-2',
+          128,
+          'failed',
+          '2026-11-01T00:01:00.000Z',
+          '2026-11-01T00:01:00.000Z',
+        );
+        const oldFailId = Number(r2.lastInsertRowid);
+
+        // 3) Insert 515 newer 'planned' manifests so IDs 1 & 2 fall beyond the old LIMIT 500 window.
+        for (let i = 1; i <= 515; i++) {
+          const name = `PLANNED-${String(i).padStart(4, '0')}.mp4`;
+          const ts = `2026-11-15T00:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}.000Z`;
+          insertManifest.run(
+            `src-planned-${i}`,
+            path.join(tempDir, name),
+            `ingested/${name}`,
+            name,
+            `Planned ${i}`,
+            null,
+            `sha-planned-${i}`,
+            10,
+            'planned',
+            ts,
+            ts,
+          );
+        }
+
+        // 4) Later page manifest (>500): copied-not-deleted with identical dir/name/size/content (dedup rule preserved).
+        const payloadLate = 'late-page-dedup-payload-518';
+        const tempLate = path.join(tempDir, 'LATE-518.mp4');
+        const destLate = path.join(targetDir, 'LATE-518.mp4');
+        fs.writeFileSync(tempLate, payloadLate);
+        fs.writeFileSync(destLate, payloadLate);
+        const rLate = insertManifest.run(
+          'src-late-518',
+          tempLate,
+          'ingested/LATE-518.mp4',
+          'LATE-518.mp4',
+          'Late Page Dedup 518',
+          'LATE-518',
+          'sha-late-518',
+          Buffer.byteLength(payloadLate),
+          'moving',
+          '2026-11-20T00:00:00.000Z',
+          '2026-11-20T00:00:00.000Z',
+        );
+        const lateId = Number(rLate.lastInsertRowid);
+
+        // 5) Same-size but different-content pair: checkExistingTarget must fail and retain the staging copy.
+        const tempMismatch = path.join(tempDir, 'LATE-519-MISMATCH.mp4');
+        const destMismatch = path.join(targetDir, 'LATE-519-MISMATCH.mp4');
+        const mismatchSrc = 'AAAA-same-size-payload-519';
+        const mismatchDst = 'BBBB-same-size-payload-519';
+        assert.equal(Buffer.byteLength(mismatchSrc), Buffer.byteLength(mismatchDst));
+        fs.writeFileSync(tempMismatch, mismatchSrc);
+        fs.writeFileSync(destMismatch, mismatchDst);
+        const rMismatch = insertManifest.run(
+          'src-late-519-mismatch',
+          tempMismatch,
+          'ingested/LATE-519-MISMATCH.mp4',
+          'LATE-519-MISMATCH.mp4',
+          'Late Page Size Match Content Mismatch 519',
+          'LATE-519',
+          'sha-late-519',
+          Buffer.byteLength(mismatchSrc),
+          'moving',
+          '2026-11-20T00:01:00.000Z',
+          '2026-11-20T00:01:00.000Z',
+        );
+        const mismatchId = Number(rMismatch.lastInsertRowid);
+
+        const totalManifests = Number(
+          (db.prepare('SELECT COUNT(*) AS c FROM ingestion_manifests').get() as { c: number }).c,
+        );
+        assert.ok(totalManifests > 500, `Expected >500 manifests, got ${totalManifests}`);
+
+        // Use pageSize=2 so the 4 pending reconcile records span multiple pages across the >500 table.
+        const res = await reconcileIngestionManifests(db, {
+          roots,
+          stagingDir: tempDir,
+          fileOps,
+          pageSize: 2,
+        });
+
+        assert.equal(res.ok, false);
+        assert.equal(res.movedNotIndexedFixed, 2);
+        assert.equal(res.errors.length, 2);
+        assert.ok(res.errors.some((e) => new RegExp(`Manifest #${oldFailId}:`).test(e)));
+        assert.ok(res.errors.some((e) => new RegExp(`Manifest #${mismatchId}:`).test(e)));
+
+        // Older interrupted manifest #1 was indexed despite >500 newer manifests.
+        const row1 = db.prepare('SELECT state, indexed_media_id FROM ingestion_manifests WHERE id = ?').get(oldOkId) as {
+          state: string;
+          indexed_media_id: number | null;
+        };
+        assert.equal(row1.state, 'indexed');
+        assert.ok(row1.indexed_media_id !== null);
+
+        // Later page manifest was ALSO processed after #2 failed, and its temp duplicate was removed.
+        const rowLate = db.prepare('SELECT state, indexed_media_id FROM ingestion_manifests WHERE id = ?').get(lateId) as {
+          state: string;
+          indexed_media_id: number | null;
+        };
+        assert.equal(rowLate.state, 'indexed');
+        assert.ok(rowLate.indexed_media_id !== null);
+        assert.equal(fs.existsSync(tempLate), false);
+        assert.equal(fs.existsSync(destLate), true);
+
+        // Same-size different-content manifest was NOT indexed and its staging copy was retained.
+        const rowMismatch = db.prepare('SELECT state, indexed_media_id FROM ingestion_manifests WHERE id = ?').get(mismatchId) as {
+          state: string;
+          indexed_media_id: number | null;
+        };
+        assert.equal(rowMismatch.state, 'moving');
+        assert.equal(rowMismatch.indexed_media_id, null);
+        assert.equal(fs.existsSync(tempMismatch), true);
+        assert.equal(fs.existsSync(destMismatch), true);
+
+        // Non-finite pageSize falls back cleanly to default instead of throwing a SQLite datatype mismatch.
+        const nanRes = await reconcileIngestionManifests(db, {
+          roots,
+          stagingDir: tempDir,
+          fileOps,
+          pageSize: Number.NaN,
+        });
+        assert.equal(nanRes.errors.length, 2);
+      } finally {
+        db.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
