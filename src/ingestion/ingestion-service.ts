@@ -668,7 +668,7 @@ export async function ensureManifestForStagingFile(
         .prepare('SELECT id FROM ingestion_manifests WHERE source_id = ? AND id <> ? LIMIT 1')
         .get(sourceId, mapped.id) as { id: number } | undefined;
       const safeSourceId = sourceIdConflict ? `${sourceId}#${mapped.id}` : sourceId;
-      db.prepare(
+      const updateInfo = db.prepare(
         `UPDATE ingestion_manifests
          SET source_id = ?,
              temp_path = ?,
@@ -679,7 +679,7 @@ export async function ensureManifestForStagingFile(
              state = ?,
              last_error = ?,
              updated_at = ?
-         WHERE id = ?`,
+         WHERE id = ? AND temp_path = ?`,
       ).run(
         safeSourceId,
         tempPath,
@@ -691,10 +691,15 @@ export async function ensureManifestForStagingFile(
         nextError,
         now,
         mapped.id,
+        mapped.tempPath,
       );
-      return getIngestionManifestById(db, mapped.id)!;
+      if (updateInfo.changes === 1) {
+        return getIngestionManifestById(db, mapped.id)!;
+      }
+      // Concurrent caller already rebound this stale manifest to another live file; fall through to insert a fresh row.
+    } else {
+      return mapped;
     }
-    return mapped;
   }
 
   const existingIndexed = db

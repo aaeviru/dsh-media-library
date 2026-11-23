@@ -1018,18 +1018,19 @@ export class MediaLibrarySpikeService {
         manifest: null,
       };
     }
-    // Synchronously register in-flight manifest op before any await so deleteStagingFile cannot overlap.
+    // Synchronously register in-flight manifest op and guarantee decrement in finally even if setup throws.
     stagingManifestOpsInFlight.set(
       this.localDatabasePath,
       (stagingManifestOpsInFlight.get(this.localDatabasePath) ?? 0) + 1,
     );
-    const fetcher = this.createMetadataFetcher();
-    const { roots } = this.getEffectiveRootsAndItems();
-    const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
-    const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
+    let db: DatabaseSync | null = null;
     let taskId: number | null = null;
     let fetchResult: FetchedMetadataCandidate | null = null;
     try {
+      const fetcher = this.createMetadataFetcher();
+      const { roots } = this.getEffectiveRootsAndItems();
+      const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
+      db = openMediaLibraryDatabase({ dbPath: this.localDatabasePath }).db;
       let manifestId = input.manifestId;
       if (!manifestId && (input as { readonly tempPath?: unknown }).tempPath !== undefined) {
         throw new Error('PATH_TRAVERSAL_REJECTED: Client must submit manifestId or staging relativePath, not raw tempPath.');
@@ -1090,7 +1091,7 @@ export class MediaLibrarySpikeService {
       );
       fetchResult = res;
     } catch (err) {
-      if (taskId !== null) {
+      if (taskId !== null && db) {
         finishIngestionTask(db, taskId, 'failed', err instanceof Error ? err.message : String(err), this.now);
       }
       throw err;
@@ -1099,7 +1100,7 @@ export class MediaLibrarySpikeService {
       const nextCount = (stagingManifestOpsInFlight.get(this.localDatabasePath) ?? 1) - 1;
       if (nextCount <= 0) stagingManifestOpsInFlight.delete(this.localDatabasePath);
       else stagingManifestOpsInFlight.set(this.localDatabasePath, nextCount);
-      db.close();
+      db?.close();
     }
     if (fetchResult) {
       await this.maybeTriggerDailyAutoBackup();
