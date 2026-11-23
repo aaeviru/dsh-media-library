@@ -146,7 +146,7 @@ const FILE_EXECUTION_KEY = Symbol.for('dsh-media-library.file-ingestion-executio
 const DAILY_BACKUP_IN_FLIGHT_KEY = Symbol.for('dsh-media-library.daily-backup-in-flight');
 const hostRuntime = globalThis as typeof globalThis & {
   [LIVE_TASKS_KEY]?: Map<string, Set<number>>;
-  [FILE_EXECUTION_KEY]?: { databasePath: string; task: IngestionTask };
+  [FILE_EXECUTION_KEY]?: { databasePath: string; task: IngestionTask; isStagingDelete?: boolean };
   [DAILY_BACKUP_IN_FLIGHT_KEY]?: Map<string, Promise<void>>;
 };
 const liveIngestionTasks = hostRuntime[LIVE_TASKS_KEY] ??= new Map<string, Set<number>>();
@@ -999,6 +999,22 @@ export class MediaLibrarySpikeService {
         manifest: null,
       };
     }
+    const activeDelete = hostRuntime[FILE_EXECUTION_KEY];
+    if (activeDelete?.databasePath === this.localDatabasePath && activeDelete.isStagingDelete) {
+      return {
+        ok: false,
+        provider: null,
+        category: 'client_error',
+        reason: `IN_PROGRESS: ${activeDelete.task.message || 'Staging soft-delete is currently running.'}`,
+        sourceUrl: '',
+        title: null,
+        writer: null,
+        actresses: [],
+        mediaDate: null,
+        candidateTags: [],
+        manifest: null,
+      };
+    }
     const fetcher = this.createMetadataFetcher();
     const { roots } = this.getEffectiveRootsAndItems();
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
@@ -1090,6 +1106,14 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
+    const activeDelete = hostRuntime[FILE_EXECUTION_KEY];
+    if (activeDelete?.databasePath === this.localDatabasePath && activeDelete.isStagingDelete) {
+      return {
+        ok: false,
+        code: 'IN_PROGRESS',
+        message: activeDelete.task.message || 'Staging soft-delete is currently running.',
+      };
+    }
     const { roots } = this.getEffectiveRootsAndItems();
     const targetSubdir = normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir));
     const reviewRes = await this.withInitializedDatabase(async (db) => {
@@ -1127,6 +1151,14 @@ export class MediaLibrarySpikeService {
         ok: false,
         code: 'READ_ONLY_DEGRADED',
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+    const activeDelete = hostRuntime[FILE_EXECUTION_KEY];
+    if (activeDelete?.databasePath === this.localDatabasePath && activeDelete.isStagingDelete) {
+      return {
+        ok: false,
+        code: 'IN_PROGRESS',
+        message: activeDelete.task.message || 'Staging soft-delete is currently running.',
       };
     }
     const { roots } = this.getEffectiveRootsAndItems();
@@ -1344,6 +1376,14 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
+    const activeDelete = hostRuntime[FILE_EXECUTION_KEY];
+    if (activeDelete?.databasePath === this.localDatabasePath && activeDelete.isStagingDelete) {
+      return {
+        ok: false,
+        code: 'IN_PROGRESS',
+        message: activeDelete.task.message || 'Staging soft-delete is currently running.',
+      };
+    }
 
     if ((input as { readonly tempPath?: unknown })?.tempPath !== undefined) {
       return {
@@ -1379,8 +1419,9 @@ export class MediaLibrarySpikeService {
     }
 
     const nowIso = this.now().toISOString();
-    const syntheticLock: { databasePath: string; task: IngestionTask } = {
+    const syntheticLock: { databasePath: string; task: IngestionTask; isStagingDelete: boolean } = {
       databasePath: this.localDatabasePath,
+      isStagingDelete: true,
       task: {
         id: 0,
         targetKey: input.manifestId !== undefined ? `manifest:${input.manifestId}` : `staging:${input.relativePath ?? ''}`,
@@ -1476,6 +1517,14 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
+    const activeDelete = hostRuntime[FILE_EXECUTION_KEY];
+    if (activeDelete?.databasePath === this.localDatabasePath && activeDelete.isStagingDelete) {
+      return {
+        ok: false,
+        code: 'IN_PROGRESS',
+        message: activeDelete.task.message || 'Staging soft-delete is currently running.',
+      };
+    }
     const res = await this.withInitializedDatabase((db) => {
       const active = this.performerRuleTask(db, input.rawAlias);
       if (active) return { ok: false as const, code: 'IN_PROGRESS' as const, message: `Task #${active.id} freezes this performer input.` };
@@ -1492,6 +1541,14 @@ export class MediaLibrarySpikeService {
         ok: false,
         code: 'READ_ONLY_DEGRADED',
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+    const activeDelete = hostRuntime[FILE_EXECUTION_KEY];
+    if (activeDelete?.databasePath === this.localDatabasePath && activeDelete.isStagingDelete) {
+      return {
+        ok: false,
+        code: 'IN_PROGRESS',
+        message: activeDelete.task.message || 'Staging soft-delete is currently running.',
       };
     }
     const res = await this.withInitializedDatabase((db) => {
@@ -1518,6 +1575,14 @@ export class MediaLibrarySpikeService {
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
       };
     }
+    const activeDelete = hostRuntime[FILE_EXECUTION_KEY];
+    if (activeDelete?.databasePath === this.localDatabasePath && activeDelete.isStagingDelete) {
+      return {
+        ok: false,
+        code: 'IN_PROGRESS',
+        message: activeDelete.task.message || 'Staging soft-delete is currently running.',
+      };
+    }
     const res = await this.withInitializedDatabase((db) => {
       const review = input.reviewId ? db.prepare('SELECT manifest_id, raw_name FROM performer_review_queue WHERE id = ?').get(input.reviewId) as { manifest_id: number; raw_name: string } | undefined : undefined;
       const manifestId = review?.manifest_id ?? input.manifestId;
@@ -1538,6 +1603,14 @@ export class MediaLibrarySpikeService {
         ok: false,
         code: 'READ_ONLY_DEGRADED',
         message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+    const activeDelete = hostRuntime[FILE_EXECUTION_KEY];
+    if (activeDelete?.databasePath === this.localDatabasePath && activeDelete.isStagingDelete) {
+      return {
+        ok: false,
+        code: 'IN_PROGRESS',
+        message: activeDelete.task.message || 'Staging soft-delete is currently running.',
       };
     }
     const res = await this.withInitializedDatabase((db) => promotePerformerTagToManual(db, input, { now: this.now }));

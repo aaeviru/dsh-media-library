@@ -1316,6 +1316,60 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
       assert.equal(degradedRes.ok, false);
       assert.equal(degradedRes.code, 'READ_ONLY_DEGRADED');
       assert.equal(fs.existsSync(fileB), true);
+
+      // 7. DB audit failure rolls back the moved file back to original staging path so user can retry cleanly
+      const rollbackFile = path.join(stagingDir, 'rollback-test.mp4');
+      fs.writeFileSync(rollbackFile, 'rollback-bytes');
+      const dbRollback = new DatabaseSync(dbPath);
+      try {
+        dbRollback.exec('PRAGMA foreign_keys = OFF');
+        const failRes = await softDeleteStagingFile(dbRollback, {
+          relativePath: 'rollback-test.mp4',
+          expectedFileSize: 'rollback-bytes'.length,
+          stagingDir,
+          now: fixedNow,
+        });
+        assert.equal(failRes.ok, false);
+        assert.equal(failRes.code, 'TRASH_MOVE_FAILED');
+        assert.equal(failRes.trashRelativePath, undefined, 'Rolled-back failure must not leave file in .trash');
+        assert.equal(fs.existsSync(rollbackFile), true, 'File must be restored to original staging path on DB failure');
+
+        // Re-enabling foreign keys allows retry to succeed cleanly
+        dbRollback.exec('PRAGMA foreign_keys = ON');
+        const retryRes = await softDeleteStagingFile(dbRollback, {
+          relativePath: 'rollback-test.mp4',
+          expectedFileSize: 'rollback-bytes'.length,
+          stagingDir,
+          now: fixedNow,
+        });
+        assert.equal(retryRes.ok, true);
+        assert.equal(fs.existsSync(rollbackFile), false);
+      } finally {
+        dbRollback.close();
+      }
+
+      // 8. Same-named staged files in distinct subfolders never share one manifestId on scan
+      fs.mkdirSync(path.join(stagingDir, 'dir1'), { recursive: true });
+      fs.mkdirSync(path.join(stagingDir, 'dir2'), { recursive: true });
+      const dup1 = path.join(stagingDir, 'dir1', 'same.mp4');
+      const dup2 = path.join(stagingDir, 'dir2', 'same.mp4');
+      fs.writeFileSync(dup1, 'dup-one');
+      fs.writeFileSync(dup2, 'dup-two-longer');
+      const revDup1 = await service.reviewIngestion({ relativePath: 'dir1/same.mp4', decision: 'rejected' });
+      assert.equal(revDup1.ok, true);
+      const dupScan = await service.scanStagingFiles();
+      assert.equal(dupScan.ok, true);
+      const scannedDup1 = dupScan.files.find((f) => f.relativePath === 'dir1/same.mp4');
+      const scannedDup2 = dupScan.files.find((f) => f.relativePath === 'dir2/same.mp4');
+      assert.equal(scannedDup1?.manifestId, revDup1.manifest!.id);
+      assert.equal(scannedDup2?.manifestId, null, 'Second same-named file in another folder must not steal manifestId');
+      const delDup2 = await service.deleteStagingFile({
+        relativePath: 'dir2/same.mp4',
+        expectedFileSize: 'dup-two-longer'.length,
+      });
+      assert.equal(delDup2.ok, true);
+      assert.equal(fs.existsSync(dup1), true, 'Deleting dir2/same.mp4 must leave dir1/same.mp4 untouched');
+      assert.equal(fs.existsSync(dup2), false);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

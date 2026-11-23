@@ -263,13 +263,30 @@ export function IngestionPanel({
     }
 
     // Show only files currently present in the temp staging folder (exclude already-moved history).
+    // Never assign the same manifest ID to two different same-named files in distinct subfolders.
+    const stagedTempPaths = new Set(stagedFiles.map((f) => f.tempPath.toLowerCase()));
+    const claimedManifestIds = new Set<number>();
     const list: UnifiedStagingEntry[] = [];
     for (const file of stagedFiles) {
-      const matched =
-        (file.manifestId !== null ? byManifestId.get(file.manifestId) : undefined) ??
-        unindexedByFilename.get(file.filename.toLowerCase()) ??
-        manifests.find((m) => m.tempPath.toLowerCase() === file.tempPath.toLowerCase()) ??
-        null;
+      let matched: IngestionManifest | null = null;
+      if (file.manifestId !== null && !claimedManifestIds.has(file.manifestId)) {
+        matched = byManifestId.get(file.manifestId) ?? null;
+      }
+      if (!matched) {
+        matched =
+          manifests.find(
+            (m) => !claimedManifestIds.has(m.id) && m.tempPath.toLowerCase() === file.tempPath.toLowerCase(),
+          ) ?? null;
+      }
+      if (!matched) {
+        const byName = unindexedByFilename.get(file.filename.toLowerCase());
+        if (byName && !claimedManifestIds.has(byName.id) && !stagedTempPaths.has(byName.tempPath.toLowerCase())) {
+          matched = byName;
+        }
+      }
+      if (matched) {
+        claimedManifestIds.add(matched.id);
+      }
       list.push({
         key: matched ? `m:${matched.id}` : `f:${file.tempPath}`,
         filename: file.filename,
@@ -626,7 +643,7 @@ export function IngestionPanel({
       if (!res.value.ok) {
         setError(`[${res.value.code ?? 'ERROR'}] ${res.value.message}`);
         setConfirmDeleteKey(null);
-        await reloadServerState();
+        await Promise.all([reloadServerState(), runScan(true)]);
         return;
       }
       clearDraft(entry.key);
@@ -896,7 +913,7 @@ export function IngestionPanel({
                   </div>
                 ) : null}
 
-                {confirmDeleteKey === selected.key && selected.manifest?.state !== 'indexed' ? (
+                {confirmDeleteKey === selected.relativePath && selected.manifest?.state !== 'indexed' ? (
                   <div role="alert" data-testid="ingestion-delete-confirm-bar" className={cx(css.banner, css.bannerDanger)}>
                     <div>
                       <strong>{selected.filename}</strong> ({formatFileSize(selected.fileSize)}) — {t('ingestionDeleteConfirmPrompt')}
@@ -950,7 +967,7 @@ export function IngestionPanel({
                       type="button"
                       data-testid="ingestion-delete-btn"
                       disabled={busy || executionBusy || selectedFrozen || degraded}
-                      onClick={() => setConfirmDeleteKey(selected.key)}
+                      onClick={() => setConfirmDeleteKey(selected.relativePath)}
                       className={css.btn}
                     >
                       {t('ingestionDeleteBtn')}

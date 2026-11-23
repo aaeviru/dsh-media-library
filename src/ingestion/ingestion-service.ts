@@ -361,21 +361,38 @@ export async function scanStagingDirectory(
   }
 
   const frozenIds = new Set(listFrozenIngestionManifests(db).map((m) => m.id));
+  const unindexedByTempPath = new Map<string, IngestionManifest>();
   const unindexedByFilename = new Map<string, IngestionManifest>();
   for (const m of initialManifests) {
     if (m.state === 'indexed') continue;
+    const tempKey = m.tempPath.toLowerCase();
+    if (!unindexedByTempPath.has(tempKey)) {
+      unindexedByTempPath.set(tempKey, m);
+    }
     const key = m.filename.toLowerCase();
     if (!unindexedByFilename.has(key)) {
       unindexedByFilename.set(key, m);
     }
   }
+  const previewTempPaths = new Set(preview.files.map((f) => f.tempPath.toLowerCase()));
 
   const matchedManifestIds = new Set<number>();
   const files: StagingFileItem[] = [];
 
   for (const f of preview.files) {
+    const tempKey = f.tempPath.toLowerCase();
     const filenameKey = f.filename.toLowerCase();
-    let existing = unindexedByFilename.get(filenameKey);
+    let existing = unindexedByTempPath.get(tempKey);
+    if (existing && matchedManifestIds.has(existing.id)) {
+      existing = undefined;
+    }
+    if (!existing) {
+      const byName = unindexedByFilename.get(filenameKey);
+      // Only rebind by filename if not already claimed and no other scanned file owns its exact tempPath.
+      if (byName && !matchedManifestIds.has(byName.id) && !previewTempPaths.has(byName.tempPath.toLowerCase())) {
+        existing = byName;
+      }
+    }
     if (existing) {
       matchedManifestIds.add(existing.id);
       const nextSourceId = `staging:${f.targetRelativePath.toLowerCase()}:${f.fileSize}`;
@@ -1559,7 +1576,7 @@ async function verifyLocalFilesystemContainment(
   stagingDir: string,
   targetPath: string,
   expectFile: boolean,
-): Promise<{ readonly ok: true } | { readonly ok: false; readonly code: 'FILE_NOT_FOUND' | 'PATH_TRAVERSAL_REJECTED'; readonly message: string }> {
+): Promise<{ readonly ok: true; readonly fileSize?: number } | { readonly ok: false; readonly code: 'FILE_NOT_FOUND' | 'PATH_TRAVERSAL_REJECTED'; readonly message: string }> {
   let stagingReal: string;
   try {
     const stagingStat = await fsp.lstat(stagingDir);
@@ -1582,6 +1599,7 @@ async function verifyLocalFilesystemContainment(
   // Walk every path segment from stagingDir to targetPath with lstat to reject symlinks/junctions.
   const segments = rel.split(path.sep).filter(Boolean);
   let cursor = path.resolve(stagingDir);
+  let leafSize: number | undefined;
   for (let i = 0; i < segments.length; i++) {
     cursor = path.join(cursor, segments[i]!);
     let st: fs.Stats;
@@ -1597,8 +1615,11 @@ async function verifyLocalFilesystemContainment(
       return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Symlink/reparse point rejected inside stagingDir: ${segments[i]}` };
     }
     const isLast = i === segments.length - 1;
-    if (isLast && expectFile && !st.isFile()) {
-      return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Target must be a regular video file: ${targetPath}` };
+    if (isLast && expectFile) {
+      if (!st.isFile()) {
+        return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Target must be a regular video file: ${targetPath}` };
+      }
+      leafSize = st.size;
     }
     if ((!isLast || !expectFile) && !st.isDirectory()) {
       return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Expected directory segment inside stagingDir: ${segments[i]}` };
@@ -1610,7 +1631,63 @@ async function verifyLocalFilesystemContainment(
   if (!realRel || realRel.startsWith('..') || path.isAbsolute(realRel)) {
     return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Resolved realpath escaped stagingDir: ${targetPath}` };
   }
-  return { ok: true };
+  return leafSize !== undefined ? { ok: true, fileSize: leafSize } : { ok: true };
+}
+
+/**
+ * Move `srcPath` to `destPath` without overwriting any existing entry (including dangling symlinks).
+ * On real filesystems, prefers atomic `link` + `unlink` (which fails with EEXIST on any collision),
+ * falling back to `lstat(ENOENT)` + `rename` only when the filesystem does not support hardlinks.
+ */
+async function moveFileNoOverwrite(
+  srcPath: string,
+  destPath: string,
+  fileOps: IngestionFileOps,
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly collision: boolean; readonly error: unknown }> {
+  if (fileOps !== defaultIngestionFileOps) {
+    if (await fileOps.exists(destPath)) {
+      return { ok: false, collision: true, error: new Error(`Destination already exists: ${destPath}`) };
+    }
+    try {
+      await fileOps.rename(srcPath, destPath);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, collision: false, error };
+    }
+  }
+
+  try {
+    await fsp.link(srcPath, destPath);
+    try {
+      await fsp.unlink(srcPath);
+      return { ok: true };
+    } catch (unlinkErr) {
+      await fsp.unlink(destPath).catch(() => undefined);
+      return { ok: false, collision: false, error: unlinkErr };
+    }
+  } catch (linkErr) {
+    const code = (linkErr as NodeJS.ErrnoException)?.code ?? '';
+    if (code === 'EEXIST') {
+      return { ok: false, collision: true, error: linkErr };
+    }
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'ENOSYS' && code !== 'EXDEV') {
+      return { ok: false, collision: false, error: linkErr };
+    }
+    try {
+      await fsp.lstat(destPath);
+      return { ok: false, collision: true, error: new Error(`Destination already exists: ${destPath}`) };
+    } catch (lstatErr) {
+      if ((lstatErr as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        return { ok: false, collision: false, error: lstatErr };
+      }
+    }
+    try {
+      await fsp.rename(srcPath, destPath);
+      return { ok: true };
+    } catch (renameErr) {
+      return { ok: false, collision: false, error: renameErr };
+    }
+  }
 }
 
 /**
@@ -1728,35 +1805,8 @@ export async function softDeleteStagingFile(
     }
   }
 
-  // Enforce real filesystem containment (reject symlinks/junctions/non-regular files) when operating on local FS.
-  if (fileOps === defaultIngestionFileOps) {
-    const containment = await verifyLocalFilesystemContainment(stagingDir, sourcePath, true);
-    if (!containment.ok) {
-      return { ok: false, code: containment.code, message: containment.message };
-    }
-  }
-
-  if (!(await fileOps.exists(sourcePath))) {
-    return { ok: false, code: 'FILE_NOT_FOUND', message: `Staging file not found: ${relFromStaging}` };
-  }
-  const actualSize = await fileOps.statSize(sourcePath);
-  if (actualSize !== options.expectedFileSize) {
-    return {
-      ok: false,
-      code: 'FILE_CHANGED',
-      message: `Staging file size changed since confirmation (expected ${options.expectedFileSize} bytes, found ${actualSize} bytes). Refresh and confirm again.`,
-    };
-  }
-
+  // Prepare and validate .trash FIRST so source containment and size checks run immediately before the move.
   const trashDir = winStyle ? path.win32.join(stagingDir, '.trash') : path.join(stagingDir, '.trash');
-  const basename = winStyle ? path.win32.basename(sourcePath) : path.basename(sourcePath);
-  const ext = path.extname(basename);
-  const stem = basename.slice(0, basename.length - ext.length);
-  const stamp = nowFn().toISOString().replace(/[:.]/g, '-');
-  const trashName = `${stem}.${stamp}-${crypto.randomBytes(4).toString('hex')}${ext}`;
-  const trashPath = winStyle ? path.win32.join(trashDir, trashName) : path.join(trashDir, trashName);
-  const trashRelativePath = `.trash/${trashName}`;
-
   try {
     await fileOps.ensureDir(trashDir);
     if (fileOps === defaultIngestionFileOps) {
@@ -1765,15 +1815,65 @@ export async function softDeleteStagingFile(
         return { ok: false, code: trashCheck.code, message: trashCheck.message };
       }
     }
-    if (await fileOps.exists(trashPath)) {
-      return { ok: false, code: 'TRASH_MOVE_FAILED', message: `Trash destination already exists: ${trashRelativePath}` };
-    }
-    await fileOps.rename(sourcePath, trashPath);
   } catch (err) {
     return {
       ok: false,
       code: 'TRASH_MOVE_FAILED',
-      message: `Failed to move staging file to .trash: ${err instanceof Error ? err.message : String(err)}`,
+      message: `Failed to prepare .trash directory: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  // Enforce real filesystem containment + exact size immediately before the move (minimizing TOCTOU window).
+  let actualSize: number;
+  if (fileOps === defaultIngestionFileOps) {
+    const containment = await verifyLocalFilesystemContainment(stagingDir, sourcePath, true);
+    if (!containment.ok) {
+      return { ok: false, code: containment.code, message: containment.message };
+    }
+    actualSize = containment.fileSize ?? (await fileOps.statSize(sourcePath));
+  } else {
+    if (!(await fileOps.exists(sourcePath))) {
+      return { ok: false, code: 'FILE_NOT_FOUND', message: `Staging file not found: ${relFromStaging}` };
+    }
+    actualSize = await fileOps.statSize(sourcePath);
+  }
+
+  if (actualSize !== options.expectedFileSize) {
+    return {
+      ok: false,
+      code: 'FILE_CHANGED',
+      message: `Staging file size changed since confirmation (expected ${options.expectedFileSize} bytes, found ${actualSize} bytes). Refresh and confirm again.`,
+    };
+  }
+
+  const basename = winStyle ? path.win32.basename(sourcePath) : path.basename(sourcePath);
+  const ext = path.extname(basename);
+  const stem = basename.slice(0, basename.length - ext.length);
+  const stamp = nowFn().toISOString().replace(/[:.]/g, '-');
+
+  let trashPath = '';
+  let trashRelativePath = '';
+  let moved = false;
+  let lastMoveError: unknown = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const trashName = `${stem}.${stamp}-${crypto.randomBytes(4).toString('hex')}${ext}`;
+    trashPath = winStyle ? path.win32.join(trashDir, trashName) : path.join(trashDir, trashName);
+    trashRelativePath = `.trash/${trashName}`;
+    const moveRes = await moveFileNoOverwrite(sourcePath, trashPath, fileOps);
+    if (moveRes.ok) {
+      moved = true;
+      break;
+    }
+    lastMoveError = moveRes.error;
+    if (!moveRes.collision) {
+      break;
+    }
+  }
+  if (!moved) {
+    return {
+      ok: false,
+      code: 'TRASH_MOVE_FAILED',
+      message: `Failed to move staging file to .trash: ${lastMoveError instanceof Error ? lastMoveError.message : String(lastMoveError)}`,
     };
   }
 
@@ -1800,10 +1900,19 @@ export async function softDeleteStagingFile(
   );
 
   if (!auditOutcome.ok) {
+    // Roll back the filesystem move so a DB failure never leaves an unaudited orphan in .trash.
+    const rollback = await moveFileNoOverwrite(trashPath, sourcePath, fileOps);
+    if (rollback.ok) {
+      return {
+        ok: false,
+        code: 'TRASH_MOVE_FAILED',
+        message: `DB cleanup/audit failed; rolled back file to original staging path: ${auditOutcome.message}`,
+      };
+    }
     return {
       ok: false,
       code: 'TRASH_MOVE_FAILED',
-      message: `File moved to ${trashRelativePath}, but DB cleanup/audit failed: ${auditOutcome.message}`,
+      message: `File moved to ${trashRelativePath}, DB cleanup/audit failed (${auditOutcome.message}), and rollback failed (${rollback.error instanceof Error ? rollback.error.message : String(rollback.error)}).`,
       trashRelativePath,
       fileSize: actualSize,
     };
