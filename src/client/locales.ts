@@ -188,6 +188,11 @@ export const en = {
   ingestionQueueListHeading: 'Staged Files Queue',
   ingestionSelectPrompt: 'Select a staged file on the left to review metadata, tags, and performers.',
   ingestionTagPickerPlaceholder: 'Search existing tag/alias or type a new tag and press Enter...',
+  ingestionDeleteBtn: 'Move to .trash',
+  ingestionDeletingBtn: 'Moving to .trash...',
+  ingestionDeleteConfirmPrompt: 'Move this staged file to temp/.trash? (Not permanently deleted; manifest will be removed.)',
+  ingestionDeleteConfirmBtn: 'Confirm Move to .trash',
+  ingestionDeleteCancelBtn: 'Cancel',
 } as const;
 
 export type MediaLibraryKey = keyof typeof en;
@@ -380,6 +385,11 @@ export const zh: Record<keyof typeof en, string> = {
   ingestionQueueListHeading: '待入库文件队列',
   ingestionSelectPrompt: '请在左侧选择一个待入库文件，审核标题、日期、标签与演员映射。',
   ingestionTagPickerPlaceholder: '搜索已有标签/别名，或输入新标签按回车追加...',
+  ingestionDeleteBtn: '移入 .trash',
+  ingestionDeletingBtn: '正在移入 .trash...',
+  ingestionDeleteConfirmPrompt: '确认将此暂存文件移入 temp/.trash？（不会永久删除，但会清理未入库 Manifest）',
+  ingestionDeleteConfirmBtn: '确认移入 .trash',
+  ingestionDeleteCancelBtn: '取消',
 };
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

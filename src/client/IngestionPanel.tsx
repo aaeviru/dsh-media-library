@@ -17,7 +17,14 @@ import css from './ui/styles.module.css';
 
 type Translate = (key: MediaLibraryKey) => string;
 
-type BusyOp = null | 'scan' | 'fetch' | 'play' | 'approve';
+type BusyOp = null | 'scan' | 'fetch' | 'play' | 'approve' | 'delete';
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 interface DraftFields {
   title: string;
@@ -81,6 +88,7 @@ export function IngestionPanel({
   const [dirtyDrafts, setDirtyDrafts] = useState<Record<string, DraftFields>>(() => ({ ...sessionCache.dirtyDrafts }));
   const [executing, setExecuting] = useState<{ op: 'commit' | 'reconcile'; key: string | null } | null>(null);
   const [busyOp, setBusyOp] = useState<BusyOp>(null);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tagPickerQuery, setTagPickerQuery] = useState('');
@@ -97,6 +105,7 @@ export function IngestionPanel({
   const setSelectedKey = useCallback((next: string | null) => {
     sessionCache.selectedKey = next;
     setSelectedKeyState(next);
+    setConfirmDeleteKey(null);
   }, []);
 
   const updateDraft = useCallback((key: string, patch: Partial<DraftFields>, fallback: DraftFields) => {
@@ -600,12 +609,49 @@ export function IngestionPanel({
     }
   };
 
+  const handleDeleteStagingFile = async (entry: UnifiedStagingEntry) => {
+    setBusyOp('delete');
+    setMessage(null);
+    setError(null);
+    try {
+      const res = await mediaLibrary.deleteStagingFile({
+        manifestId: entry.manifest?.id,
+        relativePath: entry.relativePath,
+        expectedFileSize: entry.fileSize,
+      });
+      if (!res.ok) {
+        setError(res.error.message || t('rpcError'));
+        return;
+      }
+      if (!res.value.ok) {
+        setError(`[${res.value.code ?? 'ERROR'}] ${res.value.message}`);
+        setConfirmDeleteKey(null);
+        await reloadServerState();
+        return;
+      }
+      clearDraft(entry.key);
+      if (entry.manifest) clearDraft(`m:${entry.manifest.id}`);
+      setConfirmDeleteKey(null);
+      setSelectedKey(null);
+      const nextStaged = stagedFiles.filter((f) => f.relativePath !== entry.relativePath);
+      sessionCache.stagedFiles = nextStaged;
+      setStagedFiles(nextStaged);
+      setMessage(res.value.message);
+      await Promise.all([reloadServerState(), runScan(true)]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyOp(null);
+    }
+  };
+
   const busyBannerText = runningHostTask
     ? `#${runningHostTask.id} · ${t(`ingestionPhase_${runningHostTask.phase}`)} · ${runningHostTask.message}`
     : executing ? t(executing.op === 'commit' ? 'ingestionCommittingBtn' : 'ingestionReconcilingBtn')
       : busyOp === 'scan' ? t('ingestionScanningBtn')
         : busyOp === 'fetch' ? t('ingestionFetchingBtn')
-          : busyOp === 'approve' ? t('ingestionApprovingBtn') : null;
+          : busyOp === 'approve' ? t('ingestionApprovingBtn')
+            : busyOp === 'delete' ? t('ingestionDeletingBtn') : null;
 
   return (
     <section data-testid="ingestion-panel" className={css.panel}>
@@ -849,6 +895,34 @@ export function IngestionPanel({
                     ⚠ {t('performerCommitGateHint')}
                   </div>
                 ) : null}
+
+                {confirmDeleteKey === selected.key && selected.manifest?.state !== 'indexed' ? (
+                  <div role="alert" data-testid="ingestion-delete-confirm-bar" className={cx(css.banner, css.bannerDanger)}>
+                    <div>
+                      <strong>{selected.filename}</strong> ({formatFileSize(selected.fileSize)}) — {t('ingestionDeleteConfirmPrompt')}
+                    </div>
+                    <div className={css.rowTight}>
+                      <button
+                        type="button"
+                        data-testid="ingestion-delete-confirm-btn"
+                        disabled={busy || executionBusy || selectedFrozen || degraded}
+                        onClick={() => void handleDeleteStagingFile(selected)}
+                        className={css.btn}
+                      >
+                        {busyOp === 'delete' ? t('ingestionDeletingBtn') : t('ingestionDeleteConfirmBtn')}
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="ingestion-delete-cancel-btn"
+                        disabled={busy}
+                        onClick={() => setConfirmDeleteKey(null)}
+                        className={css.btn}
+                      >
+                        {t('ingestionDeleteCancelBtn')}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               <div className={css.ingestionDetailFooter}>
@@ -871,6 +945,17 @@ export function IngestionPanel({
                   >
                     {busyOp === 'fetch' ? t('ingestionFetchingBtn') : t('ingestionFetchBtn')}
                   </button>
+                  {selected.manifest?.state !== 'indexed' ? (
+                    <button
+                      type="button"
+                      data-testid="ingestion-delete-btn"
+                      disabled={busy || executionBusy || selectedFrozen || degraded}
+                      onClick={() => setConfirmDeleteKey(selected.key)}
+                      className={css.btn}
+                    >
+                      {t('ingestionDeleteBtn')}
+                    </button>
+                  ) : null}
                 </div>
                 <div className={css.rowTight}>
                   <button

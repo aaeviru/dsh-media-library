@@ -29,6 +29,7 @@ export {
   reconcileIngestionManifests,
   reviewIngestionManifest,
   scanStagingDirectory,
+  softDeleteStagingFile,
   startIngestionTask,
   type IngestionFileOps,
 } from './ingestion-service.ts';

@@ -44,6 +44,7 @@ import {
   reconcileIngestionManifests,
   reviewIngestionManifest,
   scanStagingDirectory,
+  softDeleteStagingFile,
   startIngestionTask,
 } from './ingestion/index.ts';
 import {
@@ -78,6 +79,8 @@ import type {
   CommitIngestionResult,
   CreateBackupInput,
   CreateBackupResult,
+  DeleteStagingFileInput,
+  DeleteStagingFileResult,
   CreateTagInput,
   DegradedModeState,
   DeletePerformerAliasInput,
@@ -1325,6 +1328,96 @@ export class MediaLibrarySpikeService {
         elapsedMs: Date.now() - startMs,
       };
     }
+  }
+
+  /**
+   * Issue #26: Soft-delete an unindexed staged file by moving it into `<stagingDir>/.trash/`
+   * and removing any associated unindexed manifest (with `mutation_log` audit).
+   * Shares the process-wide `FILE_EXECUTION_KEY` lock with `commitIngestion` / `reconcileIngestion`.
+   */
+  async deleteStagingFile(input: DeleteStagingFileInput): Promise<DeleteStagingFileResult> {
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      return {
+        ok: false,
+        code: 'READ_ONLY_DEGRADED',
+        message: this.degradedState.reason ?? 'Database is in read-only degraded mode.',
+      };
+    }
+
+    if ((input as { readonly tempPath?: unknown })?.tempPath !== undefined) {
+      return {
+        ok: false,
+        code: 'PATH_TRAVERSAL_REJECTED',
+        message: 'Client must submit manifestId or staging relativePath, not raw tempPath.',
+      };
+    }
+
+    const { roots } = this.getEffectiveRootsAndItems();
+    const configuredStaging = this.readStringSetting(this.configuredStagingDir).trim();
+    const defaultRoot = roots.find((r) => r.rootId === DEFAULT_M1_ROOT_ID && r.enabled);
+    const isPlaceholderUnc =
+      !configuredStaging && defaultRoot?.canonicalUncRoot.toLowerCase() === '\\\\nas\\mediatest';
+    const effectiveStagingDir =
+      configuredStaging || (defaultRoot ? path.win32.join(defaultRoot.canonicalUncRoot, 'temp') : '');
+
+    if (!effectiveStagingDir || isPlaceholderUnc) {
+      return {
+        ok: false,
+        code: 'INVALID_INPUT',
+        message: 'Staging temp directory is not configured.',
+      };
+    }
+
+    const active = hostRuntime[FILE_EXECUTION_KEY];
+    if (active) {
+      return {
+        ok: false,
+        code: 'IN_PROGRESS',
+        message: `Task #${active.task.id}: ${active.task.message || 'Another file ingestion operation is already running.'}`,
+      };
+    }
+
+    const nowIso = this.now().toISOString();
+    const syntheticLock: { databasePath: string; task: IngestionTask } = {
+      databasePath: this.localDatabasePath,
+      task: {
+        id: 0,
+        targetKey: input.manifestId !== undefined ? `manifest:${input.manifestId}` : `staging:${input.relativePath ?? ''}`,
+        op: 'commit',
+        status: 'running',
+        phase: 'cleanup',
+        phaseStartedAt: nowIso,
+        waitingWarning: false,
+        message: 'Moving staged file to .trash...',
+        startedAt: nowIso,
+        finishedAt: null,
+      },
+    };
+    hostRuntime[FILE_EXECUTION_KEY] = syntheticLock;
+
+    let res: DeleteStagingFileResult;
+    try {
+      res = await this.withInitializedDatabase((db) =>
+        softDeleteStagingFile(db, {
+          manifestId: input.manifestId,
+          relativePath: input.relativePath,
+          expectedFileSize: input.expectedFileSize,
+          stagingDir: effectiveStagingDir,
+          fileOps: this.ingestionFileOps,
+          now: this.now,
+        }),
+      );
+    } finally {
+      if (hostRuntime[FILE_EXECUTION_KEY] === syntheticLock) {
+        delete hostRuntime[FILE_EXECUTION_KEY];
+      }
+    }
+
+    if (res.ok) {
+      await this.maybeTriggerDailyAutoBackup();
+    }
+    return res;
   }
 
   async previewManifestPerformers(input: PreviewManifestPerformersInput): Promise<ManifestPerformerPreview> {
