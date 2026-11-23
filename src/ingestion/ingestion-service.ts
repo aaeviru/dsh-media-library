@@ -1315,6 +1315,24 @@ export async function commitIngestionManifest(
  * - `moved-not-indexed`: verified destination exists without DB row -> finish DB indexing & delete temp.
  * - `indexed-but-missing`: indexed row whose destination file disappeared -> mark media `missing` and record error.
  */
+function listPendingReconcileManifestPage(
+  db: DatabaseSync,
+  afterId: number,
+  limit: number,
+): IngestionManifest[] {
+  const rows = db
+    .prepare(
+      `SELECT *
+       FROM ingestion_manifests
+       WHERE state IN ('moving', 'failed', 'indexed')
+         AND id > ?
+       ORDER BY id ASC
+       LIMIT ?`,
+    )
+    .all(afterId, limit) as Array<Record<string, unknown>>;
+  return rows.map(mapManifestRow);
+}
+
 export async function reconcileIngestionManifests(
   db: DatabaseSync,
   options: {
@@ -1323,62 +1341,70 @@ export async function reconcileIngestionManifests(
     readonly onPhase?: ((phase: IngestionPhase) => void) | undefined;
     readonly fileOps?: IngestionFileOps | undefined;
     readonly now?: (() => Date) | undefined;
+    readonly pageSize?: number | undefined;
   },
 ): Promise<ReconcileIngestionResult> {
   const fileOps = options.fileOps ?? defaultIngestionFileOps;
   const nowFn = options.now ?? (() => new Date());
-  const candidates = listIngestionManifests(db, { limit: 500 }).filter(
-    (m) => m.state === 'moving' || m.state === 'failed' || m.state === 'indexed',
-  );
+  const pageSize = Math.min(Math.max(Math.trunc(Number(options.pageSize ?? 200)), 1), 500);
 
   let copiedNotDeletedFixed = 0;
   let movedNotIndexedFixed = 0;
   let indexedButMissingMarked = 0;
   const errors: string[] = [];
 
-  for (const m of candidates) {
-    try {
-      const resolution = resolveAllowlistedUncPath(options.roots, m.targetRootId, m.targetRelativePath);
-      if (!resolution.ok) throw new Error(resolution.message);
-      if (m.reviewDecision !== 'approved') throw new Error('REVIEW_REQUIRED: recovery requires human approval.');
-      options.onPhase?.('validation');
-      const destPath = resolution.resolvedUncPath;
-      const destExists = await fileOps.exists(destPath);
-      if (m.state === 'indexed' && m.indexedMediaId !== null && !destExists) {
-        db.prepare(`UPDATE media_files SET status = 'missing' WHERE id = ?`).run(m.indexedMediaId);
-        db.prepare(`UPDATE ingestion_manifests SET last_error = ?, updated_at = ? WHERE id = ?`).run(
-          'INDEXED_BUT_MISSING: destination missing.', nowFn().toISOString(), m.id);
-        indexedButMissingMarked += 1;
-        continue;
-      }
-      validateManifestPaths(m, options.stagingDir, true);
-      if (!destExists || await fileOps.statSize(destPath) !== m.fileSize) {
-        throw new Error('Destination missing or size mismatched; recovery remains unresolved.');
-      }
-      const sourceExists = await fileOps.exists(m.tempPath);
-      if (sourceExists) {
-        options.onPhase?.('quick_check');
-        await checkExistingTarget(fileOps, m.tempPath, destPath, m.fileSize);
-      }
-      // An absent source after an approved completed move needs only catalog registration.
-      const alreadyIndexed = m.state === 'indexed' && m.indexedMediaId !== null;
-      if (!alreadyIndexed) {
-        options.onPhase?.('index');
-        indexManifestIntoDatabase(db, m, nowFn().toISOString());
-        movedNotIndexedFixed += 1;
-      }
-      if (sourceExists) {
-        options.onPhase?.('cleanup');
+  let afterId = 0;
+  for (;;) {
+    const page = listPendingReconcileManifestPage(db, afterId, pageSize);
+    if (page.length === 0) break;
+
+    for (const m of page) {
+      afterId = m.id;
+      try {
+        const resolution = resolveAllowlistedUncPath(options.roots, m.targetRootId, m.targetRelativePath);
+        if (!resolution.ok) throw new Error(resolution.message);
+        if (m.reviewDecision !== 'approved') throw new Error('REVIEW_REQUIRED: recovery requires human approval.');
+        options.onPhase?.('validation');
+        const destPath = resolution.resolvedUncPath;
+        const destExists = await fileOps.exists(destPath);
+        if (m.state === 'indexed' && m.indexedMediaId !== null && !destExists) {
+          db.prepare(`UPDATE media_files SET status = 'missing' WHERE id = ?`).run(m.indexedMediaId);
+          db.prepare(`UPDATE ingestion_manifests SET last_error = ?, updated_at = ? WHERE id = ?`).run(
+            'INDEXED_BUT_MISSING: destination missing.', nowFn().toISOString(), m.id);
+          indexedButMissingMarked += 1;
+          continue;
+        }
         validateManifestPaths(m, options.stagingDir, true);
-        await fileOps.removeFile(m.tempPath);
-        db.prepare(`UPDATE ingestion_manifests SET last_error = NULL, updated_at = ? WHERE id = ?`).run(nowFn().toISOString(), m.id);
-        if (alreadyIndexed) copiedNotDeletedFixed += 1;
+        if (!destExists || await fileOps.statSize(destPath) !== m.fileSize) {
+          throw new Error('Destination missing or size mismatched; recovery remains unresolved.');
+        }
+        const sourceExists = await fileOps.exists(m.tempPath);
+        if (sourceExists) {
+          options.onPhase?.('quick_check');
+          await checkExistingTarget(fileOps, m.tempPath, destPath, m.fileSize);
+        }
+        // An absent source after an approved completed move needs only catalog registration.
+        const alreadyIndexed = m.state === 'indexed' && m.indexedMediaId !== null;
+        if (!alreadyIndexed) {
+          options.onPhase?.('index');
+          indexManifestIntoDatabase(db, m, nowFn().toISOString());
+          movedNotIndexedFixed += 1;
+        }
+        if (sourceExists) {
+          options.onPhase?.('cleanup');
+          validateManifestPaths(m, options.stagingDir, true);
+          await fileOps.removeFile(m.tempPath);
+          db.prepare(`UPDATE ingestion_manifests SET last_error = NULL, updated_at = ? WHERE id = ?`).run(nowFn().toISOString(), m.id);
+          if (alreadyIndexed) copiedNotDeletedFixed += 1;
+        }
+      } catch (err) {
+        const message = `Manifest #${m.id}: ${err instanceof Error ? err.message : String(err)}`;
+        errors.push(message);
+        db.prepare('UPDATE ingestion_manifests SET last_error = ?, updated_at = ? WHERE id = ?').run(message, nowFn().toISOString(), m.id);
       }
-    } catch (err) {
-      const message = `Manifest #${m.id}: ${err instanceof Error ? err.message : String(err)}`;
-      errors.push(message);
-      db.prepare('UPDATE ingestion_manifests SET last_error = ?, updated_at = ? WHERE id = ?').run(message, nowFn().toISOString(), m.id);
     }
+
+    if (page.length < pageSize) break;
   }
 
   return {
