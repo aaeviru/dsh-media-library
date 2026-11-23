@@ -101,7 +101,10 @@
 2. **Typecheck**：Host、Client 及测试类型检查。
 3. **Build**：编译、Typert 生成、Host/Client bundle，并校验外部 import 仅包含 `@deepseek-ai/cordis` 与 `node:*`。
 4. **Packaging（`./scripts/pack.sh`）**：默认输出到仓库内相对路径 `./dist/dsh-media-library-<version>-<short-sha>.tgz`（也支持传入任意相对路径参数，如 `./scripts/pack.sh ../dsh-media-library-local-data/artifacts` 供 Windows 桌面端冷安装追溯）。
-   - **每次打包必须先递增版本号**：每次向用户交付新的 `.tgz` 安装包前，必须先递增版本号（同步更新 `package.json`、`bundle/package.json` 及 `appVersion` 默认值），确保 Windows DSH Desktop 冷安装时可通过文件名与插件版本明确区分不同构建。
+   - **每次打包必须先递增版本号**：每次向用户交付新的正式 `.tgz` 安装包前，必须先递增版本号（同步更新 `package.json`、`bundle/package.json` 及 `appVersion` 默认值），确保 Windows DSH Desktop 冷安装时可通过文件名与插件版本明确区分不同构建。
+   - **按 `windows_smb_e2e` 分级决定合并前是否打预发 `.tgz`**：
+     - 纯逻辑 / SQLite / 测试工具链 PR（`windows_smb_e2e: N/A`）：不在合并前单独打交付 `.tgz`，待合入 `main` 后统一发版打包；
+     - 触及 Windows UNC/SMB、真实文件移动或前端关键交互的 PR（`windows_smb_e2e: NOT_VERIFIED`）：合并前使用不污染 PR Git 历史的临时预发版本号（如 `<next-version>-pr<N>`）打包至 `../dsh-media-library-local-data/artifacts/issue-<ID>/` 供 Windows 桌面端实测；涉及前端 UI 改动时同步附 Playwright 关键状态截图。
 5. **WSL DSH Web 三层运行态验证（`./scripts/verify-web.sh`）**：在交付 Windows DSH Desktop 人工验收前，必须在隔离 `DSH_HOME` 的 `web` profile 中完成 `.tgz` 冷安装（拒绝 `link:` 依赖）、启动 `dsh web` 校验 `boot.html` 与 `/plugins/??...` HTTP 200，并通过 Playwright 无头 Chromium 真点测侧栏入口、面板渲染及 Host RPC 往返。
 
 ### 3.2 Seam Check（接缝检查）与证据分级
@@ -138,6 +141,8 @@ Closes #<ID> | Refs #<ID>（二选一，禁止原样保留：完成该 Issue 全
 ## Evidence & Seam Check
 
 - Local Verification: `PASS | FAIL | NOT RUN`（命令与输出摘要）
+- Quick Re-check: `<1 条 1 秒级定向单测命令，便于无 CI 环境下独立审查者快速复验>`
+- Packaging Status: `<已生成预发/正式 .tgz 及路径 | 未生成交付 .tgz（原因：windows_smb_e2e N/A / 合并后统一发版）>`
 - Behavior Evidence:
   - `B1`: `VERIFIED (scope: ...)`
 - Seam Check (`seam_status`):
@@ -163,6 +168,8 @@ Risks / Rollback: <风险与回退方式>
 ### 4.2 Review 必须绑定实际 Commit SHA
 
 - `[REVIEW]` 必须记录被审查的完整 commit SHA。Worker 推送新提交后，旧 SHA 的 `PASS` 自动失效，Critic 必须审查增量差异并更新绑定 SHA。
+- Critic 审查代码 PR 时必须对照 [CODING_STANDARDS.md](../../CODING_STANDARDS.md) 与对应 Issue Contract。
+- 在具备自动触发跨模型审查机制前，保持双层审阅：Worker 提 PR 前先由内部独立 Critic 前置拦截明显缺陷以减少人工往返；高风险或 P1 PR 可再交由外部跨模型 Reviewer 结合 `Quick Re-check` 命令做第二道复审。
 - Issue 评论中的方案讨论属于 **Issue Review**，不能替代针对实际代码 diff 和验证证据的 **PR Review**。
 
 ---
