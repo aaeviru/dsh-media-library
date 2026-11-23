@@ -405,12 +405,6 @@ function buildNormalTagPreview(db: DatabaseSync, rawTagsJson: string): NormalTag
   return out;
 }
 
-/**
- * Evaluate performer aliases for a manifest idempotently (`B1`, `B2`).
- * - Unique active `auto` rule -> `autoMatched` (`performer-rule`, confidence 1.0).
- * - Unknown / ambiguous (`>=2` active tags or `always_ask`) / `archived_target` -> upserted into `performer_review_queue` as `pending`.
- * - Existing human `resolved` (with active tag) and `skipped` queue decisions are preserved across re-evaluations.
- */
 function tableExists(db: DatabaseSync, tableName: string): boolean {
   const row = db
     .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -418,6 +412,12 @@ function tableExists(db: DatabaseSync, tableName: string): boolean {
   return row !== undefined;
 }
 
+/**
+ * Evaluate performer aliases for a manifest idempotently (`B1`, `B2`).
+ * - Unique active `auto` rule -> `autoMatched` (`performer-rule`, confidence 1.0).
+ * - Unknown / ambiguous (`>=2` active tags or `always_ask`) / `archived_target` -> upserted into `performer_review_queue` as `pending`.
+ * - Existing human `resolved` (with active tag) and `skipped` queue decisions are preserved across re-evaluations.
+ */
 export function evaluateManifestPerformers(
   db: DatabaseSync,
   manifestId: number,
@@ -485,6 +485,7 @@ export function evaluateManifestPerformers(
   const skipped: string[] = [];
   const skippedEntries: PerformerSkippedEntry[] = [];
   const readOnlyPending: PerformerReviewItem[] = [];
+  let nextSyntheticPendingId = -1;
 
   for (const rawName of rawActresses) {
     const trimmed = rawName.trim();
@@ -632,7 +633,7 @@ export function evaluateManifestPerformers(
       ).run(manifestId, indexedMediaId, trimmed, norm, reason, JSON.stringify(candidateIds), ts, ts);
     } else {
       readOnlyPending.push({
-        id: existingQueue ? Number(existingQueue.id) : 0,
+        id: existingQueue ? Number(existingQueue.id) : nextSyntheticPendingId--,
         manifestId,
         manifestFilename: String(manifestRow.filename),
         mediaId: indexedMediaId,

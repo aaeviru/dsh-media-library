@@ -375,7 +375,7 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
                checksum_sha256, file_size, state, review_decision, created_at, updated_at
              ) VALUES (
                'src-deg-1', '/tmp/deg.mp4', 'nas-main', 'ingested/deg.mp4', 'deg.mp4', 'Degraded Preview',
-               'DEG-001', NULL, '[]', '["Stale Pending Performer", "Archived Resolved Performer", "Unknown Performer X"]', 'manual',
+               'DEG-001', NULL, '[]', '["Stale Pending Performer", "Archived Resolved Performer", "Unknown Performer X", "Unknown Performer Y"]', 'manual',
                'sha-deg-1', 100, 'planned', 'pending', '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z'
              )`,
           )
@@ -426,8 +426,11 @@ describe('Operational Backup, Retention, Restore, Degraded Mode & Export (Issue 
         [
           { rawName: 'Archived Resolved Performer', reason: 'archived_target' },
           { rawName: 'Unknown Performer X', reason: 'unknown' },
+          { rawName: 'Unknown Performer Y', reason: 'unknown' },
         ],
       )
+      // Every pending item (including multiple newly unresolved performers) must have a unique id for React keys.
+      assert.equal(new Set(preview.pendingReview.map(p => p.id)).size, preview.pendingReview.length)
 
       // Verify performer_review_queue rows and contents are byte-for-byte unchanged (INSERT/UPDATE/DELETE all guarded).
       const verifyDb = new DatabaseSync(dbPath, { readOnly: true })
