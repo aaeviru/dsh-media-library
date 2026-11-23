@@ -91,7 +91,7 @@ export function runCli(argv: readonly string[]): number {
     }
     const invReport = inventoryTagStudioDatabase(compReport.recommendedPrimaryPath, {
       rootId,
-      mediaRootDir,
+      ...(mediaRootDir !== undefined ? { mediaRootDir } : {}),
       sanitize,
     })
     const invMd = formatInventoryMarkdown(invReport)
@@ -116,7 +116,7 @@ export function runCli(argv: readonly string[]): number {
 
   const invReport = inventoryTagStudioDatabase(positional[0]!, {
     rootId,
-    mediaRootDir,
+    ...(mediaRootDir !== undefined ? { mediaRootDir } : {}),
     sanitize,
   })
   const invMd = formatInventoryMarkdown(invReport)
