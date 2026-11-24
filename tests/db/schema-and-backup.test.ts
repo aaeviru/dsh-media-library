@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import crypto from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
+import { APP_VERSION } from '../../src/version.ts'
 import {
   collectDatabaseTableCounts,
   createDatabaseBackup,
@@ -243,5 +245,33 @@ describe('Local SQLite Schema, Migration Runner & Backup/Restore (Issue #3 B1, B
     } finally {
       restoredDb.close()
     }
+  })
+
+  it('Issue #27 B1 & B2: published migrations V1..V7 remain immutable and APP_VERSION matches package manifests', () => {
+    const expectedHashes: Record<number, string> = {
+      1: '88d19ad6613c7e8182c32680e42abe25976bcaf49308a2a9e0adb3d7d45c04ed',
+      2: '1faa6fccd4720f365f999827ccc2d6e3a80a2dc0abc504542a6d1245223d98b2',
+      3: '9220bf0811f381fe8dd71e2f0515b4eb9d9a22b9c49c4c10018eca69a1ba1046',
+      4: 'ebd135f093a768ca92893dbb60fcd5d8113bf43e1e5657f336f3824878f5ba1c',
+      5: '7a1ee33c70a58c78caa7b3770e652183e5a34bc832bac79b3102975a0ecaef89',
+      6: '3fb62b0101b77b98256a2e4ee0749b0c55e740985859af2635baaaab14269e43',
+      7: '36162128c78afe0576e86509e0c4bd75aa38bc979c71887f54179dda48d6ca2b',
+    }
+    for (const [verStr, expected] of Object.entries(expectedHashes)) {
+      const version = Number(verStr)
+      const migration = DEFAULT_MIGRATIONS.find(m => m.version === version)
+      assert.ok(migration, `Expected published migration V${version} to exist`)
+      const actual = crypto
+        .createHash('sha256')
+        .update(`${migration.version}|${migration.description}|${Boolean(migration.rebuildsReferencedTables)}|${migration.up.toString()}`)
+        .digest('hex')
+      assert.equal(actual, expected, `Published migration V${version} was modified! Add a new migration instead of mutating V${version}.`)
+    }
+
+    const repoRoot = path.resolve(import.meta.dirname, '..', '..')
+    const rootPkg = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as { version: string }
+    const bundlePkg = JSON.parse(readFileSync(path.join(repoRoot, 'bundle', 'package.json'), 'utf8')) as { version: string }
+    assert.equal(APP_VERSION, rootPkg.version)
+    assert.equal(APP_VERSION, bundlePkg.version)
   })
 })

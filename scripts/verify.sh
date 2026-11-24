@@ -6,6 +6,17 @@ cd "$REPO_ROOT"
 
 echo "==> [1/5] Checking git whitespace / formatting hygiene & client UI rules..."
 git diff --check
+node --experimental-strip-types --input-type=module -e '
+  import fs from "node:fs";
+  import { APP_VERSION } from "./src/version.ts";
+  const rootPkg = JSON.parse(fs.readFileSync("./package.json", "utf8")).version;
+  const bundlePkg = JSON.parse(fs.readFileSync("./bundle/package.json", "utf8")).version;
+  if (rootPkg !== bundlePkg || rootPkg !== APP_VERSION) {
+    console.error(`Version parity check failed: package.json=${rootPkg}, bundle/package.json=${bundlePkg}, src/version.ts=${APP_VERSION}`);
+    process.exit(1);
+  }
+  console.log(`Version parity check passed (${APP_VERSION}).`);
+'
 node --input-type=module -e '
   import fs from "node:fs";
   import path from "node:path";

@@ -18,6 +18,12 @@ mkdir -p "$OUT_ARG"
 OUT_ABS="$(cd -- "$OUT_ARG" && pwd)"
 
 VERSION="$(node -p "require('$BUNDLE_DIR/package.json').version")"
+ROOT_VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
+SRC_VERSION="$(node --experimental-strip-types --input-type=module -e "import { APP_VERSION } from '$REPO_ROOT/src/version.ts'; console.log(APP_VERSION)")"
+if [[ "$VERSION" != "$ROOT_VERSION" || "$VERSION" != "$SRC_VERSION" ]]; then
+  echo "Error: version mismatch across package.json ($ROOT_VERSION), bundle/package.json ($VERSION), and src/version.ts ($SRC_VERSION)" >&2
+  exit 1
+fi
 SHORT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 TARGET_TGZ="$OUT_ABS/dsh-media-library-${VERSION}-${SHORT_SHA}.tgz"
 

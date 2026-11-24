@@ -6,7 +6,7 @@ A Windows-first DSH Desktop plugin (`@deepseek-ai/dsh-experimental-media-library
 
 ## Status
 
-**M1–M4 implemented** (current baseline: `v0.7.3`, SQLite schema `v7`).
+**M1–M4 implemented** (current baseline: `v0.7.10`, SQLite schema `v7`).
 
 - **M1 (Host/UNC & Inventory)**: Allowlisted Windows UNC path resolution, native default-app open & Explorer `/select` reveal, and read-only TagStudio SQLite inventory.
 - **M2 (Migration, Search & Open)**: Lossless read-only import from TagStudio `ts_library.sqlite` (SHA-256 verified unchanged), local SQLite schema migrations, keyset-paginated search by tag/alias, catalog number (exact/prefix), date range, and keyword, plus context-menu/keyboard native actions.
@@ -78,6 +78,7 @@ Build and pack a distributable `.tgz` archive for Windows DSH Desktop cold insta
   - [ADR 0001: M1 UNC Path Opener](docs/adr/0001-m1-unc-path-opener.md)
   - [ADR 0002: Staging Scan and Move](docs/adr/0002-staging-scan-and-move.md)
   - [ADR 0003: Responsive Host and Serialized Ingestion](docs/adr/0003-responsive-host-and-serialized-ingestion.md)
+  - [ADR 0004: Tag Hierarchy and Kind](docs/adr/0004-tag-hierarchy-and-kind.md)
 
 ## References
 
