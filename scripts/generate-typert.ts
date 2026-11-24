@@ -162,6 +162,8 @@ const MUTATION_SCHEMAS = [
   `let _mediaLibrary_promotePerformerTagInput$schema$value\nconst _mediaLibrary_promotePerformerTagInput$schema = () => (_mediaLibrary_promotePerformerTagInput$schema$value ??= z.object({ mediaId: ${STR}, tagId: ${NUM} }).readonly())`,
   `let _mediaLibrary_promotePerformerTagResult$schema$value\nconst _mediaLibrary_promotePerformerTagResult$schema = () => (_mediaLibrary_promotePerformerTagResult$schema$value ??= z.object({ ok: ${BOOL}, code: ${STR}.optional(), message: ${STR}.optional(), promoted: ${BOOL}.optional() }).readonly())`,
   `let _mediaLibrary_openStagingFileInput$schema$value\nconst _mediaLibrary_openStagingFileInput$schema = () => (_mediaLibrary_openStagingFileInput$schema$value ??= z.object({ relativePath: ${STR} }).readonly())`,
+  `let _mediaLibrary_deleteStagingFileInput$schema$value\nconst _mediaLibrary_deleteStagingFileInput$schema = () => (_mediaLibrary_deleteStagingFileInput$schema$value ??= z.object({ manifestId: ${NUM}.optional(), relativePath: ${STR}.optional(), expectedFileSize: ${NUM} }).readonly())`,
+  `let _mediaLibrary_deleteStagingFileResult$schema$value\nconst _mediaLibrary_deleteStagingFileResult$schema = () => (_mediaLibrary_deleteStagingFileResult$schema$value ??= z.object({ ok: ${BOOL}, code: ${STR}.optional(), message: ${STR}, deletedManifestId: ${NUM}.nullable().optional(), trashRelativePath: ${STR}.optional(), fileSize: ${NUM}.optional() }).readonly())`,
 ].join('\n\n');
 
 interface MutationMethodSpec {
@@ -195,6 +197,7 @@ const MUTATION_METHODS: MutationMethodSpec[] = [
   { name: 'resolvePerformerReview', description: 'Resolve a performer review queue item (bind existing tag, create performer tag, or skip).', inputKey: 'resolvePerformerReviewInput', inputType: 'ResolvePerformerReviewInput', resultKey: 'resolvePerformerReviewResult', resultType: 'ResolvePerformerReviewResult', paramDescription: 'Review item id, resolution mode, and binding options.', line: 340 },
   { name: 'promotePerformerTagToManual', description: 'Promote an auto-applied performer-rule media tag association to manual protection.', inputKey: 'promotePerformerTagInput', inputType: 'PromotePerformerTagInput', resultKey: 'promotePerformerTagResult', resultType: 'PromotePerformerTagResult', paramDescription: 'Media id and tag id.', line: 348 },
   { name: 'openStagingFile', description: 'Open a video file currently inside the Host-configured staging temp folder using the native player.', inputKey: 'openStagingFileInput', inputType: 'OpenStagingFileInput', resultKey: 'actionResult', resultType: 'MediaActionResult', paramDescription: 'Relative path inside stagingDir.', line: 304 },
+  { name: 'deleteStagingFile', description: 'Safely soft-delete an unindexed video file inside the staging temp folder into <stagingDir>/.trash.', inputKey: 'deleteStagingFileInput', inputType: 'DeleteStagingFileInput', resultKey: 'deleteStagingFileResult', resultType: 'DeleteStagingFileResult', paramDescription: 'Manifest id and/or staging relativePath with expectedFileSize confirmation.', line: 327 },
 ];
 
 function mutationMethodEntry(m: MutationMethodSpec): string {

@@ -11,6 +11,8 @@ import type {
   CreateTagInput,
   DeletePerformerAliasInput,
   DeletePerformerAliasResult,
+  DeleteStagingFileInput,
+  DeleteStagingFileResult,
   ExportMappingReportInput,
   ExportMappingReportResult,
   FetchedMetadataCandidate,
@@ -316,6 +318,14 @@ export class MediaLibraryRemote extends TypertRemoteService {
   @Remote('openStagingFile')
   async openStagingFile(input: OpenStagingFileInput): Promise<MediaActionResult> {
     return this.spikeService.openStagingFile(input);
+  }
+
+  /**
+   * Safely soft-delete an unindexed video file inside the staging temp folder into `<stagingDir>/.trash`.
+   */
+  @Remote('deleteStagingFile')
+  async deleteStagingFile(input: DeleteStagingFileInput): Promise<DeleteStagingFileResult> {
+    return this.spikeService.deleteStagingFile(input);
   }
 
   /**

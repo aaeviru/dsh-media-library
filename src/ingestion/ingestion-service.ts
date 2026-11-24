@@ -7,6 +7,8 @@ import { extractCatalogNumber, extractIsoDate } from '../inventory/tagstudio-inv
 import { normalizeLabel, runMutation } from '../mutations/transaction.ts';
 import type {
   CommitIngestionResult,
+  DeleteStagingFileInput,
+  DeleteStagingFileResult,
   FetchedMetadataCandidate,
   IngestionManifest,
   IngestionManifestTag,
@@ -359,21 +361,38 @@ export async function scanStagingDirectory(
   }
 
   const frozenIds = new Set(listFrozenIngestionManifests(db).map((m) => m.id));
+  const unindexedByTempPath = new Map<string, IngestionManifest>();
   const unindexedByFilename = new Map<string, IngestionManifest>();
   for (const m of initialManifests) {
     if (m.state === 'indexed') continue;
+    const tempKey = m.tempPath.toLowerCase();
+    if (!unindexedByTempPath.has(tempKey)) {
+      unindexedByTempPath.set(tempKey, m);
+    }
     const key = m.filename.toLowerCase();
     if (!unindexedByFilename.has(key)) {
       unindexedByFilename.set(key, m);
     }
   }
+  const previewTempPaths = new Set(preview.files.map((f) => f.tempPath.toLowerCase()));
 
   const matchedManifestIds = new Set<number>();
   const files: StagingFileItem[] = [];
 
   for (const f of preview.files) {
+    const tempKey = f.tempPath.toLowerCase();
     const filenameKey = f.filename.toLowerCase();
-    let existing = unindexedByFilename.get(filenameKey);
+    let existing = unindexedByTempPath.get(tempKey);
+    if (existing && matchedManifestIds.has(existing.id)) {
+      existing = undefined;
+    }
+    if (!existing) {
+      const byName = unindexedByFilename.get(filenameKey);
+      // Only rebind by filename if not already claimed and no other scanned file owns its exact tempPath.
+      if (byName && !matchedManifestIds.has(byName.id) && !previewTempPaths.has(byName.tempPath.toLowerCase())) {
+        existing = byName;
+      }
+    }
     if (existing) {
       matchedManifestIds.add(existing.id);
       const nextSourceId = `staging:${f.targetRelativePath.toLowerCase()}:${f.fileSize}`;
@@ -600,17 +619,35 @@ export async function ensureManifestForStagingFile(
   const fileSize = (await fileOps.statSize(tempPath));
   const sourceId = `staging:${targetRel.toLowerCase()}:${fileSize}`;
 
-  // B1: Match existing unindexed manifest by case-insensitive filename first (or source_id / temp_path),
-  // rebinding temp_path and target fields when the file moved to a new stagingDir.
-  const existingUnindexed = db
+  // B1: Match existing unindexed manifest by exact temp_path first.
+  // Only fall back to filename/source_id rebinding when the previously bound temp_path no longer exists on disk
+  // (i.e. moved to a new stagingDir per Issue #45), so a live sibling in another subfolder is never stolen.
+  let existingUnindexed = db
     .prepare(
       `SELECT * FROM ingestion_manifests
-       WHERE state <> 'indexed'
-         AND (LOWER(filename) = LOWER(?) OR source_id = ? OR LOWER(temp_path) = LOWER(?))
-       ORDER BY CASE WHEN LOWER(filename) = LOWER(?) THEN 0 ELSE 1 END, updated_at DESC, id DESC
+       WHERE state <> 'indexed' AND LOWER(temp_path) = LOWER(?)
+       ORDER BY updated_at DESC, id DESC
        LIMIT 1`,
     )
-    .get(filename, sourceId, tempPath, filename) as Record<string, unknown> | undefined;
+    .get(tempPath) as Record<string, unknown> | undefined;
+
+  if (!existingUnindexed) {
+    const candidates = db
+      .prepare(
+        `SELECT * FROM ingestion_manifests
+         WHERE state <> 'indexed' AND (LOWER(filename) = LOWER(?) OR source_id = ?)
+         ORDER BY CASE WHEN LOWER(filename) = LOWER(?) THEN 0 ELSE 1 END, updated_at DESC, id DESC`,
+      )
+      .all(filename, sourceId, filename) as Array<Record<string, unknown>>;
+    for (const row of candidates) {
+      const candidate = mapManifestRow(row);
+      if (!(await fileOps.exists(candidate.tempPath))) {
+        existingUnindexed = row;
+        break;
+      }
+    }
+  }
+
   if (existingUnindexed) {
     const mapped = mapManifestRow(existingUnindexed);
     const tempChanged = mapped.tempPath.toLowerCase() !== tempPath.toLowerCase();
@@ -631,7 +668,7 @@ export async function ensureManifestForStagingFile(
         .prepare('SELECT id FROM ingestion_manifests WHERE source_id = ? AND id <> ? LIMIT 1')
         .get(sourceId, mapped.id) as { id: number } | undefined;
       const safeSourceId = sourceIdConflict ? `${sourceId}#${mapped.id}` : sourceId;
-      db.prepare(
+      const updateInfo = db.prepare(
         `UPDATE ingestion_manifests
          SET source_id = ?,
              temp_path = ?,
@@ -642,7 +679,7 @@ export async function ensureManifestForStagingFile(
              state = ?,
              last_error = ?,
              updated_at = ?
-         WHERE id = ?`,
+         WHERE id = ? AND temp_path = ?`,
       ).run(
         safeSourceId,
         tempPath,
@@ -654,18 +691,28 @@ export async function ensureManifestForStagingFile(
         nextError,
         now,
         mapped.id,
+        mapped.tempPath,
       );
-      return getIngestionManifestById(db, mapped.id)!;
+      if (updateInfo.changes === 1) {
+        return getIngestionManifestById(db, mapped.id)!;
+      }
+      // Concurrent caller already rebound this stale manifest to another live file; fall through to insert a fresh row.
+    } else {
+      return mapped;
     }
-    return mapped;
   }
 
   const existingIndexed = db
-    .prepare('SELECT * FROM ingestion_manifests WHERE source_id = ? OR LOWER(temp_path) = LOWER(?) LIMIT 1')
-    .get(sourceId, tempPath) as Record<string, unknown> | undefined;
+    .prepare('SELECT * FROM ingestion_manifests WHERE LOWER(temp_path) = LOWER(?) LIMIT 1')
+    .get(tempPath) as Record<string, unknown> | undefined;
   if (existingIndexed) {
     return mapManifestRow(existingIndexed);
   }
+
+  const existingSourceId = db
+    .prepare('SELECT id FROM ingestion_manifests WHERE source_id = ? LIMIT 1')
+    .get(sourceId) as { id: number } | undefined;
+  const insertSourceId = existingSourceId ? `${sourceId}#${crypto.randomBytes(4).toString('hex')}` : sourceId;
 
   const ext = path.extname(filename);
   const fc2 = parseFc2Code(path.basename(filename, ext));
@@ -681,7 +728,7 @@ export async function ensureManifestForStagingFile(
         indexed_media_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, '[]', NULL, '', ?, 'planned', 'pending', NULL, NULL, ?, ?)`,
     )
-    .run(sourceId, tempPath, options.targetRootId, targetRel, filename, catalogNumber, inferredDate, fileSize, now, now);
+    .run(insertSourceId, tempPath, options.targetRootId, targetRel, filename, catalogNumber, inferredDate, fileSize, now, now);
 
   return getIngestionManifestById(db, Number(info.lastInsertRowid))!;
 }
@@ -1542,4 +1589,368 @@ export function finishIngestionTask(
   db.prepare(
     `UPDATE ingestion_tasks SET status = ?, message = ?, finished_at = ? WHERE id = ?`,
   ).run(status, message, now().toISOString(), taskId);
+}
+
+function isWindowsStylePath(p: string): boolean {
+  return p.startsWith('\\\\') || /^[a-zA-Z]:[\\/]/.test(p);
+}
+
+function normalizePathForCompare(p: string, winStyle: boolean): string {
+  const resolved = winStyle ? path.win32.resolve(p) : path.resolve(p);
+  return winStyle ? resolved.toLowerCase() : resolved;
+}
+
+async function verifyLocalFilesystemContainment(
+  stagingDir: string,
+  targetPath: string,
+  expectFile: boolean,
+): Promise<{ readonly ok: true; readonly fileSize?: number } | { readonly ok: false; readonly code: 'FILE_NOT_FOUND' | 'PATH_TRAVERSAL_REJECTED'; readonly message: string }> {
+  let stagingReal: string;
+  try {
+    const stagingStat = await fsp.lstat(stagingDir);
+    if (stagingStat.isSymbolicLink() || !stagingStat.isDirectory()) {
+      return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: 'Staging directory must be a real directory, not a symlink.' };
+    }
+    stagingReal = await fsp.realpath(stagingDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { ok: false, code: 'FILE_NOT_FOUND', message: `Staging directory not found: ${stagingDir}` };
+    }
+    return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Unable to validate staging directory: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  const rel = path.relative(path.resolve(stagingDir), path.resolve(targetPath));
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Target escaped stagingDir: ${targetPath}` };
+  }
+
+  // Walk every path segment from stagingDir to targetPath with lstat to reject symlinks/junctions.
+  const segments = rel.split(path.sep).filter(Boolean);
+  let cursor = path.resolve(stagingDir);
+  let leafSize: number | undefined;
+  for (let i = 0; i < segments.length; i++) {
+    cursor = path.join(cursor, segments[i]!);
+    let st: fs.Stats;
+    try {
+      st = await fsp.lstat(cursor);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { ok: false, code: 'FILE_NOT_FOUND', message: `Staging file not found: ${targetPath}` };
+      }
+      return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Cannot inspect path segment: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (st.isSymbolicLink()) {
+      return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Symlink/reparse point rejected inside stagingDir: ${segments[i]}` };
+    }
+    const isLast = i === segments.length - 1;
+    if (isLast && expectFile) {
+      if (!st.isFile()) {
+        return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Target must be a regular video file: ${targetPath}` };
+      }
+      leafSize = st.size;
+    }
+    if ((!isLast || !expectFile) && !st.isDirectory()) {
+      return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Expected directory segment inside stagingDir: ${segments[i]}` };
+    }
+  }
+
+  const targetReal = await fsp.realpath(targetPath);
+  const realRel = path.relative(stagingReal, targetReal);
+  if (!realRel || realRel.startsWith('..') || path.isAbsolute(realRel)) {
+    return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: `Resolved realpath escaped stagingDir: ${targetPath}` };
+  }
+  return leafSize !== undefined ? { ok: true, fileSize: leafSize } : { ok: true };
+}
+
+/**
+ * Move `srcPath` to `destPath` without overwriting any existing entry (including dangling symlinks).
+ * On real filesystems, prefers atomic `link` + `unlink` (which fails with EEXIST on any collision),
+ * falling back to `lstat(ENOENT)` + `rename` only when the filesystem does not support hardlinks.
+ */
+async function moveFileNoOverwrite(
+  srcPath: string,
+  destPath: string,
+  fileOps: IngestionFileOps,
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly collision: boolean; readonly error: unknown }> {
+  if (fileOps !== defaultIngestionFileOps) {
+    if (await fileOps.exists(destPath)) {
+      return { ok: false, collision: true, error: new Error(`Destination already exists: ${destPath}`) };
+    }
+    try {
+      await fileOps.rename(srcPath, destPath);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, collision: false, error };
+    }
+  }
+
+  try {
+    await fsp.link(srcPath, destPath);
+    try {
+      await fsp.unlink(srcPath);
+      return { ok: true };
+    } catch (unlinkErr) {
+      await fsp.unlink(destPath).catch(() => undefined);
+      return { ok: false, collision: false, error: unlinkErr };
+    }
+  } catch (linkErr) {
+    const code = (linkErr as NodeJS.ErrnoException)?.code ?? '';
+    if (code === 'EEXIST') {
+      return { ok: false, collision: true, error: linkErr };
+    }
+    if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'ENOSYS' && code !== 'EXDEV') {
+      return { ok: false, collision: false, error: linkErr };
+    }
+    try {
+      await fsp.lstat(destPath);
+      return { ok: false, collision: true, error: new Error(`Destination already exists: ${destPath}`) };
+    } catch (lstatErr) {
+      if ((lstatErr as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        return { ok: false, collision: false, error: lstatErr };
+      }
+    }
+    try {
+      await fsp.rename(srcPath, destPath);
+      return { ok: true };
+    } catch (renameErr) {
+      return { ok: false, collision: false, error: renameErr };
+    }
+  }
+}
+
+/**
+ * Safely soft-delete an unindexed video file inside `stagingDir` into `<stagingDir>/.trash` (Issue #26).
+ * Enforces selector agreement, filesystem containment, size confirmation binding, collision-proof
+ * same-share `rename`, cascade removal of unindexed manifests, and `mutation_log` audit.
+ */
+export async function softDeleteStagingFile(
+  db: DatabaseSync,
+  options: DeleteStagingFileInput & {
+    readonly stagingDir: string;
+    readonly fileOps?: IngestionFileOps | undefined;
+    readonly now?: (() => Date) | undefined;
+  },
+): Promise<DeleteStagingFileResult> {
+  const fileOps = options.fileOps ?? defaultIngestionFileOps;
+  const nowFn = options.now ?? (() => new Date());
+  const stagingDir = options.stagingDir.trim();
+  if (!stagingDir) {
+    return { ok: false, code: 'INVALID_UNC_ROOT', message: 'Staging directory is not configured.' };
+  }
+  if (options.manifestId === undefined && options.relativePath === undefined) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'Either manifestId or relativePath is required.' };
+  }
+  if (!Number.isInteger(options.expectedFileSize) || options.expectedFileSize < 0) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'expectedFileSize must be a non-negative integer.' };
+  }
+
+  const winStyle = isWindowsStylePath(stagingDir);
+  let manifestFromId: IngestionManifest | null = null;
+  let pathFromManifest: string | null = null;
+  if (options.manifestId !== undefined) {
+    if (!Number.isInteger(options.manifestId) || options.manifestId <= 0) {
+      return { ok: false, code: 'INVALID_INPUT', message: 'manifestId must be a positive integer.' };
+    }
+    manifestFromId = getIngestionManifestById(db, options.manifestId);
+    if (!manifestFromId) {
+      return { ok: false, code: 'MANIFEST_NOT_FOUND', message: `Manifest #${options.manifestId} not found.` };
+    }
+    if (manifestFromId.state === 'indexed' || manifestFromId.indexedMediaId !== null) {
+      return { ok: false, code: 'ALREADY_INDEXED', message: `Manifest #${manifestFromId.id} is already indexed and cannot be deleted from staging.` };
+    }
+    try {
+      validateStagingPath(stagingDir, manifestFromId.tempPath);
+    } catch (err) {
+      return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: err instanceof Error ? err.message : String(err) };
+    }
+    pathFromManifest = manifestFromId.tempPath;
+  }
+
+  let pathFromRelative: string | null = null;
+  if (options.relativePath !== undefined) {
+    try {
+      pathFromRelative = resolveStagingRelativePath(stagingDir, options.relativePath);
+    } catch (err) {
+      return { ok: false, code: 'PATH_TRAVERSAL_REJECTED', message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  if (pathFromManifest !== null && pathFromRelative !== null) {
+    if (normalizePathForCompare(pathFromManifest, winStyle) !== normalizePathForCompare(pathFromRelative, winStyle)) {
+      return {
+        ok: false,
+        code: 'PATH_MISMATCH',
+        message: 'manifestId and relativePath refer to different staging files.',
+      };
+    }
+  }
+
+  const sourcePath = pathFromManifest ?? pathFromRelative!;
+  const relFromStaging = (winStyle
+    ? path.win32.relative(path.win32.resolve(stagingDir), path.win32.resolve(sourcePath))
+    : path.relative(path.resolve(stagingDir), path.resolve(sourcePath))
+  ).replace(/\\/g, '/');
+  const relSegments = relFromStaging.split('/').filter(Boolean);
+  if (relSegments.length === 0 || relSegments.some((seg) => seg.startsWith('.'))) {
+    return {
+      ok: false,
+      code: 'PATH_TRAVERSAL_REJECTED',
+      message: `Refused to delete hidden or .trash path inside stagingDir: ${relFromStaging}`,
+    };
+  }
+
+  // Match all manifests for this exact filesystem path (never bare basename).
+  const normalizedSource = normalizePathForCompare(sourcePath, winStyle);
+  const allManifestRows = db.prepare('SELECT * FROM ingestion_manifests').all() as Array<Record<string, unknown>>;
+  const matchingManifests = allManifestRows
+    .map(mapManifestRow)
+    .filter((m) => normalizePathForCompare(m.tempPath, winStyle) === normalizedSource);
+
+  for (const m of matchingManifests) {
+    if (m.state === 'indexed' || m.indexedMediaId !== null) {
+      return { ok: false, code: 'ALREADY_INDEXED', message: `Manifest #${m.id} is already indexed and cannot be deleted.` };
+    }
+    const activeTask = findManifestTask(db, m.id);
+    if (activeTask) {
+      return { ok: false, code: 'IN_PROGRESS', message: `Task #${activeTask.id} currently freezes this staging file.` };
+    }
+  }
+
+  // Check indexed media_files independently of manifest state.
+  const mediaRows = db
+    .prepare(
+      `SELECT mf.id, mf.relative_path, mr.canonical_unc_root
+       FROM media_files mf
+       JOIN media_roots mr ON mr.id = mf.root_id`,
+    )
+    .all() as Array<{ id: number; relative_path: string; canonical_unc_root: string }>;
+  for (const row of mediaRows) {
+    const mediaAbs = isWindowsStylePath(row.canonical_unc_root)
+      ? path.win32.resolve(row.canonical_unc_root, ...row.relative_path.replace(/\\/g, '/').split('/').filter(Boolean))
+      : path.resolve(row.canonical_unc_root, ...row.relative_path.replace(/\\/g, '/').split('/').filter(Boolean));
+    if (normalizePathForCompare(mediaAbs, winStyle) === normalizedSource) {
+      return { ok: false, code: 'ALREADY_INDEXED', message: `File matches indexed library media #${row.id} and cannot be deleted from staging.` };
+    }
+  }
+
+  // Prepare and validate .trash FIRST so source containment and size checks run immediately before the move.
+  const trashDir = winStyle ? path.win32.join(stagingDir, '.trash') : path.join(stagingDir, '.trash');
+  try {
+    await fileOps.ensureDir(trashDir);
+    if (fileOps === defaultIngestionFileOps) {
+      const trashCheck = await verifyLocalFilesystemContainment(stagingDir, trashDir, false);
+      if (!trashCheck.ok) {
+        return { ok: false, code: trashCheck.code, message: trashCheck.message };
+      }
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      code: 'TRASH_MOVE_FAILED',
+      message: `Failed to prepare .trash directory: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  // Enforce real filesystem containment + exact size immediately before the move (minimizing TOCTOU window).
+  let actualSize: number;
+  if (fileOps === defaultIngestionFileOps) {
+    const containment = await verifyLocalFilesystemContainment(stagingDir, sourcePath, true);
+    if (!containment.ok) {
+      return { ok: false, code: containment.code, message: containment.message };
+    }
+    actualSize = containment.fileSize ?? (await fileOps.statSize(sourcePath));
+  } else {
+    if (!(await fileOps.exists(sourcePath))) {
+      return { ok: false, code: 'FILE_NOT_FOUND', message: `Staging file not found: ${relFromStaging}` };
+    }
+    actualSize = await fileOps.statSize(sourcePath);
+  }
+
+  if (actualSize !== options.expectedFileSize) {
+    return {
+      ok: false,
+      code: 'FILE_CHANGED',
+      message: `Staging file size changed since confirmation (expected ${options.expectedFileSize} bytes, found ${actualSize} bytes). Refresh and confirm again.`,
+    };
+  }
+
+  const basename = winStyle ? path.win32.basename(sourcePath) : path.basename(sourcePath);
+  const ext = path.extname(basename);
+  const stem = basename.slice(0, basename.length - ext.length);
+  const stamp = nowFn().toISOString().replace(/[:.]/g, '-');
+
+  let trashPath = '';
+  let trashRelativePath = '';
+  let moved = false;
+  let lastMoveError: unknown = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const trashName = `${stem}.${stamp}-${crypto.randomBytes(4).toString('hex')}${ext}`;
+    trashPath = winStyle ? path.win32.join(trashDir, trashName) : path.join(trashDir, trashName);
+    trashRelativePath = `.trash/${trashName}`;
+    const moveRes = await moveFileNoOverwrite(sourcePath, trashPath, fileOps);
+    if (moveRes.ok) {
+      moved = true;
+      break;
+    }
+    lastMoveError = moveRes.error;
+    if (!moveRes.collision) {
+      break;
+    }
+  }
+  if (!moved) {
+    return {
+      ok: false,
+      code: 'TRASH_MOVE_FAILED',
+      message: `Failed to move staging file to .trash: ${lastMoveError instanceof Error ? lastMoveError.message : String(lastMoveError)}`,
+    };
+  }
+
+  const manifestIds = matchingManifests.map((m) => m.id);
+  const auditOutcome = runMutation(
+    db,
+    'staging.soft_delete',
+    (env) => {
+      for (const id of manifestIds) {
+        env.db.prepare('DELETE FROM ingestion_manifests WHERE id = ?').run(id);
+      }
+      return {
+        payload: {
+          filename: basename,
+          relativePath: relFromStaging,
+          trashRelativePath,
+          fileSize: actualSize,
+          manifestIds,
+        },
+        result: { deletedManifestIds: manifestIds, trashRelativePath },
+      };
+    },
+    { now: nowFn },
+  );
+
+  if (!auditOutcome.ok) {
+    // Roll back the filesystem move so a DB failure never leaves an unaudited orphan in .trash.
+    const rollback = await moveFileNoOverwrite(trashPath, sourcePath, fileOps);
+    if (rollback.ok) {
+      return {
+        ok: false,
+        code: 'TRASH_MOVE_FAILED',
+        message: `DB cleanup/audit failed; rolled back file to original staging path: ${auditOutcome.message}`,
+      };
+    }
+    return {
+      ok: false,
+      code: 'TRASH_MOVE_FAILED',
+      message: `File moved to ${trashRelativePath}, DB cleanup/audit failed (${auditOutcome.message}), and rollback failed (${rollback.error instanceof Error ? rollback.error.message : String(rollback.error)}).`,
+      trashRelativePath,
+      fileSize: actualSize,
+    };
+  }
+
+  return {
+    ok: true,
+    message: `Moved '${basename}' to ${trashRelativePath}.`,
+    deletedManifestId: manifestFromId?.id ?? manifestIds[0] ?? null,
+    trashRelativePath,
+    fileSize: actualSize,
+  };
 }

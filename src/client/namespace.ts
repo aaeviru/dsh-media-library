@@ -8,6 +8,8 @@ import type {
   CreateTagInput,
   DeletePerformerAliasInput,
   DeletePerformerAliasResult,
+  DeleteStagingFileInput,
+  DeleteStagingFileResult,
   ExportMappingReportInput,
   ExportMappingReportResult,
   FetchedMetadataCandidate,
@@ -82,6 +84,7 @@ export interface MediaLibraryNamespace {
   commitIngestion: (input: CommitIngestionInput) => Promise<RemoteResult<CommitIngestionResult>>;
   reconcileIngestion: () => Promise<RemoteResult<ReconcileIngestionResult>>;
   openStagingFile: (input: OpenStagingFileInput) => Promise<RemoteResult<MediaActionResult>>;
+  deleteStagingFile: (input: DeleteStagingFileInput) => Promise<RemoteResult<DeleteStagingFileResult>>;
   previewManifestPerformers: (input: PreviewManifestPerformersInput) => Promise<RemoteResult<ManifestPerformerPreview>>;
   listPerformerAliases: () => Promise<RemoteResult<PerformerAliasRecord[]>>;
   upsertPerformerAlias: (input: UpsertPerformerAliasInput) => Promise<RemoteResult<UpsertPerformerAliasResult>>;

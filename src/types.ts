@@ -504,6 +504,34 @@ export interface OpenStagingFileInput {
   readonly relativePath: string;
 }
 
+export type DeleteStagingFileErrorCode =
+  | 'INVALID_INPUT'
+  | 'MANIFEST_NOT_FOUND'
+  | 'PATH_MISMATCH'
+  | 'PATH_TRAVERSAL_REJECTED'
+  | 'INVALID_UNC_ROOT'
+  | 'ALREADY_INDEXED'
+  | 'IN_PROGRESS'
+  | 'FILE_NOT_FOUND'
+  | 'FILE_CHANGED'
+  | 'READ_ONLY_DEGRADED'
+  | 'TRASH_MOVE_FAILED';
+
+export interface DeleteStagingFileInput {
+  readonly manifestId?: number | undefined;
+  readonly relativePath?: string | undefined;
+  readonly expectedFileSize: number;
+}
+
+export interface DeleteStagingFileResult {
+  readonly ok: boolean;
+  readonly code?: DeleteStagingFileErrorCode | undefined;
+  readonly message: string;
+  readonly deletedManifestId?: number | null | undefined;
+  readonly trashRelativePath?: string | undefined;
+  readonly fileSize?: number | undefined;
+}
+
 export interface CommitIngestionResult {
   readonly activeTask?: IngestionTask | undefined;
   readonly ok: boolean;

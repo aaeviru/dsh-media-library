@@ -21,6 +21,7 @@ import {
   reconcileIngestionManifests,
   reviewIngestionManifest,
   scanStagingDirectory,
+  softDeleteStagingFile,
   startIngestionTask,
   type IngestionFileOps,
 } from '../../src/ingestion/index.ts';
@@ -1061,6 +1062,323 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
       } finally {
         db.close();
       }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Issue #26: soft-deletes unindexed staged files to temp/.trash with audit, collision safety, containment, and authorization guards', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ingest-issue26-'));
+    try {
+      const stagingDir = path.join(tmpDir, 'staging');
+      const outsideDir = path.join(tmpDir, 'outside');
+      fs.mkdirSync(path.join(stagingDir, 'sub'), { recursive: true });
+      fs.mkdirSync(outsideDir, { recursive: true });
+      const dbPath = path.join(tmpDir, 'library.sqlite3');
+      const fixedNow = () => new Date('2026-11-24T01:00:00.000Z');
+
+      const service = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        configuredUncRoot: '\\\\NAS\\RealShare',
+        configuredStagingDir: stagingDir,
+        autoDailyBackup: false,
+        now: fixedNow,
+      });
+      await service.initialize();
+
+      // 1. Happy path with manifest + performer_review_queue cascade + mutation_log audit
+      const fileA = path.join(stagingDir, 'sub', 'clip-a.mp4');
+      const payloadA = 'video-payload-a-12345';
+      fs.writeFileSync(fileA, payloadA);
+
+      const scan1 = await service.scanStagingFiles();
+      assert.equal(scan1.ok, true);
+      assert.equal(scan1.files.length, 1);
+
+      const reviewA = await service.reviewIngestion({
+        relativePath: 'sub/clip-a.mp4',
+        decision: 'rejected',
+      });
+      assert.equal(reviewA.ok, true);
+      const manifestA = reviewA.manifest!;
+
+      // Seed a performer_review_queue row on manifestA to verify FK cascade deletion
+      const dbSeed = new DatabaseSync(dbPath);
+      try {
+        dbSeed
+          .prepare(
+            `INSERT INTO performer_review_queue (
+               manifest_id, raw_name, normalized_name, reason, candidate_tag_ids_json, status, created_at, updated_at
+             ) VALUES (?, 'Temp Actress', 'temp actress', 'unknown', '[]', 'pending', ?, ?)`,
+          )
+          .run(manifestA.id, fixedNow().toISOString(), fixedNow().toISOString());
+      } finally {
+        dbSeed.close();
+      }
+
+      // 1a. Reject FILE_CHANGED when expectedFileSize does not match
+      const changedRes = await service.deleteStagingFile({
+        manifestId: manifestA.id,
+        relativePath: 'sub/clip-a.mp4',
+        expectedFileSize: payloadA.length + 99,
+      });
+      assert.equal(changedRes.ok, false);
+      assert.equal(changedRes.code, 'FILE_CHANGED');
+      assert.equal(fs.existsSync(fileA), true);
+
+      // 1b. Reject PATH_MISMATCH when manifestId and relativePath disagree
+      const fileB = path.join(stagingDir, 'clip-b.mkv');
+      fs.writeFileSync(fileB, 'video-payload-b');
+      const mismatchRes = await service.deleteStagingFile({
+        manifestId: manifestA.id,
+        relativePath: 'clip-b.mkv',
+        expectedFileSize: payloadA.length,
+      });
+      assert.equal(mismatchRes.ok, false);
+      assert.equal(mismatchRes.code, 'PATH_MISMATCH');
+
+      // 1c. Reject raw tempPath payload
+      const rawTempRes = await service.deleteStagingFile({
+        relativePath: 'sub/clip-a.mp4',
+        expectedFileSize: payloadA.length,
+        tempPath: fileA,
+      } as unknown as { relativePath: string; expectedFileSize: number });
+      assert.equal(rawTempRes.ok, false);
+      assert.equal(rawTempRes.code, 'PATH_TRAVERSAL_REJECTED');
+
+      // 1d. Perform soft-delete of fileA
+      const delA = await service.deleteStagingFile({
+        manifestId: manifestA.id,
+        relativePath: 'sub/clip-a.mp4',
+        expectedFileSize: payloadA.length,
+      });
+      assert.equal(delA.ok, true, `Expected soft-delete to succeed, got: ${JSON.stringify(delA)}`);
+      assert.equal(delA.deletedManifestId, manifestA.id);
+      assert.match(delA.trashRelativePath ?? '', /^\.trash\/clip-a\.2026-11-24T01-00-00-000Z-[0-9a-f]{8}\.mp4$/);
+      assert.equal(fs.existsSync(fileA), false);
+      assert.equal(fs.existsSync(path.join(stagingDir, delA.trashRelativePath!)), true);
+
+      // Verify manifest deleted, performer_review_queue cascaded, and mutation_log recorded
+      const dbCheck = new DatabaseSync(dbPath);
+      try {
+        const mRow = dbCheck.prepare('SELECT id FROM ingestion_manifests WHERE id = ?').get(manifestA.id);
+        assert.equal(mRow, undefined);
+        const pqCount = Number(
+          (dbCheck.prepare('SELECT COUNT(*) AS c FROM performer_review_queue WHERE manifest_id = ?').get(manifestA.id) as { c: number }).c,
+        );
+        assert.equal(pqCount, 0);
+        const auditRow = dbCheck
+          .prepare(`SELECT action, payload_json FROM mutation_log WHERE action = 'staging.soft_delete' ORDER BY id DESC LIMIT 1`)
+          .get() as { action: string; payload_json: string } | undefined;
+        assert.ok(auditRow, 'Expected staging.soft_delete audit row in mutation_log');
+        assert.match(auditRow.payload_json, /clip-a\.mp4/);
+      } finally {
+        dbCheck.close();
+      }
+
+      // 2. Collision-proof .trash naming at identical timestamp + no-manifest staged file
+      const fileA2 = path.join(stagingDir, 'clip-a.mp4');
+      fs.writeFileSync(fileA2, 'second-clip-a');
+      const delA2 = await service.deleteStagingFile({
+        relativePath: 'clip-a.mp4',
+        expectedFileSize: 'second-clip-a'.length,
+      });
+      assert.equal(delA2.ok, true);
+      assert.equal(delA2.deletedManifestId, null);
+      assert.match(delA2.trashRelativePath ?? '', /^\.trash\/clip-a\.2026-11-24T01-00-00-000Z-[0-9a-f]{8}\.mp4$/);
+      assert.notEqual(delA2.trashRelativePath, delA.trashRelativePath);
+      assert.equal(fs.existsSync(path.join(stagingDir, delA2.trashRelativePath!)), true);
+
+      // 3. Staging Scan ignores .trash directory (only clip-b.mkv remains visible)
+      const scanAfter = await service.scanStagingFiles();
+      assert.equal(scanAfter.ok, true);
+      assert.deepEqual(
+        scanAfter.files.map((f) => f.filename),
+        ['clip-b.mkv'],
+      );
+
+      // 4. Security containment: traversal, .trash target, non-video, and symlink escape
+      const secretOutside = path.join(outsideDir, 'secret.mp4');
+      fs.writeFileSync(secretOutside, 'secret-video');
+      const symlinkPath = path.join(stagingDir, 'escape-link.mp4');
+      fs.symlinkSync(secretOutside, symlinkPath);
+      const nonVideoPath = path.join(stagingDir, 'notes.txt');
+      fs.writeFileSync(nonVideoPath, 'not a video');
+
+      for (const badRel of ['../outside/secret.mp4', delA.trashRelativePath!, 'notes.txt', 'escape-link.mp4']) {
+        const res = await service.deleteStagingFile({ relativePath: badRel, expectedFileSize: 12 });
+        assert.equal(res.ok, false, `Expected rejection for ${badRel}`);
+        assert.equal(res.code, 'PATH_TRAVERSAL_REJECTED', `Expected PATH_TRAVERSAL_REJECTED for ${badRel}, got ${res.code}`);
+      }
+      assert.equal(fs.existsSync(secretOutside), true, 'Outside symlink target must remain untouched');
+
+      // 5. Reject ALREADY_INDEXED (via manifest state AND via media_files) and IN_PROGRESS (via ingestion_tasks)
+      const indexedFile = path.join(stagingDir, 'already-indexed.mp4');
+      fs.writeFileSync(indexedFile, 'indexed-bytes');
+      const frozenFile = path.join(stagingDir, 'frozen.mp4');
+      fs.writeFileSync(frozenFile, 'frozen-bytes');
+      const revFrozen = await service.reviewIngestion({ relativePath: 'frozen.mp4', decision: 'rejected' });
+      assert.equal(revFrozen.ok, true);
+
+      const dbGuards = new DatabaseSync(dbPath);
+      try {
+        // Insert an indexed manifest for already-indexed.mp4
+        dbGuards
+          .prepare(
+            `INSERT INTO ingestion_manifests (
+               source_id, temp_path, filename, checksum_sha256, file_size, target_root_id, target_relative_path,
+               review_decision, state, created_at, updated_at
+             ) VALUES ('src-indexed-1', ?, 'already-indexed.mp4', '', ?, 'nas-main', 'ingested/already-indexed.mp4', 'approved', 'indexed', ?, ?)`,
+          )
+          .run(indexedFile, 'indexed-bytes'.length, fixedNow().toISOString(), fixedNow().toISOString());
+
+        // Also seed a media_files row pointing directly to a file in stagingDir (with NO manifest) to verify independent media_files check
+        const mediaIndexedFile = path.join(stagingDir, 'direct-media.mp4');
+        fs.writeFileSync(mediaIndexedFile, 'direct-media-bytes');
+        dbGuards
+          .prepare(
+            `INSERT INTO media_roots (id, name, canonical_unc_root, enabled, created_at)
+             VALUES ('local-staging-root', 'Local Staging', ?, 1, ?)`,
+          )
+          .run(stagingDir, fixedNow().toISOString());
+        dbGuards
+          .prepare(
+            `INSERT INTO media_files (
+               root_id, relative_path, filename, extension, added_at, file_size, status, source_key, revision
+             ) VALUES ('local-staging-root', 'direct-media.mp4', 'direct-media.mp4', '.mp4', ?, ?, 'indexed', 'test:direct-media', 1)`,
+          )
+          .run(fixedNow().toISOString(), 'direct-media-bytes'.length);
+
+        const directMediaRes = await softDeleteStagingFile(dbGuards, {
+          relativePath: 'direct-media.mp4',
+          expectedFileSize: 'direct-media-bytes'.length,
+          stagingDir,
+          now: fixedNow,
+        });
+        assert.equal(directMediaRes.ok, false);
+        assert.equal(directMediaRes.code, 'ALREADY_INDEXED');
+        assert.equal(fs.existsSync(mediaIndexedFile), true);
+
+        // Start a running task on frozen manifest
+        startIngestionTask(dbGuards, `manifest:${revFrozen.manifest!.id}`, 'fetch', 'Fetching...', fixedNow);
+
+        const idxRes = await softDeleteStagingFile(dbGuards, {
+          relativePath: 'already-indexed.mp4',
+          expectedFileSize: 'indexed-bytes'.length,
+          stagingDir,
+          now: fixedNow,
+        });
+        assert.equal(idxRes.ok, false);
+        assert.equal(idxRes.code, 'ALREADY_INDEXED');
+        assert.equal(fs.existsSync(indexedFile), true);
+
+        const busyRes = await softDeleteStagingFile(dbGuards, {
+          manifestId: revFrozen.manifest!.id,
+          expectedFileSize: 'frozen-bytes'.length,
+          stagingDir,
+          now: fixedNow,
+        });
+        assert.equal(busyRes.ok, false);
+        assert.equal(busyRes.code, 'IN_PROGRESS');
+        assert.equal(fs.existsSync(frozenFile), true);
+
+        // Also test INVALID_INPUT, MANIFEST_NOT_FOUND, FILE_NOT_FOUND
+        assert.equal(
+          (await softDeleteStagingFile(dbGuards, { expectedFileSize: 10, stagingDir, now: fixedNow })).code,
+          'INVALID_INPUT',
+        );
+        assert.equal(
+          (await softDeleteStagingFile(dbGuards, { manifestId: 999999, expectedFileSize: 10, stagingDir, now: fixedNow })).code,
+          'MANIFEST_NOT_FOUND',
+        );
+        assert.equal(
+          (await softDeleteStagingFile(dbGuards, { relativePath: 'missing.mp4', expectedFileSize: 10, stagingDir, now: fixedNow })).code,
+          'FILE_NOT_FOUND',
+        );
+      } finally {
+        dbGuards.close();
+      }
+
+      // 6. Reject READ_ONLY_DEGRADED
+      const degradedService = new MediaLibrarySpikeService({
+        baseDir: tmpDir,
+        dbPath,
+        configuredUncRoot: '\\\\NAS\\RealShare',
+        configuredStagingDir: stagingDir,
+        supportedMaxVersion: 1,
+        autoDailyBackup: false,
+      });
+      const degradedRes = await degradedService.deleteStagingFile({
+        relativePath: 'clip-b.mkv',
+        expectedFileSize: 'video-payload-b'.length,
+      });
+      assert.equal(degradedRes.ok, false);
+      assert.equal(degradedRes.code, 'READ_ONLY_DEGRADED');
+      assert.equal(fs.existsSync(fileB), true);
+
+      // 7. DB audit failure rolls back the moved file back to original staging path so user can retry cleanly
+      const rollbackFile = path.join(stagingDir, 'rollback-test.mp4');
+      fs.writeFileSync(rollbackFile, 'rollback-bytes');
+      const dbRollback = new DatabaseSync(dbPath);
+      try {
+        dbRollback.exec('PRAGMA foreign_keys = OFF');
+        const failRes = await softDeleteStagingFile(dbRollback, {
+          relativePath: 'rollback-test.mp4',
+          expectedFileSize: 'rollback-bytes'.length,
+          stagingDir,
+          now: fixedNow,
+        });
+        assert.equal(failRes.ok, false);
+        assert.equal(failRes.code, 'TRASH_MOVE_FAILED');
+        assert.equal(failRes.trashRelativePath, undefined, 'Rolled-back failure must not leave file in .trash');
+        assert.equal(fs.existsSync(rollbackFile), true, 'File must be restored to original staging path on DB failure');
+
+        // Re-enabling foreign keys allows retry to succeed cleanly
+        dbRollback.exec('PRAGMA foreign_keys = ON');
+        const retryRes = await softDeleteStagingFile(dbRollback, {
+          relativePath: 'rollback-test.mp4',
+          expectedFileSize: 'rollback-bytes'.length,
+          stagingDir,
+          now: fixedNow,
+        });
+        assert.equal(retryRes.ok, true);
+        assert.equal(fs.existsSync(rollbackFile), false);
+      } finally {
+        dbRollback.close();
+      }
+
+      // 8. Same-named staged files in distinct subfolders never share or steal each other's manifest
+      fs.mkdirSync(path.join(stagingDir, 'dir1'), { recursive: true });
+      fs.mkdirSync(path.join(stagingDir, 'dir2'), { recursive: true });
+      const dup1 = path.join(stagingDir, 'dir1', 'same.mp4');
+      const dup2 = path.join(stagingDir, 'dir2', 'same.mp4');
+      fs.writeFileSync(dup1, 'dup-one');
+      fs.writeFileSync(dup2, 'dup-two-longer');
+      const revDup1 = await service.reviewIngestion({ relativePath: 'dir1/same.mp4', decision: 'rejected', title: 'Dir1 Title' });
+      assert.equal(revDup1.ok, true);
+      const dupScan = await service.scanStagingFiles();
+      assert.equal(dupScan.ok, true);
+      const scannedDup1 = dupScan.files.find((f) => f.relativePath === 'dir1/same.mp4');
+      const scannedDup2 = dupScan.files.find((f) => f.relativePath === 'dir2/same.mp4');
+      assert.equal(scannedDup1?.manifestId, revDup1.manifest!.id);
+      assert.equal(scannedDup2?.manifestId, null, 'Second same-named file in another folder must not steal manifestId');
+      // Reviewing dir2/same.mp4 must create its own manifest instead of rebinding dir1's manifest
+      const revDup2 = await service.reviewIngestion({ relativePath: 'dir2/same.mp4', decision: 'rejected', title: 'Dir2 Title' });
+      assert.equal(revDup2.ok, true);
+      assert.notEqual(revDup2.manifest!.id, revDup1.manifest!.id);
+      const delDup2 = await service.deleteStagingFile({
+        manifestId: revDup2.manifest!.id,
+        relativePath: 'dir2/same.mp4',
+        expectedFileSize: 'dup-two-longer'.length,
+      });
+      assert.equal(delDup2.ok, true);
+      assert.equal(fs.existsSync(dup1), true, 'Deleting dir2/same.mp4 must leave dir1/same.mp4 untouched');
+      assert.equal(fs.existsSync(dup2), false);
+      const manifestsAfterDup = await service.listIngestionManifests();
+      const survivingDup1 = manifestsAfterDup.find((m) => m.id === revDup1.manifest!.id);
+      assert.ok(survivingDup1, 'dir1 manifest must remain intact after deleting dir2 sibling');
+      assert.equal(survivingDup1.title, 'Dir1 Title');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

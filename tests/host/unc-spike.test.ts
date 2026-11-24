@@ -290,7 +290,7 @@ describe('MediaLibrarySpikeService Open, Reveal & Error Semantics (B2, B3, B4, B
     );
     assert.equal(validated.package, '@deepseek-ai/dsh-experimental-media-library');
     assert.equal(validated.face, 'host');
-    assert.equal(validated.invocations.length, 35);
+    assert.equal(validated.invocations.length, 36);
     const manifest = TYPERT as {
       invocations: Array<{
         parameters?: Array<{
