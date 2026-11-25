@@ -15,6 +15,7 @@ export interface Config {
   ingestionTargetSubdir: Volatile<string>;
   cmadbBaseUrl: string;
   ppvdbBaseUrl: string;
+  avWikiBaseUrl: Volatile<string>;
   cmadbCookie: Volatile<string>;
   ppvdbCookie: Volatile<string>;
 }
@@ -69,6 +70,10 @@ export const Config = Schema.object({
   ppvdbBaseUrl: Schema.string()
     .default('https://fc2ppvdb.com')
     .description('Fallback metadata provider base URL.'),
+  avWikiBaseUrl: Schema.string()
+    .default('https://av-wiki.net')
+    .description('Metadata provider base URL for standard maker product codes (av-wiki.net).')
+    .volatile(),
   cmadbCookie: Schema.string()
     .default('')
     .description('Optional Cookie header for primary metadata provider.')

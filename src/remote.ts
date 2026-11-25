@@ -85,6 +85,7 @@ export class MediaLibraryRemote extends TypertRemoteService {
       configuredTargetSubdir: () => config.ingestionTargetSubdir.get(),
       cmadbBaseUrl: config.cmadbBaseUrl,
       ppvdbBaseUrl: config.ppvdbBaseUrl,
+      configuredAvWikiBaseUrl: () => config.avWikiBaseUrl.get(),
       configuredCmadbCookie: () => config.cmadbCookie.get(),
       configuredPpvdbCookie: () => config.ppvdbCookie.get(),
       backupRetentionCount: config.backupRetentionCount,

@@ -1,12 +1,17 @@
 export {
   cleanMetadataText,
   MetadataFetcher,
+  parseAvWikiHtml,
   parseCmadbHtml,
   parseFc2Code,
   parsePpvdbHtml,
+  parseStandardProductCode,
+  resolveMetadataLookupRoute,
   type FetchLike,
   type MetadataFetcherOptions,
+  type MetadataLookupRoute,
   type ParsedFc2Code,
+  type ParsedStandardProductCode,
   type ProviderLookupResult,
   type ProviderMetadata,
 } from './metadata-fetcher.ts';
