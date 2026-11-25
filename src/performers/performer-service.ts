@@ -362,15 +362,18 @@ export function previewTagNames(
   if (!Array.isArray(names) || names.length === 0) return [];
   const hasTagsTable = tableExists(db, 'tags');
   const hasAliasesTable = hasTagsTable && tableExists(db, 'tag_aliases');
+  const hasArchivedAt = hasTagsTable && tableHasColumn(db, 'tags', 'archived_at');
+  const activeTagFilter = hasArchivedAt ? 'AND archived_at IS NULL' : '';
+  const activeAliasTagFilter = hasArchivedAt ? 'AND tg.archived_at IS NULL' : '';
   const directStmt = hasTagsTable
-    ? db.prepare('SELECT id, name FROM tags WHERE normalized_name = ? AND archived_at IS NULL LIMIT 1')
+    ? db.prepare(`SELECT id, name FROM tags WHERE normalized_name = ? ${activeTagFilter} LIMIT 1`)
     : null;
   const aliasStmt = hasAliasesTable
     ? db.prepare(
         `SELECT tg.id, tg.name
          FROM tag_aliases ta
          JOIN tags tg ON tg.id = ta.tag_id
-         WHERE ta.normalized_alias = ? AND tg.archived_at IS NULL
+         WHERE ta.normalized_alias = ? ${activeAliasTagFilter}
          ORDER BY tg.id ASC
          LIMIT 1`,
       )
@@ -452,6 +455,11 @@ function tableExists(db: DatabaseSync, tableName: string): boolean {
     .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
     .get(tableName);
   return row !== undefined;
+}
+
+function tableHasColumn(db: DatabaseSync, tableName: string, columnName: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+  return rows.some((row) => String(row.name) === columnName);
 }
 
 /**

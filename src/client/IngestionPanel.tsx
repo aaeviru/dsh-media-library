@@ -16,11 +16,14 @@ import type { MediaLibraryNamespace } from './namespace.ts';
 import {
   buildDraftTagRequestKey,
   parseDraftTagNames,
+  pruneTagPreviewEntries,
   removeTagPreviewEntriesByName,
   resolveDraftTagPills,
+  resolveUnresolvedTagStatus,
   TagPreviewRequestTracker,
   toPickedTagPreviewEntry,
   upsertTagPreviewEntry,
+  type LiveTagPreviewStatus,
 } from './tag-draft-preview.ts';
 import { TagPicker } from './ui/TagPicker.tsx';
 import { cx } from './ui/primitives.ts';
@@ -106,6 +109,10 @@ export function IngestionPanel({
   const [tagCandidates, setTagCandidates] = useState<readonly TagSummary[]>([]);
   const [liveTagPreviewEntries, setLiveTagPreviewEntries] = useState<readonly NormalTagPreviewEntry[]>([]);
   const [pickedTagEntries, setPickedTagEntries] = useState<readonly NormalTagPreviewEntry[]>([]);
+  const [liveTagPreviewState, setLiveTagPreviewState] = useState<LiveTagPreviewStatus>({
+    status: 'idle',
+    requestKey: '',
+  });
   const [tagPreviewRefreshTick, setTagPreviewRefreshTick] = useState(0);
   const tagPreviewTrackerRef = useRef<TagPreviewRequestTracker | null>(null);
   if (tagPreviewTrackerRef.current === null) {
@@ -387,11 +394,19 @@ export function IngestionPanel({
     void reloadSelectedPreview();
   }, [reloadSelectedPreview, manifests, performerAliases, pendingQueue]);
 
-  useEffect(() => {
+  const resetTagPreviewCaches = useCallback((scheduleRefresh = false) => {
     tagPreviewTrackerRef.current?.invalidate();
     setLiveTagPreviewEntries([]);
     setPickedTagEntries([]);
-  }, [selectedEntryKey]);
+    setLiveTagPreviewState({ status: 'idle', requestKey: '' });
+    if (scheduleRefresh) {
+      setTagPreviewRefreshTick((tick) => tick + 1);
+    }
+  }, []);
+
+  useEffect(() => {
+    resetTagPreviewCaches(false);
+  }, [selectedEntryKey, resetTagPreviewCaches]);
 
   const serverFallback: DraftFields = useMemo(() => {
     const manifestTags = selected?.manifest?.tags ?? [];
@@ -431,30 +446,50 @@ export function IngestionPanel({
     if (!selectedEntryKey) {
       tracker.invalidate();
       setLiveTagPreviewEntries([]);
+      setPickedTagEntries([]);
+      setLiveTagPreviewState({ status: 'idle', requestKey: '' });
       return;
     }
     const names = draftTagListRef.current;
     if (names.length === 0) {
       tracker.invalidate();
       setLiveTagPreviewEntries([]);
+      setPickedTagEntries([]);
+      setLiveTagPreviewState({ status: 'idle', requestKey: '' });
       return;
     }
+    setPickedTagEntries((prev) => pruneTagPreviewEntries(prev, names));
+    setLiveTagPreviewEntries((prev) => pruneTagPreviewEntries(prev, names));
     let cancelled = false;
     const seq = tracker.next();
+    setLiveTagPreviewState({ status: 'pending', requestKey: draftTagRequestKey });
     const timer = setTimeout(() => {
       void mediaLibrary
         .previewTagNames({ names })
         .then((res) => {
-          if (cancelled || !tracker.isCurrent(seq) || !res.ok) return;
+          if (cancelled || !tracker.isCurrent(seq)) return;
+          if (!res.ok) {
+            setLiveTagPreviewState({ status: 'unavailable', requestKey: draftTagRequestKey });
+            return;
+          }
           setLiveTagPreviewEntries(res.value);
+          setLiveTagPreviewState({ status: 'ready', requestKey: draftTagRequestKey });
         })
-        .catch(() => undefined);
+        .catch(() => {
+          if (cancelled || !tracker.isCurrent(seq)) return;
+          setLiveTagPreviewState({ status: 'unavailable', requestKey: draftTagRequestKey });
+        });
     }, 150);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
   }, [mediaLibrary, selectedEntryKey, draftTagRequestKey, tagPreviewRefreshTick]);
+
+  const unresolvedTagStatus = useMemo(
+    () => resolveUnresolvedTagStatus(liveTagPreviewState, draftTagRequestKey),
+    [liveTagPreviewState, draftTagRequestKey],
+  );
 
   const sortedTagPills = useMemo(
     () =>
@@ -464,8 +499,17 @@ export function IngestionPanel({
         selectedManifestId,
         pickedTagEntries,
         liveTagPreviewEntries,
+        unresolvedStatus: unresolvedTagStatus,
       }),
-    [draftTagList, selected, performerPreview, selectedManifestId, pickedTagEntries, liveTagPreviewEntries],
+    [
+      draftTagList,
+      selected,
+      performerPreview,
+      selectedManifestId,
+      pickedTagEntries,
+      liveTagPreviewEntries,
+      unresolvedTagStatus,
+    ],
   );
 
   const removeDraftTag = useCallback(
@@ -620,12 +664,16 @@ export function IngestionPanel({
         clearDraft(`m:${res.value.manifest.id}`);
         setSelectedKey(`m:${res.value.manifest.id}`);
       }
+      resetTagPreviewCaches(false);
+      performerPreviewTrackerRef.current?.invalidate();
+      setPerformerPreview(null);
       if (res.value.ok) {
         setMessage(`Fetched from ${res.value.provider}: ${res.value.title ?? ''}`);
       } else {
         setError(`[${res.value.category}] ${res.value.reason}`);
       }
       await reloadServerState();
+      setTagPreviewRefreshTick((tick) => tick + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -650,6 +698,7 @@ export function IngestionPanel({
     }
     clearDraft(entry.key);
     clearDraft(`m:${manifest.id}`);
+    resetTagPreviewCaches(true);
     setSelectedKey(`m:${manifest.id}`);
     return manifest;
   };
@@ -921,14 +970,26 @@ export function IngestionPanel({
                             ? t('tagPreviewExisting')
                             : matchedVia === 'alias'
                               ? `${t('tagPreviewAlias')}→${matchedTagName ?? ''}`
-                              : `+ ${t('tagPreviewNew')}`;
+                              : matchedVia === 'new'
+                                ? `+ ${t('tagPreviewNew')}`
+                                : matchedVia === 'unavailable'
+                                  ? t('tagPreviewUnavailable')
+                                  : t('tagPreviewPending');
+                        const pillToneClass =
+                          matchedVia === 'name' || matchedVia === 'alias'
+                            ? css.pillChipSuccess
+                            : matchedVia === 'new'
+                              ? css.pillChipWarnDashed
+                              : undefined;
                         return (
                           <span
                             key={`${tagName}-${idx}`}
+                            data-tag-name={tagName}
+                            data-match-state={matchedVia}
                             className={cx(
                               css.pillChip,
                               css.pillChipStatic,
-                              matchedVia === 'new' ? css.pillChipWarnDashed : css.pillChipSuccess,
+                              pillToneClass,
                             )}
                           >
                             <span>{tagName}</span>

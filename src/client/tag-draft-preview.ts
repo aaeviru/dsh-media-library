@@ -6,6 +6,15 @@ import {
   type TagSummary,
 } from '../types.ts';
 
+export type DraftTagMatchState = 'name' | 'alias' | 'new' | 'pending' | 'unavailable';
+
+export type DraftTagResolutionState = 'idle' | 'pending' | 'ready' | 'unavailable';
+
+export interface LiveTagPreviewStatus {
+  readonly status: DraftTagResolutionState;
+  readonly requestKey: string;
+}
+
 export interface ResolvedTagMatch {
   readonly matchedTagId: number | null;
   readonly matchedTagName: string | null;
@@ -17,7 +26,7 @@ export interface DraftTagPill {
   readonly idx: number;
   readonly matchedTagId: number | null;
   readonly matchedTagName: string | null;
-  readonly matchedVia: 'name' | 'alias' | 'new';
+  readonly matchedVia: DraftTagMatchState;
 }
 
 export interface MergeTagPreviewSourcesInput {
@@ -26,13 +35,43 @@ export interface MergeTagPreviewSourcesInput {
   readonly selectedManifestId?: number | null | undefined;
   readonly pickedTagEntries?: readonly NormalTagPreviewEntry[] | undefined;
   readonly liveTagPreviewEntries?: readonly NormalTagPreviewEntry[] | undefined;
+  readonly unresolvedStatus?: 'pending' | 'unavailable' | undefined;
 }
 
 /**
- * Ordering priority for tag preview pills: existing direct match -> alias match -> new tag.
+ * Ordering priority for tag preview pills:
+ * existing direct match -> alias match -> confirmed new tag -> pending -> unavailable.
  */
-export function rankTagMatch(via: NormalTagPreviewEntry['matchedVia']): number {
-  return via === 'name' ? 0 : via === 'alias' ? 1 : 2;
+export function rankTagMatch(via: DraftTagMatchState): number {
+  switch (via) {
+    case 'name':
+      return 0;
+    case 'alias':
+      return 1;
+    case 'new':
+      return 2;
+    case 'pending':
+      return 3;
+    case 'unavailable':
+      return 4;
+  }
+}
+
+/**
+ * Determine the display state for draft tags not yet present in any confirmed preview source.
+ * Reserves `'new'` strictly for confirmed misses returned by Host preview endpoints.
+ */
+export function resolveUnresolvedTagStatus(
+  liveState: LiveTagPreviewStatus,
+  currentRequestKey: string,
+): 'pending' | 'unavailable' {
+  if (
+    liveState.requestKey === currentRequestKey &&
+    (liveState.status === 'unavailable' || liveState.status === 'ready')
+  ) {
+    return 'unavailable';
+  }
+  return 'pending';
 }
 
 /**
@@ -104,6 +143,25 @@ export function removeTagPreviewEntriesByName(
 }
 
 /**
+ * Keep only preview entries whose normalized name is still present in `activeNames`.
+ * Returns `entries` unchanged when nothing was pruned to avoid redundant state updates.
+ */
+export function pruneTagPreviewEntries(
+  entries: readonly NormalTagPreviewEntry[],
+  activeNames: readonly string[],
+): readonly NormalTagPreviewEntry[] {
+  if (entries.length === 0) return entries;
+  if (activeNames.length === 0) return [];
+  const activeKeys = new Set<string>();
+  for (const name of activeNames) {
+    const key = normalizeTagName(name);
+    if (key) activeKeys.add(key);
+  }
+  const next = entries.filter((item) => activeKeys.has(normalizeTagName(item.rawName)));
+  return next.length === entries.length ? entries : next;
+}
+
+/**
  * Merge preview sources with strict precedence (low -> high):
  * 1. `manifestTags` (only entries with `tagId !== undefined`)
  * 2. `performerPreview.normalTags` (gated on `performerPreview.manifestId === selectedManifestId`)
@@ -170,18 +228,22 @@ export function buildResolvedTagPreviewMap(
 
 /**
  * Resolve each draft tag name against merged preview sources and sort stably:
- * `'name'` -> `'alias'` -> `'new'`, preserving original draft order within each group.
+ * `'name'` -> `'alias'` -> `'new'` -> `'pending'` -> `'unavailable'`,
+ * preserving original draft order within each group.
+ * Names absent from all confirmed sources default to `unresolvedStatus` (`'pending'` by default),
+ * reserving `'new'` strictly for confirmed misses.
  */
 export function resolveDraftTagPills(
   draftTagNames: readonly string[],
   sources: MergeTagPreviewSourcesInput,
 ): DraftTagPill[] {
   const resolvedMap = buildResolvedTagPreviewMap(sources);
+  const fallbackState: 'pending' | 'unavailable' = sources.unresolvedStatus ?? 'pending';
   return draftTagNames
     .map((tagName, idx) => {
       const key = normalizeTagName(tagName);
       const info = key ? resolvedMap.get(key) : undefined;
-      const matchedVia: 'name' | 'alias' | 'new' = info?.matchedVia ?? 'new';
+      const matchedVia: DraftTagMatchState = info?.matchedVia ?? fallbackState;
       return {
         tagName,
         idx,

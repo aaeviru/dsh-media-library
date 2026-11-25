@@ -3,8 +3,10 @@ import { describe, it } from 'node:test';
 import {
   buildDraftTagRequestKey,
   parseDraftTagNames,
+  pruneTagPreviewEntries,
   removeTagPreviewEntriesByName,
   resolveDraftTagPills,
+  resolveUnresolvedTagStatus,
   TagPreviewRequestTracker,
   toPickedTagPreviewEntry,
   upsertTagPreviewEntry,
@@ -148,7 +150,8 @@ describe('Client tag-draft-preview helper (Issue #71 B1..B3)', () => {
     const archivedEntry = toPickedTagPreviewEntry(makeTagSummary({ id: 8, name: 'OldTag', archived: true }));
     assert.equal(archivedEntry, null);
 
-    // Even with no manifest yet (selectedManifestId === null), picked tag immediately renders as 'name'
+    // Even with no manifest yet (selectedManifestId === null), picked tag immediately renders as 'name',
+    // while unresolved manually typed tags show 'pending' instead of falsely claiming '+ new'.
     const noManifestPills = resolveDraftTagPills(['Outdoor', 'BrandNew'], {
       selectedManifestId: null,
       pickedTagEntries: activeEntry ? [activeEntry] : [],
@@ -156,7 +159,7 @@ describe('Client tag-draft-preview helper (Issue #71 B1..B3)', () => {
     assert.equal(noManifestPills[0]?.tagName, 'Outdoor');
     assert.equal(noManifestPills[0]?.matchedVia, 'name');
     assert.equal(noManifestPills[1]?.tagName, 'BrandNew');
-    assert.equal(noManifestPills[1]?.matchedVia, 'new');
+    assert.equal(noManifestPills[1]?.matchedVia, 'pending');
 
     // Re-picking a tag that was previously cached as 'new' in liveTagPreviewEntries
     const staleLive: NormalTagPreviewEntry[] = [
@@ -194,7 +197,7 @@ describe('Client tag-draft-preview helper (Issue #71 B1..B3)', () => {
       selectedManifestId: 10,
     });
     assert.equal(gatedPills.find((p) => p.tagName === 'TagA')?.matchedVia, 'name');
-    assert.equal(gatedPills.find((p) => p.tagName === 'ForeignOnly')?.matchedVia, 'new');
+    assert.equal(gatedPills.find((p) => p.tagName === 'ForeignOnly')?.matchedVia, 'pending');
 
     // Matching manifestId: Tier 1 (manifest.tags) < Tier 2 (performerPreview) < Tier 3 (picked) < Tier 4 (live)
     const matchingPreview = makePerformerPreview(10, [
@@ -240,9 +243,9 @@ describe('Client tag-draft-preview helper (Issue #71 B1..B3)', () => {
     assert.equal(merged.find((p) => p.tagName === 'TagC')?.matchedVia, 'new');
   });
 
-  it('B3: sorts pills stably (name -> alias -> new) while preserving original draft idx and builds stable request keys', () => {
-    const draft = parseDraftTagNames(' NewOne , AliasOne , NameOne , NewTwo , AliasTwo , NameTwo , ');
-    assert.deepEqual(draft, ['NewOne', 'AliasOne', 'NameOne', 'NewTwo', 'AliasTwo', 'NameTwo']);
+  it('B3: sorts pills stably (name -> alias -> new -> pending -> unavailable) while preserving original draft idx and builds stable request keys', () => {
+    const draft = parseDraftTagNames(' NewOne , AliasOne , NameOne , NewTwo , AliasTwo , NameTwo , PendingOne , ');
+    assert.deepEqual(draft, ['NewOne', 'AliasOne', 'NameOne', 'NewTwo', 'AliasTwo', 'NameTwo', 'PendingOne']);
 
     const pills = resolveDraftTagPills(draft, {
       liveTagPreviewEntries: [
@@ -250,6 +253,8 @@ describe('Client tag-draft-preview helper (Issue #71 B1..B3)', () => {
         { rawName: 'NameTwo', matchedTagId: 2, matchedTagName: 'NameTwo', matchedVia: 'name' },
         { rawName: 'AliasOne', matchedTagId: 11, matchedTagName: 'Canon1', matchedVia: 'alias' },
         { rawName: 'AliasTwo', matchedTagId: 12, matchedTagName: 'Canon2', matchedVia: 'alias' },
+        { rawName: 'NewOne', matchedTagId: null, matchedTagName: null, matchedVia: 'new' },
+        { rawName: 'NewTwo', matchedTagId: null, matchedTagName: null, matchedVia: 'new' },
       ],
     });
 
@@ -262,6 +267,7 @@ describe('Client tag-draft-preview helper (Issue #71 B1..B3)', () => {
         { tagName: 'AliasTwo', idx: 4, matchedVia: 'alias' },
         { tagName: 'NewOne', idx: 0, matchedVia: 'new' },
         { tagName: 'NewTwo', idx: 3, matchedVia: 'new' },
+        { tagName: 'PendingOne', idx: 6, matchedVia: 'pending' },
       ],
     );
 
@@ -271,6 +277,64 @@ describe('Client tag-draft-preview helper (Issue #71 B1..B3)', () => {
       buildDraftTagRequestKey(['High   Res', 'outdoor', 'HIGH RES', '   ']),
       buildDraftTagRequestKey(['high res', 'OUTDOOR']),
     );
+  });
+
+  it('reserves new strictly for confirmed misses and reports pending/unavailable for unresolved names', () => {
+    const reqKey = buildDraftTagRequestKey(['ExistingUnseen', 'ConfirmedNew']);
+
+    // During debounce or in-flight RPC: unresolved names must show 'pending', never 'new'
+    const duringPending = resolveDraftTagPills(['ExistingUnseen'], {
+      unresolvedStatus: resolveUnresolvedTagStatus({ status: 'pending', requestKey: reqKey }, reqKey),
+    });
+    assert.equal(duringPending[0]?.matchedVia, 'pending');
+
+    // Immediately after editing the draft (before useEffect flips status to pending):
+    // previous requestKey does not match currentRequestKey -> still 'pending'
+    const afterEditKey = buildDraftTagRequestKey(['ExistingUnseen', 'AnotherTyped']);
+    assert.equal(
+      resolveUnresolvedTagStatus({ status: 'unavailable', requestKey: reqKey }, afterEditKey),
+      'pending',
+    );
+
+    // If the RPC fails for the current requestKey -> unresolved names display 'unavailable', never 'new'
+    const afterFailure = resolveDraftTagPills(['ExistingUnseen'], {
+      unresolvedStatus: resolveUnresolvedTagStatus({ status: 'unavailable', requestKey: reqKey }, reqKey),
+    });
+    assert.equal(afterFailure[0]?.matchedVia, 'unavailable');
+
+    // Only a confirmed miss from Host previewTagNames yields 'new'
+    const afterConfirm = resolveDraftTagPills(['ExistingUnseen', 'ConfirmedNew'], {
+      liveTagPreviewEntries: [
+        { rawName: 'ExistingUnseen', matchedTagId: 55, matchedTagName: 'ExistingUnseen', matchedVia: 'name' },
+        { rawName: 'ConfirmedNew', matchedTagId: null, matchedTagName: null, matchedVia: 'new' },
+      ],
+      unresolvedStatus: resolveUnresolvedTagStatus({ status: 'ready', requestKey: reqKey }, reqKey),
+    });
+    assert.deepEqual(
+      afterConfirm.map((p) => ({ tagName: p.tagName, matchedVia: p.matchedVia })),
+      [
+        { tagName: 'ExistingUnseen', matchedVia: 'name' },
+        { tagName: 'ConfirmedNew', matchedVia: 'new' },
+      ],
+    );
+  });
+
+  it('pruneTagPreviewEntries clears cached matches on empty draft and drops removed tags while preserving active ones', () => {
+    const picked: NormalTagPreviewEntry[] = [
+      { rawName: 'TagA', matchedTagId: 1, matchedTagName: 'TagA', matchedVia: 'name' },
+      { rawName: 'TagB', matchedTagId: 2, matchedTagName: 'TagB', matchedVia: 'name' },
+    ];
+    // Retaining all active names preserves array identity
+    const unchanged = pruneTagPreviewEntries(picked, ['taga', 'TAGB']);
+    assert.equal(unchanged, picked);
+
+    // Removing one tag drops only that entry
+    const prunedOne = pruneTagPreviewEntries(picked, ['TagB']);
+    assert.deepEqual(prunedOne, [picked[1]]);
+
+    // Clearing the text resets the entire cache so re-typing cannot reuse stale picker/live matches
+    const cleared = pruneTagPreviewEntries(picked, []);
+    assert.deepEqual(cleared, []);
   });
 
   it('TagPreviewRequestTracker monotonically invalidates superseded and switched requests', () => {

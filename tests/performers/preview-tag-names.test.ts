@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, it } from 'node:test';
-import { migrateDatabase } from '../../src/db/schema.ts';
+import { getCurrentSchemaVersion, migrateDatabase, V1_SCHEMA_MIGRATION } from '../../src/db/schema.ts';
+import { normalizeLookupKey } from '../../src/inventory/tagstudio-inventory.ts';
 import { addAlias, archiveTag, createTag } from '../../src/mutations/index.ts';
+import { normalizeLabel } from '../../src/mutations/transaction.ts';
 import { previewTagNames } from '../../src/performers/index.ts';
 import { MediaLibrarySpikeService } from '../../src/spike-service.ts';
+import { normalizeTagName } from '../../src/types.ts';
 
 const cleanups: string[] = [];
 afterEach(() => {
@@ -297,5 +301,142 @@ describe('Host previewTagNames pure-read resolver (Issue #71 B1..B3)', () => {
       { rawName: 'movie', matchedTagId: created.tagId, matchedTagName: 'Cinema', matchedVia: 'alias' },
       { rawName: 'StillNew', matchedTagId: null, matchedTagName: null, matchedVia: 'new' },
     ]);
+  });
+
+  it('is strictly pure read-only as the VERY FIRST call on a fresh service (no DB creation, no migration, no interrupted-task write, no auto-backup)', async () => {
+    const sha256File = (filePath: string): string =>
+      crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+
+    // 1. Fresh service with non-existent DB path + non-empty input: must NOT create DB or backup dir
+    const missingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-preview-first-missing-'));
+    cleanups.push(missingDir);
+    const missingDbPath = path.join(missingDir, 'nested', 'library.sqlite3');
+    const missingService = new MediaLibrarySpikeService({
+      baseDir: missingDir,
+      dbPath: missingDbPath,
+      autoDailyBackup: true,
+    });
+    const missingRes = await missingService.previewTagNames({ names: ['  Alpha  ', 'Beta'] });
+    assert.deepEqual(missingRes, [
+      { rawName: 'Alpha', matchedTagId: null, matchedTagName: null, matchedVia: 'new' },
+      { rawName: 'Beta', matchedTagId: null, matchedTagName: null, matchedVia: 'new' },
+    ]);
+    assert.equal(fs.existsSync(missingDbPath), false, 'first non-empty previewTagNames must not create DB file');
+    assert.equal(fs.existsSync(path.dirname(missingDbPath)), false, 'first non-empty previewTagNames must not create DB directory');
+    assert.equal(fs.existsSync(path.join(path.dirname(missingDbPath), 'backups')), false, 'must not create backups directory');
+
+    // 2. Fresh service pointing at an existing v7 DB with a running ingestion task and autoDailyBackup=true:
+    //    must NOT trigger daily auto-backup or mark the running task interrupted, and DB bytes stay identical.
+    const seededDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-preview-first-v7-'));
+    cleanups.push(seededDir);
+    const seededDbPath = path.join(seededDir, 'library.sqlite3');
+    const backupDir = path.join(seededDir, 'backups');
+    const db = new DatabaseSync(seededDbPath);
+    try {
+      db.exec('PRAGMA foreign_keys = ON;');
+      await migrateDatabase(db, { dbPath: seededDbPath, appVersion: '0.7.10' });
+      const tag = createTag(db, { name: 'StudioTag' });
+      assert.equal(tag.ok, true);
+      if (!tag.ok) return;
+      const alias = addAlias(db, { tagId: tag.tagId, alias: 'StudioAlias', expectedRevision: tag.revision });
+      assert.equal(alias.ok, true);
+      const nowIso = '2026-11-25T00:00:00.000Z';
+      db.prepare(
+        `INSERT INTO ingestion_tasks (target_key, op, status, phase, message, started_at, phase_started_at)
+         VALUES ('manifest:1', 'commit', 'running', 'copy', 'in progress', ?, ?)`,
+      ).run(nowIso, nowIso);
+    } finally {
+      db.close();
+    }
+
+    const beforeStat = fs.statSync(seededDbPath);
+    const beforeHash = sha256File(seededDbPath);
+
+    const freshReader = new MediaLibrarySpikeService({
+      baseDir: seededDir,
+      dbPath: seededDbPath,
+      autoDailyBackup: true,
+      now: () => new Date('2026-11-26T12:00:00.000Z'),
+    });
+    const firstCallRes = await freshReader.previewTagNames({
+      names: ['studiotag', 'STUDIOALIAS', 'UnknownFresh'],
+    });
+    assert.equal(firstCallRes[0]?.matchedVia, 'name');
+    assert.equal(firstCallRes[1]?.matchedVia, 'alias');
+    assert.equal(firstCallRes[1]?.matchedTagName, 'StudioTag');
+    assert.equal(firstCallRes[2]?.matchedVia, 'new');
+
+    const afterStat = fs.statSync(seededDbPath);
+    const afterHash = sha256File(seededDbPath);
+    assert.equal(afterHash, beforeHash, 'first-call previewTagNames must not modify DB bytes');
+    assert.equal(afterStat.size, beforeStat.size, 'first-call previewTagNames must not change DB size');
+    assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs, 'first-call previewTagNames must not touch DB mtime');
+    assert.equal(fs.existsSync(backupDir), false, 'first-call previewTagNames must not create daily auto-backup');
+
+    const verifyDb = new DatabaseSync(seededDbPath, { readOnly: true });
+    try {
+      const taskRow = verifyDb
+        .prepare("SELECT status FROM ingestion_tasks WHERE target_key = 'manifest:1'")
+        .get() as { status: string };
+      assert.equal(taskRow.status, 'running', 'first-call previewTagNames must not mutate running ingestion_tasks');
+    } finally {
+      verifyDb.close();
+    }
+
+    // 3. Fresh service pointing at a pre-v3 (v1) DB without archived_at:
+    //    must NOT migrate the DB and still resolve tags & aliases read-only.
+    const v1Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-preview-first-v1-'));
+    cleanups.push(v1Dir);
+    const v1DbPath = path.join(v1Dir, 'library.sqlite3');
+    const v1Db = new DatabaseSync(v1DbPath);
+    try {
+      v1Db.exec('PRAGMA foreign_keys = ON;');
+      await migrateDatabase(v1Db, {
+        dbPath: v1DbPath,
+        appVersion: '0.1.0',
+        migrations: [V1_SCHEMA_MIGRATION],
+      });
+      const ts = '2026-11-25T00:00:00.000Z';
+      v1Db.prepare('INSERT INTO tags (id, name, normalized_name, created_at, updated_at) VALUES (1, ?, ?, ?, ?)').run(
+        'LegacyTag',
+        'legacytag',
+        ts,
+        ts,
+      );
+      v1Db.prepare('INSERT INTO tag_aliases (tag_id, alias, normalized_alias) VALUES (1, ?, ?)').run(
+        'LegacyAlias',
+        'legacyalias',
+      );
+    } finally {
+      v1Db.close();
+    }
+
+    const v1HashBefore = sha256File(v1DbPath);
+    const v1Service = new MediaLibrarySpikeService({
+      baseDir: v1Dir,
+      dbPath: v1DbPath,
+      autoDailyBackup: true,
+    });
+    const v1Res = await v1Service.previewTagNames({ names: ['legacytag', 'LEGACYALIAS', 'NotInV1'] });
+    assert.deepEqual(v1Res, [
+      { rawName: 'legacytag', matchedTagId: 1, matchedTagName: 'LegacyTag', matchedVia: 'name' },
+      { rawName: 'LEGACYALIAS', matchedTagId: 1, matchedTagName: 'LegacyTag', matchedVia: 'alias' },
+      { rawName: 'NotInV1', matchedTagId: null, matchedTagName: null, matchedVia: 'new' },
+    ]);
+    assert.equal(sha256File(v1DbPath), v1HashBefore, 'v1 DB bytes must remain untouched');
+    const v1Check = new DatabaseSync(v1DbPath, { readOnly: true });
+    try {
+      assert.equal(getCurrentSchemaVersion(v1Check), 1, 'v1 DB must not be migrated by previewTagNames');
+    } finally {
+      v1Check.close();
+    }
+  });
+
+  it('Client and Host tag normalization share one implementation', () => {
+    const samples = ['  High   Res  ', '\tUPPER\n  Case ', '日本語  タグ', '   '];
+    for (const sample of samples) {
+      assert.equal(normalizeLookupKey(sample), normalizeTagName(sample));
+      assert.equal(normalizeLabel(sample), normalizeTagName(sample));
+    }
   });
 });

@@ -23,6 +23,7 @@ import {
   getCurrentSchemaVersion,
   migrateDatabase,
   openMediaLibraryDatabase,
+  resolveLocalDatabasePath,
   runDatabaseHealthChecks,
 } from './db/schema.ts';
 import { importTagStudioDatabase, type TagStudioImportReport } from './import/tagstudio-importer.ts';
@@ -1513,19 +1514,31 @@ export class MediaLibrarySpikeService {
 
   async previewTagNames(input: PreviewTagNamesInput): Promise<NormalTagPreviewEntry[]> {
     const names = Array.isArray(input?.names) ? input.names : [];
-    if (names.length === 0 || names.every((n) => typeof n !== 'string' || n.trim().length === 0)) {
+    const cleaned = names
+      .filter((n): n is string => typeof n === 'string')
+      .map((n) => n.trim())
+      .filter((n) => n.length > 0 && normalizeLabel(n).length > 0);
+    if (cleaned.length === 0) {
       return [];
     }
-    await this.initialize();
-    if (this.degradedState.degraded) {
-      const db = new DatabaseSync(this.localDatabasePath, { readOnly: true });
-      try {
-        return previewTagNames(db, names);
-      } finally {
-        db.close();
-      }
+    // Pure read-only path: never call `initialize()` (which migrates, marks interrupted tasks,
+    // or triggers daily auto-backup) and never create files or directories on disk.
+    const dbPath = resolveLocalDatabasePath({ dbPath: this.localDatabasePath });
+    if (dbPath === ':memory:' || !fs.existsSync(dbPath)) {
+      return cleaned.map((rawName) => ({
+        rawName,
+        matchedTagId: null,
+        matchedTagName: null,
+        matchedVia: 'new' as const,
+      }));
     }
-    return this.withInitializedDatabase((db) => previewTagNames(db, names));
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      db.exec('PRAGMA busy_timeout = 5000;');
+      return previewTagNames(db, cleaned);
+    } finally {
+      db.close();
+    }
   }
 
   async listPerformerAliases(): Promise<PerformerAliasRecord[]> {

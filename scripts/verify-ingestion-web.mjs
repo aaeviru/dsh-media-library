@@ -33,8 +33,107 @@ export async function verifyIngestionWeb(page) {
   await page.getByTestId('ingestion-tag-picker-dropdown').waitFor();
   await page.keyboard.press('Enter');
   assert.equal(await page.getByTestId('ingestion-tags-input').inputValue(), 'Stage3PickedTag');
-  // Clear draft back to empty so Issue #39 serverFallback test below runs on clean state
+  await page.waitForFunction(
+    () => {
+      const pills = Array.from(document.querySelectorAll('[data-testid="ingestion-tag-preview"] > span'));
+      const pill = pills.find((el) => el.getAttribute('data-tag-name') === 'Stage3PickedTag');
+      return pill?.getAttribute('data-match-state') === 'new';
+    },
+    undefined,
+    { timeout: 5000 },
+  );
+
+  // Issue #71 B1 & B2: verify immediate existing-tag badge on TagPicker selection and
+  // authoritative existing / alias / new badges + ordering for manually entered tags.
+  const db71 = new DatabaseSync(path.join(process.env.DSH_HOME, 'media-library/library.sqlite3'));
+  let pickerExistingTag;
+  let manualExistingTag;
+  const issue71Alias = 'Issue71AliasProbe';
+  try {
+    const activeTags = db71
+      .prepare('SELECT id, name FROM tags WHERE archived_at IS NULL ORDER BY id ASC LIMIT 2')
+      .all();
+    assert.ok(activeTags.length >= 1, 'Expected at least 1 active tag in library.sqlite3 for Issue #71 verification');
+    pickerExistingTag = activeTags[0];
+    manualExistingTag = activeTags[1] ?? activeTags[0];
+    db71
+      .prepare('INSERT OR IGNORE INTO tag_aliases (tag_id, alias, normalized_alias) VALUES (?, ?, ?)')
+      .run(pickerExistingTag.id, issue71Alias, issue71Alias.toLowerCase());
+  } finally {
+    db71.close();
+  }
+
+  // B1: Clear draft, pick an existing tag from TagPicker, and immediately assert existing badge (no + New flicker).
   await page.getByTestId('ingestion-tags-input').fill('');
+  await page.getByTestId('ingestion-tag-picker-input').click();
+  await page.getByTestId('ingestion-tag-picker-input').fill(pickerExistingTag.name);
+  const existingOption = page.getByTestId(`ingestion-tag-picker-option-${pickerExistingTag.id}`);
+  await existingOption.waitFor({ timeout: 5000 });
+  await existingOption.click();
+  const immediateB1Pill = await page.evaluate((targetName) => {
+    const pills = Array.from(document.querySelectorAll('[data-testid="ingestion-tag-preview"] > span'));
+    const pill = pills.find((el) => el.getAttribute('data-tag-name') === targetName);
+    if (!pill) return null;
+    return {
+      matchState: pill.getAttribute('data-match-state'),
+      text: pill.textContent ?? '',
+    };
+  }, pickerExistingTag.name);
+  assert.ok(immediateB1Pill, `Expected immediate pill for picked existing tag "${pickerExistingTag.name}"`);
+  assert.equal(immediateB1Pill.matchState, 'name', `Expected immediate 'name' badge on TagPicker selection, got ${JSON.stringify(immediateB1Pill)}`);
+  assert.match(immediateB1Pill.text, /(Existing|已有)/, `Expected Existing/已有 badge text, got: ${immediateB1Pill.text}`);
+  assert.doesNotMatch(immediateB1Pill.text, /\+\s*(New|新建)/, `Picked existing tag must never display + New/+ 新建: ${immediateB1Pill.text}`);
+
+  // B2: Clear draft (resetting caches) and manually enter new + alias + existing tags in unsorted order.
+  await page.getByTestId('ingestion-tags-input').fill('');
+  await page
+    .getByTestId('ingestion-tags-input')
+    .fill(`Stage3TrulyNew71, ${issue71Alias}, ${manualExistingTag.name}`);
+  await page.waitForFunction(
+    () => {
+      const pills = Array.from(document.querySelectorAll('[data-testid="ingestion-tag-preview"] > span'));
+      if (pills.length !== 3) return false;
+      return pills.every((el) => {
+        const st = el.getAttribute('data-match-state');
+        return st === 'name' || st === 'alias' || st === 'new';
+      });
+    },
+    undefined,
+    { timeout: 5000 },
+  );
+  const manualB2Pills = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('[data-testid="ingestion-tag-preview"] > span')).map((el) => ({
+      tagName: el.getAttribute('data-tag-name'),
+      matchState: el.getAttribute('data-match-state'),
+      text: el.textContent ?? '',
+    })),
+  );
+  assert.deepEqual(
+    manualB2Pills.map((p) => ({ tagName: p.tagName, matchState: p.matchState })),
+    [
+      { tagName: manualExistingTag.name, matchState: 'name' },
+      { tagName: issue71Alias, matchState: 'alias' },
+      { tagName: 'Stage3TrulyNew71', matchState: 'new' },
+    ],
+    `Expected manually entered tags to resolve and sort name -> alias -> new, got: ${JSON.stringify(manualB2Pills)}`,
+  );
+  assert.match(manualB2Pills[0].text, /(Existing|已有)/);
+  assert.match(manualB2Pills[1].text, /(Alias|别名)→/);
+  assert.ok(
+    manualB2Pills[1].text.includes(pickerExistingTag.name),
+    `Expected alias pill to display canonical name "${pickerExistingTag.name}", got: ${manualB2Pills[1].text}`,
+  );
+  assert.match(manualB2Pills[2].text, /\+\s*(New|新建)/);
+
+  // Clean up Issue #71 probe alias and clear draft so Issue #39 serverFallback test below runs on clean state.
+  const db71Cleanup = new DatabaseSync(path.join(process.env.DSH_HOME, 'media-library/library.sqlite3'));
+  try {
+    db71Cleanup.prepare('DELETE FROM tag_aliases WHERE normalized_alias = ?').run(issue71Alias.toLowerCase());
+  } finally {
+    db71Cleanup.close();
+  }
+  await page.getByTestId('ingestion-tags-input').fill('');
+  console.log('Issue #71 cold-install E2E: B1 immediate TagPicker existing badge & B2 manual existing/alias/new badges + ordering: PASS');
   await page.getByTestId('toggle-ingestion-panel-btn').click();
   const db39 = new DatabaseSync(path.join(process.env.DSH_HOME, 'media-library/library.sqlite3'));
   try {
