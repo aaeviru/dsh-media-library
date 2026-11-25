@@ -46,7 +46,7 @@ export interface ProviderLookupResult {
 const FC2_RE = /(?<![A-Z0-9])FC2[-_ ]?PPV[-_ ]?(\d{5,9})(?:[-_](?:pt)?(\d{1,3}))?(?![A-Z0-9])/i;
 const FC2_ANY_RE = /(?<![A-Za-z0-9])FC2[\s-_]*(?:PPV[\s-_]*)?(\d{5,9})(?![A-Za-z0-9])/i;
 const STANDARD_PRODUCT_CODE_RE =
-  /(?<![A-Za-z0-9])(\d{0,3}[A-Za-z]{1,6}\d{0,2})[-_]([A-Za-z]{0,2})(\d{2,6})(?:[-_](?:(?:pt|part|cd|disc|disk)[-_]?)?(\d{1,2}))?(?![A-Za-z0-9])/gi;
+  /(?<![A-Za-z0-9])(\d{0,3}[A-Za-z]{1,6}\d{0,2})[-_]([A-Za-z]{0,2})(\d{1,6})(?:[-_](?:(?:pt|part|cd|disc|disk)[-_]?)?(\d{1,2}))?(?![A-Za-z0-9])/gi;
 
 export function parseFc2Code(text: string): ParsedFc2Code | null {
   const match = FC2_RE.exec(text);
@@ -614,23 +614,42 @@ function splitAvWikiActressText(raw: string): string[] {
     .filter((s) => Boolean(s) && !/^[-—–_]+$/.test(s));
 }
 
-function extractAvWikiAnchorOrTextValues(ddBlocks: readonly string[]): string[] {
-  const anchors: string[] = [];
+function extractAvWikiActressValues(ddBlocks: readonly string[]): string[] {
+  const out: string[] = [];
+  const anchorRe = /<a\b[^>]*>([\s\S]*?)<\/a>/gi;
   for (const block of ddBlocks) {
-    for (const m of block.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)) {
-      const cleaned = cleanMetadataText(m[1]!.replace(/<[^>]+>/g, ''));
-      if (cleaned && !/^[-—–_]+$/.test(cleaned)) {
-        anchors.push(cleaned);
+    let lastIndex = 0;
+    for (const m of block.matchAll(anchorRe)) {
+      const idx = m.index ?? 0;
+      if (idx > lastIndex) {
+        const before = block.slice(lastIndex, idx).replace(/<[^>]+>/g, ' ');
+        out.push(...splitAvWikiActressText(before));
       }
+      const anchorText = cleanMetadataText(m[1]!.replace(/<[^>]+>/g, ''));
+      if (anchorText && !/^[-—–_]+$/.test(anchorText)) {
+        out.push(anchorText);
+      }
+      lastIndex = idx + m[0].length;
+    }
+    if (lastIndex < block.length) {
+      const tail = block.slice(lastIndex).replace(/<[^>]+>/g, ' ');
+      out.push(...splitAvWikiActressText(tail));
     }
   }
-  if (anchors.length > 0) return anchors;
-
-  const out: string[] = [];
-  for (const block of ddBlocks) {
-    out.push(...splitAvWikiActressText(block.replace(/<[^>]+>/g, ' ')));
-  }
   return out;
+}
+
+function isAvWikiChallengePage(html: string, rawTitle: string): boolean {
+  const loweredTitle = cleanMetadataText(rawTitle).toLowerCase();
+  if (
+    loweredTitle === 'just a moment...' ||
+    loweredTitle.startsWith('just a moment') ||
+    loweredTitle.includes('attention required! | cloudflare') ||
+    loweredTitle.includes('access denied')
+  ) {
+    return true;
+  }
+  return /cf-browser-verification|\/cdn-cgi\/challenge-platform|__cf_chl_/i.test(html);
 }
 
 /**
@@ -645,6 +664,15 @@ export function parseAvWikiHtml(html: string, productCode: string, sourceUrl: st
   const rawTitle = titleMatch?.[1] ?? '';
   const rawOgTitle = extractOgTitle(html);
 
+  if (isAvWikiChallengePage(html, rawTitle)) {
+    return {
+      metadata: null,
+      category: 'auth_or_blocked',
+      reason: 'Challenge or blocked interstitial returned by AV-WIKI.',
+      sourceUrl,
+    };
+  }
+
   const title = stripAvWikiTitle(rawTitle, normalizedCode) || stripAvWikiTitle(rawOgTitle, normalizedCode);
   if (!title) {
     return {
@@ -658,6 +686,8 @@ export function parseAvWikiHtml(html: string, productCode: string, sourceUrl: st
   const actressSet = new Set<string>();
   let maker = '';
   let mediaDate: string | null = null;
+  let hasActressDlField = false;
+  let hasRecognizedDlField = false;
 
   const dlPairRe = /<dt\b[^>]*>([\s\S]*?)<\/dt>((?:\s*<dd\b[^>]*>[\s\S]*?<\/dd>)+)/gi;
   for (const pairMatch of html.matchAll(dlPairRe)) {
@@ -666,52 +696,74 @@ export function parseAvWikiHtml(html: string, productCode: string, sourceUrl: st
     if (ddBlocks.length === 0) continue;
 
     if (label === 'AV女優名' || label === 'AV女優' || label === '女優名') {
-      for (const name of extractAvWikiAnchorOrTextValues(ddBlocks)) {
+      hasActressDlField = true;
+      hasRecognizedDlField = true;
+      for (const name of extractAvWikiActressValues(ddBlocks)) {
         actressSet.add(name);
       }
-    } else if (label === 'メーカー' && !maker) {
-      const anchors = ddBlocks.flatMap((block) =>
-        [...block.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)]
-          .map((m) => cleanMetadataText(m[1]!.replace(/<[^>]+>/g, '')))
-          .filter((s) => Boolean(s) && !/^[-—–_]+$/.test(s)),
-      );
-      if (anchors.length > 0) {
-        maker = anchors[0]!;
-      } else {
-        const plainMaker = cleanMetadataText(ddBlocks.map((b) => b.replace(/<[^>]+>/g, ' ')).join(' '));
-        if (plainMaker && !/^[-—–_]+$/.test(plainMaker)) {
-          maker = plainMaker;
+    } else if (label === 'メーカー品番') {
+      hasRecognizedDlField = true;
+    } else if (label === 'メーカー') {
+      hasRecognizedDlField = true;
+      if (!maker) {
+        const anchors = ddBlocks.flatMap((block) =>
+          [...block.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)]
+            .map((m) => cleanMetadataText(m[1]!.replace(/<[^>]+>/g, '')))
+            .filter((s) => Boolean(s) && !/^[-—–_]+$/.test(s)),
+        );
+        if (anchors.length > 0) {
+          maker = anchors[0]!;
+        } else {
+          const plainMaker = cleanMetadataText(ddBlocks.map((b) => b.replace(/<[^>]+>/g, ' ')).join(' '));
+          if (plainMaker && !/^[-—–_]+$/.test(plainMaker)) {
+            maker = plainMaker;
+          }
         }
       }
-    } else if (
-      (label === '配信日' || label === '配信開始日' || label === '発売日' || label === '公開日') &&
-      !mediaDate
-    ) {
-      for (const block of ddBlocks) {
-        const foundDate = extractAvWikiIsoDate(block.replace(/<[^>]+>/g, ' '));
-        if (foundDate) {
-          mediaDate = foundDate;
-          break;
+    } else if (label === '配信日' || label === '配信開始日' || label === '発売日' || label === '公開日') {
+      hasRecognizedDlField = true;
+      if (!mediaDate) {
+        for (const block of ddBlocks) {
+          const foundDate = extractAvWikiIsoDate(block.replace(/<[^>]+>/g, ' '));
+          if (foundDate) {
+            mediaDate = foundDate;
+            break;
+          }
         }
       }
     }
   }
 
-  if (actressSet.size === 0 || !mediaDate) {
-    const bodyHtml = html
-      .replace(/<head\b[\s\S]*?<\/head>/gi, ' ')
-      .replace(/<title\b[\s\S]*?<\/title>/gi, ' ')
-      .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style\b[\s\S]*?<\/style>/gi, ' ');
-    const bodyPlainText = cleanMetadataText(bodyHtml.replace(/<[^>]+>/g, ' '));
+  const bodyHtml = html
+    .replace(/<head\b[\s\S]*?<\/head>/gi, ' ')
+    .replace(/<title\b[\s\S]*?<\/title>/gi, ' ')
+    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ');
+  const bodyPlainText = cleanMetadataText(bodyHtml.replace(/<[^>]+>/g, ' '));
 
-    if (actressSet.size === 0) {
+  const codePattern = buildAvWikiCodePattern(normalizedCode);
+  const titleHeaderText = `${cleanPreservingPunctuation(rawTitle)} ${cleanPreservingPunctuation(rawOgTitle)}`;
+  const hasCodeInTitle = Boolean(codePattern && new RegExp(codePattern, 'i').test(titleHeaderText));
+  const hasAvWikiTitleMarker = /に出てるAV女優|AV[- ]?WIKI/i.test(titleHeaderText);
+  const hasBodyArticleMarker = /(?:AV女優名|メーカー品番)\s*[:：]?/i.test(bodyPlainText);
+  if (!hasRecognizedDlField && !hasCodeInTitle && !hasAvWikiTitleMarker && !hasBodyArticleMarker) {
+    return {
+      metadata: null,
+      category: 'parse_error',
+      reason: 'Response does not match an AV-WIKI article page.',
+      sourceUrl,
+    };
+  }
+
+  if ((!hasActressDlField && actressSet.size === 0) || !mediaDate) {
+    if (!hasActressDlField && actressSet.size === 0) {
       const plainActressMatch =
         /AV女優名\s*(?:[:：]\s*|\s+)(?!まとめ)(.+?)(?=\s*(?:メーカー品番|メーカー|配信開始日|配信日|発売日|公開日|FANZA|MGS動画)|$)/i.exec(
           bodyPlainText,
         );
-      if (plainActressMatch?.[1]) {
-        for (const name of splitAvWikiActressText(plainActressMatch[1])) {
+      const captured = plainActressMatch?.[1]?.trim() ?? '';
+      if (captured && !/^(?:メーカー品番|メーカー|配信開始日|配信日|発売日|公開日|FANZA|MGS動画)\b/i.test(captured)) {
+        for (const name of splitAvWikiActressText(captured)) {
           actressSet.add(name);
         }
       }

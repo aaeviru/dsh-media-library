@@ -143,7 +143,18 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
     assert.equal(extractCatalogNumber('1PON-052615'), null);
     assert.equal(extractCatalogNumber('VIDEO-001.mp4'), null);
 
-    // Standard product code parsing: zero-padding, optional part suffix, and strict rejections.
+    // Standard product code parsing: 1-digit & 2-digit zero-padding, optional part suffix, and strict rejections.
+    assert.deepEqual(parseStandardProductCode('ABP-7.mp4'), {
+      prefix: 'ABP',
+      number: '007',
+      partSuffix: '',
+      baseCode: 'ABP-007',
+      code: 'ABP-007',
+      baseSlug: 'abp-007',
+      slug: 'abp-007',
+    });
+    assert.equal(parseStandardProductCode('CD-1.mp4'), null);
+    assert.equal(parseStandardProductCode('V-1.mp4'), null);
     assert.deepEqual(parseStandardProductCode('ABP-76.mp4'), {
       prefix: 'ABP',
       number: '076',
@@ -363,6 +374,46 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
     assert.equal(noActressRes.category, 'ok');
     assert.deepEqual(noActressRes.metadata?.actresses, []);
     assert.equal(noActressRes.metadata?.mediaDate, '2022-11-03');
+
+    // Empty AV女優名 <dd> must NOT fall through to page-wide fallback and consume the next field/date.
+    const emptyActressDdRes = parseAvWikiHtml(
+      sampleAvWikiHtml({
+        body: '<dl><dt>AV女優名</dt><dd></dd><dt>配信日</dt><dd>2024-01-01</dd></dl>',
+      }),
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(emptyActressDdRes.category, 'ok');
+    assert.deepEqual(emptyActressDdRes.metadata?.actresses, []);
+    assert.equal(emptyActressDdRes.metadata?.mediaDate, '2024-01-01');
+
+    // Mixed linked + unlinked actresses inside the same <dd> must preserve both.
+    const mixedActressRes = parseAvWikiHtml(
+      sampleAvWikiHtml({
+        body: '<dl><dt>AV女優名</dt><dd><a href="/actress/alice">Alice</a>、美谷朱里</dd><dt>配信日</dt><dd>2024-02-02</dd></dl>',
+      }),
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(mixedActressRes.category, 'ok');
+    assert.deepEqual(mixedActressRes.metadata?.actresses, ['Alice', '美谷朱里']);
+
+    // Challenge / non-article pages must NEVER return category 'ok'.
+    const cfChallengeRes = parseAvWikiHtml(
+      '<html><head><title>Just a moment...</title></head><body><p>Checking your browser...</p></body></html>',
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(cfChallengeRes.metadata, null);
+    assert.equal(cfChallengeRes.category, 'auth_or_blocked');
+
+    const nonArticleRes = parseAvWikiHtml(
+      '<html><head><title>Maintenance Notice</title></head><body><p>Site under maintenance.</p></body></html>',
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(nonArticleRes.metadata, null);
+    assert.equal(nonArticleRes.category, 'parse_error');
 
     // Missing title -> parse_error
     const missingTitleRes = parseAvWikiHtml(
@@ -627,7 +678,7 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
       'https://mirror-b.av-wiki.local/abp-576/',
     ]);
 
-    // 3) MediaLibrarySpikeService reads volatile avWikiBaseUrl before suffix fallback & across Ingestion and Backfill.
+    // 3) MediaLibrarySpikeService reads volatile avWikiBaseUrl before suffix fallback during Ingestion.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-avwiki-volatile-'));
     const originalFetch = globalThis.fetch;
     try {
