@@ -17,6 +17,7 @@ import {
   V3_TAG_MANAGEMENT_MIGRATION,
   type SchemaMigration,
 } from '../../src/db/schema.ts'
+import { APP_VERSION } from '../../src/version.ts'
 
 describe('Schema v3 migration (Issue #5 B6)', () => {
   let tempRoot: string
@@ -68,7 +69,7 @@ describe('Schema v3 migration (Issue #5 B6)', () => {
       assert.equal(Number((db.prepare('SELECT COUNT(*) AS c FROM mutation_log').get() as { c: number }).c), 0)
       assert.equal(
         (db.prepare('SELECT app_version FROM schema_versions WHERE version = 3').get() as { app_version: string }).app_version,
-        '0.7.10',
+        APP_VERSION,
       )
       assert.equal(runDatabaseHealthChecks(db).ok, true)
 
