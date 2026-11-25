@@ -18,6 +18,8 @@ import type {
   MediaActionResult,
   MediaFileStatus,
   MediaSearchItem,
+  MediaSortField,
+  MediaSortOrder,
   OpsStatus,
   SearchMediaInput,
   SpikeStatus,
@@ -34,6 +36,16 @@ import css from './ui/styles.module.css';
 type Translate = (key: MediaLibraryKey) => string;
 
 type ActiveTab = 'library' | 'ingestion' | 'tags' | 'ops' | 'diagnostics';
+
+const SORT_FIELDS: ReadonlyArray<{
+  readonly field: MediaSortField;
+  readonly labelKey: MediaLibraryKey;
+}> = [
+  { field: 'media_date', labelKey: 'sortFieldMediaDate' },
+  { field: 'added_at', labelKey: 'sortFieldAddedAt' },
+  { field: 'catalog_number', labelKey: 'sortFieldCatalogNumber' },
+  { field: 'filename', labelKey: 'sortFieldFilename' },
+];
 
 let persistedActiveTab: ActiveTab = 'library';
 
@@ -106,6 +118,8 @@ export function MediaLibraryPanel({
   const [availableTags, setAvailableTags] = useState<readonly TagSummary[]>([]);
   const [tagAmbiguousAliases, setTagAmbiguousAliases] = useState<readonly AmbiguousAliasWarning[]>([]);
   const [selectedTags, setSelectedTags] = useState<readonly { id: number; name: string }[]>([]);
+  const [sortBy, setSortBy] = useState<MediaSortField>('media_date');
+  const [sortOrder, setSortOrder] = useState<MediaSortOrder>('desc');
 
   // Search results & pagination state
   const [items, setItems] = useState<readonly MediaSearchItem[]>([]);
@@ -159,6 +173,8 @@ export function MediaLibraryPanel({
       readonly overrideCatalogMode?: CatalogMatchMode | undefined;
       readonly overrideDateFrom?: string | undefined;
       readonly overrideDateTo?: string | undefined;
+      readonly overrideSortBy?: MediaSortField | undefined;
+      readonly overrideSortOrder?: MediaSortOrder | undefined;
     }) => {
       const isAppend = Boolean(options?.append && options?.cursor);
       if (isAppend && (!committedQuery.current || appending.current)) return;
@@ -179,6 +195,8 @@ export function MediaLibraryPanel({
       const effectiveCatalogMode = options?.overrideCatalogMode ?? catalogMatchMode;
       const effectiveDateFrom = (options?.overrideDateFrom ?? dateFrom).trim();
       const effectiveDateTo = (options?.overrideDateTo ?? dateTo).trim();
+      const effectiveSortBy = options?.overrideSortBy ?? sortBy;
+      const effectiveSortOrder = options?.overrideSortOrder ?? sortOrder;
 
       // The form is a draft. A cursor only belongs to the query that produced
       // the currently displayed results, never to subsequent draft edits.
@@ -191,6 +209,8 @@ export function MediaLibraryPanel({
             tagIds: effectiveTagIds.length > 0 ? effectiveTagIds : undefined,
             dateFrom: effectiveDateFrom || undefined,
             dateTo: effectiveDateTo || undefined,
+            sortBy: effectiveSortBy,
+            sortOrder: effectiveSortOrder,
             limit: 50,
           };
       try {
@@ -227,6 +247,8 @@ export function MediaLibraryPanel({
       catalogMatchMode,
       dateFrom,
       dateTo,
+      sortBy,
+      sortOrder,
       t,
     ],
   );
@@ -466,6 +488,21 @@ export function MediaLibraryPanel({
     [executeSearch],
   );
 
+  const handleSortFieldChange = useCallback(
+    (nextSortBy: MediaSortField) => {
+      if (nextSortBy === sortBy) return;
+      setSortBy(nextSortBy);
+      void executeSearch({ overrideSortBy: nextSortBy, overrideSortOrder: sortOrder });
+    },
+    [sortBy, sortOrder, executeSearch],
+  );
+
+  const handleSortOrderToggle = useCallback(() => {
+    const nextSortOrder: MediaSortOrder = sortOrder === 'desc' ? 'asc' : 'desc';
+    setSortOrder(nextSortOrder);
+    void executeSearch({ overrideSortBy: sortBy, overrideSortOrder: nextSortOrder });
+  }, [sortBy, sortOrder, executeSearch]);
+
   const handleResetFilters = useCallback(() => {
     setKeyword('');
     setCatalogNumber('');
@@ -473,6 +510,8 @@ export function MediaLibraryPanel({
     setDateFrom('');
     setDateTo('');
     setSelectedTags([]);
+    setSortBy('media_date');
+    setSortOrder('desc');
     void executeSearch({
       overrideTagIds: [],
       overrideKeyword: '',
@@ -480,6 +519,8 @@ export function MediaLibraryPanel({
       overrideCatalogMode: 'exact',
       overrideDateFrom: '',
       overrideDateTo: '',
+      overrideSortBy: 'media_date',
+      overrideSortOrder: 'desc',
     });
   }, [executeSearch]);
 
@@ -1068,6 +1109,37 @@ export function MediaLibraryPanel({
                 ({items.length} / {totalMatching} · {searchElapsedMs} ms)
               </code>
             </h3>
+            <div className={css.sortControls} data-testid="media-sort-controls">
+              <span className={css.fieldLabel}>{t('sortByLabel')}</span>
+              <div role="group" aria-label={t('sortByLabel')} className={css.sortSegmented}>
+                {SORT_FIELDS.map(({ field, labelKey }) => {
+                  const isActive = sortBy === field;
+                  return (
+                    <button
+                      key={field}
+                      type="button"
+                      data-testid={`sort-field-${field}`}
+                      aria-pressed={isActive}
+                      onClick={() => handleSortFieldChange(field)}
+                      className={cx(css.sortSegBtn, isActive && css.sortSegBtnActive)}
+                    >
+                      {t(labelKey)}
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                data-testid="sort-order-toggle-btn"
+                data-sort-order={sortOrder}
+                aria-label={sortOrder === 'desc' ? t('sortOrderDesc') : t('sortOrderAsc')}
+                aria-pressed={sortOrder === 'asc'}
+                onClick={handleSortOrderToggle}
+                className={cx(css.btn, css.btnSm)}
+              >
+                {sortOrder === 'desc' ? `↓ ${t('sortOrderDesc')}` : `↑ ${t('sortOrderAsc')}`}
+              </button>
+            </div>
           </div>
 
           {items.length > 0 && (
