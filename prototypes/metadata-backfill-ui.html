@@ -1,0 +1,924 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Metadata Backfill UI Prototype</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--foreground);
+  }
+  .app {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    border-radius: var(--radius, 8px);
+    background: var(--card);
+    border: 1px solid var(--border);
+  }
+  .tabs {
+    display: inline-flex;
+    gap: 4px;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--secondary);
+    border: 1px solid var(--border);
+  }
+  .tab {
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .tab.active {
+    background: var(--card);
+    color: var(--foreground);
+    border-color: var(--border);
+    font-weight: 600;
+  }
+  .tab.highlight {
+    color: var(--primary);
+  }
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius, 8px);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .row-between { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .stack { display: flex; flex-direction: column; gap: 6px; }
+  .muted { color: var(--muted-foreground); font-size: 11px; }
+  .mono {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    background: var(--code-background);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  input[type="text"] {
+    background: var(--background);
+    color: var(--foreground);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+    min-width: 0;
+  }
+  input[type="text"]:focus {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+  .btn {
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--secondary);
+    color: var(--secondary-foreground);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) { opacity: 0.9; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-primary {
+    background: var(--primary);
+    color: var(--primary-foreground);
+    border-color: transparent;
+  }
+  .btn-sm { padding: 3px 8px; font-size: 11px; }
+  .btn-toggle.on {
+    background: var(--accent-surface, var(--accent));
+    color: var(--accent-foreground);
+    border-color: var(--primary);
+    font-weight: 600;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    border: 1px solid var(--border);
+    background: var(--secondary);
+    color: var(--secondary-foreground);
+  }
+  .chip-existing {
+    border-color: var(--success);
+    color: var(--success);
+    background: var(--background);
+  }
+  .chip-new {
+    border: 1px dashed var(--warning);
+    color: var(--warning);
+    background: var(--warning-surface, var(--background));
+  }
+  .chip-held {
+    opacity: 0.8;
+    background: var(--muted);
+    color: var(--muted-foreground);
+  }
+  .chip button {
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .banner {
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    border: 1px solid var(--border);
+    background: var(--secondary);
+  }
+  .banner-warn {
+    border-color: var(--warning);
+    background: var(--warning-surface, var(--secondary));
+    color: var(--warning-foreground, var(--foreground));
+  }
+  .banner-ok {
+    border-color: var(--success);
+    color: var(--success);
+  }
+  /* Table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  th, td {
+    text-align: left;
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th {
+    font-size: 11px;
+    color: var(--muted-foreground);
+    font-weight: 600;
+    background: var(--secondary);
+  }
+  tr.selected-row > td {
+    background: var(--accent-surface, var(--secondary));
+  }
+  tr.inline-expand-row > td {
+    background: var(--background);
+    padding: 10px 12px;
+  }
+  /* Split layouts */
+  .split-tab {
+    display: grid;
+    grid-template-columns: 235px minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+  }
+  .split-drawer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 325px;
+    gap: 10px;
+    align-items: start;
+  }
+  .list-col {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .list-item {
+    width: 100%;
+    text-align: left;
+    padding: 8px 9px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--background);
+    color: var(--foreground);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .list-item.active {
+    border-color: var(--primary);
+    background: var(--accent-surface, var(--secondary));
+  }
+  .detail-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius, 8px);
+    background: var(--background);
+    padding: 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .meta-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 120px;
+    gap: 8px;
+  }
+  .perf-box {
+    border: 1px solid var(--warning);
+    border-radius: 6px;
+    padding: 8px;
+    background: var(--warning-surface, var(--card));
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .perf-box.resolved {
+    border-color: var(--success);
+    background: var(--card);
+  }
+  .field-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted-foreground);
+    display: block;
+    margin-bottom: 3px;
+  }
+  /* Floating-style prototype switcher */
+  .switcher-wrap {
+    display: flex;
+    justify-content: center;
+    padding-top: 4px;
+  }
+  .switcher {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: var(--popover, var(--card));
+    border: 1px solid var(--primary);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
+    font-size: 12px;
+  }
+  .switcher .label {
+    font-weight: 600;
+    min-width: 240px;
+    text-align: center;
+  }
+  .variant-note {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--muted-foreground);
+    padding: 0 2px;
+  }
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+
+<script>
+// Throwaway UI prototype for Q8: 3 structurally different layouts for Metadata Backfill.
+const VARIANTS = [
+  { id: 'A', name: 'A · 独立「补全」Tab（复用入库左右分栏）', hint: '最简结构：不改媒体库表格，左列表默认筛无标签，右卡片复刻入库预览' },
+  { id: 'B', name: 'B · 媒体库行内展开（无新 Tab / 无抽屉）', hint: '留在媒体库表格中：点击「补全」在当前行下方直接展开预览表单' },
+  { id: 'C', name: 'C · 媒体库右侧抽屉（保持原列表可点）', hint: '留在媒体库内：右侧停靠预览面板，边看筛选列表边逐条点选补全' },
+];
+
+const REMOTE_FIXTURES = {
+  '4512345': {
+    provider: 'FC2CMADB',
+    sourceUrl: 'https://fc2cmadb.com/articles/4512345',
+    title: '【FC2】清纯系初摄个人作品',
+    mediaDate: '2025-11-18',
+    actresses: [
+      { raw: '小仓由菜', status: 'auto', tagName: '小仓由菜' },
+      { raw: '新面孔A', status: 'pending', reason: '库中无匹配演员', candidates: ['新人演员', '素人类'] },
+    ],
+    tags: [
+      { raw: '个人拍摄', via: 'name', matched: '个人拍摄' },
+      { raw: '美少女', via: 'alias', matched: '清纯' },
+      { raw: '4K画质', via: 'new', matched: null },
+    ],
+  },
+  '4490012': {
+    provider: 'FC2PPVDB',
+    sourceUrl: 'https://fc2ppvdb.com/articles/4490012',
+    title: '【FC2】周末限定特别版',
+    mediaDate: '2025-09-02',
+    actresses: [{ raw: '高桥圣子', status: 'auto', tagName: '高桥圣子' }],
+    tags: [
+      { raw: '个人拍摄', via: 'name', matched: '个人拍摄' },
+      { raw: '限定版', via: 'new', matched: null },
+    ],
+  },
+  '4308877': {
+    provider: 'FC2CMADB',
+    sourceUrl: 'https://fc2cmadb.com/articles/4308877',
+    title: '远端标题（原记录已有标题，默认不覆盖）',
+    mediaDate: '2024-06-15',
+    actresses: [],
+    tags: [
+      { raw: '个人拍摄', via: 'name', matched: '个人拍摄' },
+      { raw: '中文字幕', via: 'new', matched: null },
+    ],
+  },
+};
+
+const initialMedia = () => [
+  {
+    id: 101,
+    catalog: 'FC2-PPV-4512345',
+    filename: 'FC2-PPV-4512345.mp4',
+    title: '',
+    mediaDate: '',
+    tags: [],
+  },
+  {
+    id: 102,
+    catalog: 'FC2-PPV-4490012',
+    filename: 'FC2-PPV-4490012_hd.mp4',
+    title: '',
+    mediaDate: '',
+    tags: [],
+  },
+  {
+    id: 103,
+    catalog: 'FC2-PPV-4308877',
+    filename: 'FC2-PPV-4308877.mkv',
+    title: '已手工整理好的标题',
+    mediaDate: '2024-06-10',
+    tags: ['个人拍摄', '收藏'],
+  },
+  {
+    id: 104,
+    catalog: '',
+    filename: 'renamed_clip_2025.mp4',
+    title: '',
+    mediaDate: '',
+    tags: [],
+  },
+];
+
+const state = {
+  variantIndex: 0,
+  untaggedOnly: true,
+  search: '',
+  media: initialMedia(),
+  activeMediaId: 101,
+  draft: null, // { mediaId, codeInput, fetched, title, mediaDate, catalog, candidateTags, actresses, error, notice }
+  toast: '',
+};
+
+function detectFc2Digits(item) {
+  const hay = [item.catalog, item.filename, item.title].join(' ');
+  const m = /FC2[-_ ]?PPV[-_ ]?(\d{5,9})/i.exec(hay);
+  return m ? m[1] : '';
+}
+
+function openDraft(mediaId) {
+  const item = state.media.find((m) => m.id === mediaId);
+  if (!item) return;
+  state.activeMediaId = mediaId;
+  state.toast = '';
+  const digits = detectFc2Digits(item);
+  state.draft = {
+    mediaId,
+    codeInput: digits ? `FC2-PPV-${digits}` : '',
+    fetched: false,
+    provider: '',
+    sourceUrl: '',
+    title: item.title,
+    mediaDate: item.mediaDate,
+    catalog: item.catalog,
+    candidateTags: [],
+    actresses: [],
+    error: '',
+  };
+  render();
+}
+
+function fetchDraft() {
+  const d = state.draft;
+  if (!d) return;
+  const item = state.media.find((m) => m.id === d.mediaId);
+  const m = /(\d{5,9})/.exec(d.codeInput.trim());
+  if (!m) {
+    d.error = '未识别到 FC2 编号，请手动输入如 FC2-PPV-4512345 或 4512345';
+    render();
+    return;
+  }
+  const digits = m[1];
+  const remote = REMOTE_FIXTURES[digits];
+  if (!remote) {
+    d.fetched = false;
+    d.error = `not_found：远端未找到 FC2-PPV-${digits}（演示可试 4512345 / 4490012 / 4308877）`;
+    render();
+    return;
+  }
+  const existingSet = new Set(item.tags);
+  d.error = '';
+  d.fetched = true;
+  d.provider = remote.provider;
+  d.sourceUrl = remote.sourceUrl;
+  // Q4: fill-when-empty default
+  d.title = item.title || remote.title;
+  d.mediaDate = item.mediaDate || remote.mediaDate;
+  d.catalog = item.catalog || `FC2-PPV-${digits}`;
+  d.candidateTags = remote.tags
+    .filter((t) => !existingSet.has(t.matched || t.raw))
+    .map((t) => ({ ...t }));
+  d.actresses = remote.actresses.map((a) => ({ ...a }));
+  render();
+}
+
+function resolveActress(idx, mode, tagName) {
+  const a = state.draft?.actresses[idx];
+  if (!a) return;
+  if (mode === 'skip') {
+    a.status = 'skipped';
+    a.tagName = '';
+  } else {
+    a.status = 'resolved';
+    a.tagName = tagName;
+  }
+  render();
+}
+
+function removeCandidateTag(idx) {
+  if (!state.draft) return;
+  state.draft.candidateTags.splice(idx, 1);
+  render();
+}
+
+function applyBackfill() {
+  const d = state.draft;
+  if (!d || !d.fetched) return;
+  if (d.actresses.some((a) => a.status === 'pending')) return;
+  const item = state.media.find((m) => m.id === d.mediaId);
+  if (!item) return;
+
+  const added = new Set(item.tags);
+  for (const t of d.candidateTags) added.add(t.matched || t.raw);
+  for (const a of d.actresses) {
+    if ((a.status === 'auto' || a.status === 'resolved') && a.tagName) added.add(a.tagName);
+  }
+  item.tags = [...added];
+  item.title = d.title.trim();
+  item.mediaDate = d.mediaDate.trim();
+  item.catalog = d.catalog.trim();
+  state.toast = `已原子应用补全到 #${item.id}（${item.catalog || item.filename}），现有 ${item.tags.length} 个标签。`;
+  state.draft = null;
+  if (VARIANTS[state.variantIndex].id !== 'A') {
+    state.activeMediaId = null;
+  }
+  render();
+}
+
+function filteredMedia() {
+  const q = state.search.trim().toLowerCase();
+  return state.media.filter((m) => {
+    if (state.untaggedOnly && m.tags.length > 0) return false;
+    if (q && !(m.filename.toLowerCase().includes(q) || m.catalog.toLowerCase().includes(q) || m.title.toLowerCase().includes(q))) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function renderDraftCard(compact) {
+  const d = state.draft;
+  if (!d) {
+    return `<div class="detail-card"><span class="muted">请从左侧选择一条已入库视频开始补全元数据。</span></div>`;
+  }
+  const item = state.media.find((m) => m.id === d.mediaId);
+  const pendingCount = d.actresses.filter((a) => a.status === 'pending').length;
+
+  const existingTagsHtml = item.tags.length
+    ? item.tags.map((t) => `<span class="chip chip-held">${esc(t)} (保留)</span>`).join('')
+    : `<span class="muted">当前无标签</span>`;
+
+  const candidateHtml = d.candidateTags.length
+    ? d.candidateTags
+        .map((t, idx) => {
+          const cls = t.via === 'new' ? 'chip-new' : 'chip-existing';
+          const badge = t.via === 'name' ? '已有' : t.via === 'alias' ? `别名→${t.matched}` : '+ 新建';
+          return `<span class="chip ${cls}">${esc(t.raw)} <span class="muted">(${esc(badge)})</span><button type="button" data-rm-tag="${idx}" title="移除">×</button></span>`;
+        })
+        .join('')
+    : `<span class="muted">无新增候选标签</span>`;
+
+  const actressHtml = d.actresses
+    .map((a, idx) => {
+      if (a.status === 'auto') {
+        return `<span class="chip chip-existing">演员: ${esc(a.tagName)} (规则命中)</span>`;
+      }
+      if (a.status === 'resolved') {
+        return `<span class="chip chip-existing">演员: ${esc(a.tagName)} (人工确认)</span>`;
+      }
+      if (a.status === 'skipped') {
+        return `<span class="chip chip-held">演员: ${esc(a.raw)} (已跳过)</span>`;
+      }
+      return `
+        <div class="perf-box">
+          <div class="row-between">
+            <strong>⚠ 待消歧演员：${esc(a.raw)}</strong>
+            <span class="muted">${esc(a.reason)}</span>
+          </div>
+          <div class="row">
+            <button type="button" class="btn btn-sm btn-primary" data-perf-bind="${idx}">绑定「${esc(a.candidates[0])}」</button>
+            <button type="button" class="btn btn-sm" data-perf-create="${idx}">新建演员标签「${esc(a.raw)}」</button>
+            <button type="button" class="btn btn-sm" data-perf-skip="${idx}">跳过</button>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  return `
+    <div class="detail-card">
+      <div class="row-between">
+        <div>
+          <strong>#${item.id} ${esc(item.filename)}</strong>
+          ${d.provider ? `<span class="muted"> · 来源 ${esc(d.provider)}</span>` : ''}
+        </div>
+        ${compact ? `<button type="button" class="btn btn-sm" data-close-draft>关闭</button>` : ''}
+      </div>
+
+      <div class="row">
+        <input type="text" id="fc2-code-input" value="${esc(d.codeInput)}" placeholder="输入 FC2 编号，如 FC2-PPV-4512345" style="flex:1 1 160px" />
+        <button type="button" class="btn btn-primary" id="fetch-btn">${d.fetched ? '重新抓取' : '从远端抓取'}</button>
+      </div>
+
+      ${d.error ? `<div class="banner banner-warn">${esc(d.error)}</div>` : ''}
+
+      <div class="stack">
+        <span class="field-label">当前已有标签（仅增量，绝不删除）</span>
+        <div class="row">${existingTagsHtml}</div>
+      </div>
+
+      ${
+        d.fetched
+          ? `
+        <div class="meta-grid">
+          <div>
+            <span class="field-label">标题（原值非空则保留，可手动改）</span>
+            <input type="text" id="draft-title" value="${esc(d.title)}" style="width:100%" />
+          </div>
+          <div>
+            <span class="field-label">发行日期</span>
+            <input type="text" id="draft-date" value="${esc(d.mediaDate)}" style="width:100%" />
+          </div>
+        </div>
+
+        ${
+          d.actresses.length
+            ? `<div class="stack"><span class="field-label">远端演员解析</span><div class="stack">${actressHtml}</div></div>`
+            : ''
+        }
+
+        <div class="stack">
+          <span class="field-label">待追加标签预览（可点 × 剔除不需要的）</span>
+          <div class="row">${candidateHtml}</div>
+        </div>
+
+        ${
+          pendingCount > 0
+            ? `<div class="banner banner-warn">⚠ 还有 ${pendingCount} 位演员待消歧，确认或跳过后才可应用补全。</div>`
+            : ''
+        }
+
+        <div class="row-between" style="padding-top:4px;border-top:1px solid var(--border)">
+          <span class="muted">仅写 SQLite 索引，不移动 NAS 文件</span>
+          <div class="row">
+            <button type="button" class="btn" data-close-draft>取消</button>
+            <button type="button" class="btn btn-primary" id="apply-btn" ${pendingCount > 0 ? 'disabled' : ''}>应用补全</button>
+          </div>
+        </div>
+      `
+          : `<div class="muted">点击「从远端抓取」拉取 FC2 候选元数据，预览确认后再落库。（可试 #101 含未知演员，#103 含已有标签，#104 无番号手填 4512345）</div>`
+      }
+    </div>
+  `;
+}
+
+function renderFilterBar(showExtraFilters) {
+  return `
+    <div class="row-between">
+      <div class="row" style="flex:1">
+        <input type="text" id="search-input" value="${esc(state.search)}" placeholder="搜索文件名 / 番号 / 标题..." style="flex:1 1 170px" />
+        <button type="button" id="untagged-toggle" class="btn btn-toggle ${state.untaggedOnly ? 'on' : ''}">
+          ${state.untaggedOnly ? '✓ 仅无标签' : '仅无标签'}
+        </button>
+        ${showExtraFilters ? `<span class="muted">（其余关键词/番号/日期筛选保持不变）</span>` : ''}
+      </div>
+      <button type="button" class="btn btn-sm" id="reset-demo-btn">重置演示数据</button>
+    </div>
+  `;
+}
+
+function renderVariantA(rows) {
+  return `
+    <div class="topbar">
+      <strong>DSH Media Library</strong>
+      <div class="tabs">
+        <span class="tab">媒体库</span>
+        <span class="tab">入库</span>
+        <span class="tab active highlight">元数据补全</span>
+        <span class="tab">标签管理</span>
+        <span class="tab">运维</span>
+      </div>
+    </div>
+    <div class="panel">
+      ${renderFilterBar(false)}
+      ${state.toast ? `<div class="banner banner-ok">${esc(state.toast)}</div>` : ''}
+      <div class="split-tab">
+        <div class="list-col">
+          <div class="muted">筛选结果 (${rows.length})</div>
+          ${
+            rows.length
+              ? rows
+                  .map(
+                    (m) => `
+                <button type="button" class="list-item ${state.activeMediaId === m.id ? 'active' : ''}" data-select-media="${m.id}">
+                  <strong>${esc(m.filename)}</strong>
+                  <div class="muted">${m.catalog ? `<span class="mono">${esc(m.catalog)}</span>` : '无番号'} · ${m.tags.length} 标签</div>
+                </button>`,
+                  )
+                  .join('')
+              : `<div class="banner">没有匹配的视频（可取消「仅无标签」查看已补全项）</div>`
+          }
+        </div>
+        <div>${renderDraftCard(false)}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderVariantB(rows) {
+  return `
+    <div class="topbar">
+      <strong>DSH Media Library</strong>
+      <div class="tabs">
+        <span class="tab active">媒体库</span>
+        <span class="tab">入库</span>
+        <span class="tab">标签管理</span>
+        <span class="tab">运维</span>
+      </div>
+    </div>
+    <div class="panel">
+      ${renderFilterBar(true)}
+      ${state.toast ? `<div class="banner banner-ok">${esc(state.toast)}</div>` : ''}
+      <table>
+        <thead>
+          <tr>
+            <th>番号 / 日期</th>
+            <th>文件与标题</th>
+            <th>标签</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            rows.length
+              ? rows
+                  .map((m) => {
+                    const isOpen = state.draft && state.draft.mediaId === m.id;
+                    return `
+                      <tr class="${isOpen ? 'selected-row' : ''}">
+                        <td>${m.catalog ? `<span class="mono">${esc(m.catalog)}</span>` : '—'}<div class="muted">${esc(m.mediaDate || '—')}</div></td>
+                        <td><strong>${esc(m.title || m.filename)}</strong><div class="muted">${esc(m.filename)}</div></td>
+                        <td>${m.tags.length ? m.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join(' ') : '<span class="muted">无</span>'}</td>
+                        <td><button type="button" class="btn btn-sm ${isOpen ? 'btn-primary' : ''}" data-select-media="${m.id}">${isOpen ? '收起' : '补全'}</button></td>
+                      </tr>
+                      ${isOpen ? `<tr class="inline-expand-row"><td colspan="4">${renderDraftCard(true)}</td></tr>` : ''}
+                    `;
+                  })
+                  .join('')
+              : `<tr><td colspan="4" class="muted">没有匹配的视频（可取消「仅无标签」查看全部）</td></tr>`
+          }
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderVariantC(rows) {
+  const hasDrawer = Boolean(state.draft);
+  return `
+    <div class="topbar">
+      <strong>DSH Media Library</strong>
+      <div class="tabs">
+        <span class="tab active">媒体库</span>
+        <span class="tab">入库</span>
+        <span class="tab">标签管理</span>
+        <span class="tab">运维</span>
+      </div>
+    </div>
+    <div class="panel">
+      ${renderFilterBar(true)}
+      ${state.toast ? `<div class="banner banner-ok">${esc(state.toast)}</div>` : ''}
+      <div class="${hasDrawer ? 'split-drawer' : ''}">
+        <table>
+          <thead>
+            <tr>
+              <th>文件 / 番号</th>
+              <th>标签</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              rows.length
+                ? rows
+                    .map((m) => {
+                      const isSel = state.draft && state.draft.mediaId === m.id;
+                      return `
+                        <tr class="${isSel ? 'selected-row' : ''}">
+                          <td>
+                            <strong>${esc(m.filename)}</strong>
+                            <div class="muted">${m.catalog ? `<span class="mono">${esc(m.catalog)}</span>` : '无番号'} ${m.title ? `· ${esc(m.title)}` : ''}</div>
+                          </td>
+                          <td>${m.tags.length ? m.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join(' ') : '<span class="muted">无</span>'}</td>
+                          <td><button type="button" class="btn btn-sm ${isSel ? 'btn-primary' : ''}" data-select-media="${m.id}">补全</button></td>
+                        </tr>`;
+                    })
+                    .join('')
+                : `<tr><td colspan="3" class="muted">没有匹配的视频（可取消「仅无标签」查看全部）</td></tr>`
+            }
+          </tbody>
+        </table>
+        ${hasDrawer ? renderDraftCard(true) : ''}
+      </div>
+    </div>
+  `;
+}
+
+function render() {
+  const v = VARIANTS[state.variantIndex];
+  const rows = filteredMedia();
+  if (v.id === 'A' && !state.draft && rows.length > 0) {
+    const pick = rows.find((r) => r.id === state.activeMediaId) || rows[0];
+    state.activeMediaId = pick.id;
+    const digits = detectFc2Digits(pick);
+    state.draft = {
+      mediaId: pick.id,
+      codeInput: digits ? `FC2-PPV-${digits}` : '',
+      fetched: false,
+      provider: '',
+      sourceUrl: '',
+      title: pick.title,
+      mediaDate: pick.mediaDate,
+      catalog: pick.catalog,
+      candidateTags: [],
+      actresses: [],
+      error: '',
+    };
+  }
+
+  let bodyHtml = '';
+  if (v.id === 'A') bodyHtml = renderVariantA(rows);
+  else if (v.id === 'B') bodyHtml = renderVariantB(rows);
+  else bodyHtml = renderVariantC(rows);
+
+  document.getElementById('app').innerHTML = `
+    <div class="variant-note">
+      <span>${esc(v.hint)}</span>
+      <span>支持 ← / → 切换方案</span>
+    </div>
+    ${bodyHtml}
+    <div class="switcher-wrap">
+      <div class="switcher">
+        <button type="button" class="btn btn-sm" id="prev-variant">←</button>
+        <span class="label">${esc(v.name)}</span>
+        <button type="button" class="btn btn-sm" id="next-variant">→</button>
+      </div>
+    </div>
+  `;
+
+  // Bind events
+  document.getElementById('prev-variant')?.addEventListener('click', () => {
+    state.variantIndex = (state.variantIndex + VARIANTS.length - 1) % VARIANTS.length;
+    render();
+  });
+  document.getElementById('next-variant')?.addEventListener('click', () => {
+    state.variantIndex = (state.variantIndex + 1) % VARIANTS.length;
+    render();
+  });
+  document.getElementById('untagged-toggle')?.addEventListener('click', () => {
+    state.untaggedOnly = !state.untaggedOnly;
+    render();
+  });
+  document.getElementById('search-input')?.addEventListener('input', (e) => {
+    state.search = e.target.value;
+    render();
+    const el = document.getElementById('search-input');
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  });
+  document.getElementById('reset-demo-btn')?.addEventListener('click', () => {
+    state.media = initialMedia();
+    state.untaggedOnly = true;
+    state.search = '';
+    state.toast = '';
+    state.draft = null;
+    state.activeMediaId = 101;
+    render();
+  });
+
+  document.querySelectorAll('[data-select-media]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = Number(btn.getAttribute('data-select-media'));
+      if (VARIANTS[state.variantIndex].id === 'B' && state.draft?.mediaId === id) {
+        state.draft = null;
+        state.activeMediaId = null;
+        render();
+      } else {
+        openDraft(id);
+      }
+    });
+  });
+
+  document.querySelectorAll('[data-close-draft]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.draft = null;
+      if (VARIANTS[state.variantIndex].id !== 'A') state.activeMediaId = null;
+      render();
+    });
+  });
+
+  document.getElementById('fc2-code-input')?.addEventListener('input', (e) => {
+    if (state.draft) state.draft.codeInput = e.target.value;
+  });
+  document.getElementById('draft-title')?.addEventListener('input', (e) => {
+    if (state.draft) state.draft.title = e.target.value;
+  });
+  document.getElementById('draft-date')?.addEventListener('input', (e) => {
+    if (state.draft) state.draft.mediaDate = e.target.value;
+  });
+  document.getElementById('fetch-btn')?.addEventListener('click', fetchDraft);
+  document.getElementById('apply-btn')?.addEventListener('click', applyBackfill);
+
+  document.querySelectorAll('[data-rm-tag]').forEach((btn) => {
+    btn.addEventListener('click', () => removeCandidateTag(Number(btn.getAttribute('data-rm-tag'))));
+  });
+  document.querySelectorAll('[data-perf-bind]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.getAttribute('data-perf-bind'));
+      const cand = state.draft?.actresses[idx]?.candidates?.[0] || '新人演员';
+      resolveActress(idx, 'bind', cand);
+    });
+  });
+  document.querySelectorAll('[data-perf-create]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.getAttribute('data-perf-create'));
+      const raw = state.draft?.actresses[idx]?.raw || '';
+      resolveActress(idx, 'create', raw);
+    });
+  });
+  document.querySelectorAll('[data-perf-skip]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      resolveActress(Number(btn.getAttribute('data-perf-skip')), 'skip', '');
+    });
+  });
+}
+
+document.addEventListener('keydown', (e) => {
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if (e.key === 'ArrowLeft') {
+    state.variantIndex = (state.variantIndex + VARIANTS.length - 1) % VARIANTS.length;
+    render();
+  } else if (e.key === 'ArrowRight') {
+    state.variantIndex = (state.variantIndex + 1) % VARIANTS.length;
+    render();
+  }
+});
+
+openDraft(101);
+fetchDraft();
+</script>
+</body>
+</html>
