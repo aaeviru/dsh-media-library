@@ -76,11 +76,16 @@ export async function verifyIngestionWeb(page) {
     markB1PreviewIntercepted = resolve;
   });
   let b1PreviewResponded = false;
+  const b1ContinuePromises = [];
   const b1PreviewRoute = async (route) => {
     markB1PreviewIntercepted();
-    await b1PreviewHeld;
-    await route.continue();
-    b1PreviewResponded = true;
+    const done = (async () => {
+      await b1PreviewHeld;
+      await route.continue();
+      b1PreviewResponded = true;
+    })();
+    b1ContinuePromises.push(done);
+    await done;
   };
   await page.route('**/api/mediaLibrary/previewTagNames', b1PreviewRoute);
   try {
@@ -131,6 +136,7 @@ export async function verifyIngestionWeb(page) {
     assert.equal(stillHeldB1State, 'name', 'Expected picked tag badge to remain name while previewTagNames is held');
   } finally {
     releaseB1Preview();
+    await Promise.allSettled(b1ContinuePromises);
     await page.unroute('**/api/mediaLibrary/previewTagNames', b1PreviewRoute);
   }
 
