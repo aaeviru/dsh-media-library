@@ -15,6 +15,26 @@ export interface LiveTagPreviewStatus {
   readonly requestKey: string;
 }
 
+export interface LiveTagPreviewState extends LiveTagPreviewStatus {
+  readonly entries: readonly NormalTagPreviewEntry[];
+}
+
+export const EMPTY_LIVE_TAG_PREVIEW_STATE: LiveTagPreviewState = {
+  status: 'idle',
+  requestKey: '',
+  entries: [],
+};
+
+export interface DraftTagPreviewContext {
+  readonly manifestTags?: readonly IngestionManifestTag[] | undefined;
+  readonly performerPreview?: ManifestPerformerPreview | null | undefined;
+  readonly selectedManifestId?: number | null | undefined;
+  readonly pickedTagEntries?: readonly NormalTagPreviewEntry[] | undefined;
+  readonly liveTagPreviewState: LiveTagPreviewState;
+  readonly currentRequestKey: string;
+  readonly tagDraftModified: boolean;
+}
+
 export interface ResolvedTagMatch {
   readonly matchedTagId: number | null;
   readonly matchedTagName: string | null;
@@ -72,6 +92,49 @@ export function resolveUnresolvedTagStatus(
     return 'unavailable';
   }
   return 'pending';
+}
+
+/**
+ * Return live preview entries ONLY when they belong to a confirmed `'ready'` response
+ * for the exact `currentRequestKey`. Prevents stale entries from an earlier draft from
+ * surviving across edits or failed lookups.
+ */
+export function selectScopedLiveTagPreviewEntries(
+  liveState: LiveTagPreviewState,
+  currentRequestKey: string,
+): readonly NormalTagPreviewEntry[] {
+  if (liveState.status === 'ready' && liveState.requestKey === currentRequestKey) {
+    return liveState.entries;
+  }
+  return [];
+}
+
+/**
+ * Scope badge preview sources to the current draft:
+ * - Saved manifest previews (`manifestTags`, `performerPreview.normalTags`) are only eligible
+ *   while the tag draft has not been edited/cleared and the current live lookup has not failed.
+ *   (`serverFallback` sorting still passes saved manifest sources directly.)
+ * - Live RPC entries are strictly scoped to `status === 'ready'` for the exact `currentRequestKey`.
+ */
+export function buildDraftTagPreviewSources(ctx: DraftTagPreviewContext): MergeTagPreviewSourcesInput {
+  const unresolvedStatus = resolveUnresolvedTagStatus(ctx.liveTagPreviewState, ctx.currentRequestKey);
+  const liveTagPreviewEntries = selectScopedLiveTagPreviewEntries(
+    ctx.liveTagPreviewState,
+    ctx.currentRequestKey,
+  );
+  const currentLookupFailed =
+    ctx.liveTagPreviewState.status === 'unavailable' &&
+    ctx.liveTagPreviewState.requestKey === ctx.currentRequestKey;
+  const allowSavedManifestPreview = !ctx.tagDraftModified && !currentLookupFailed;
+
+  return {
+    manifestTags: allowSavedManifestPreview ? ctx.manifestTags : undefined,
+    performerPreview: allowSavedManifestPreview ? ctx.performerPreview : null,
+    selectedManifestId: ctx.selectedManifestId,
+    pickedTagEntries: ctx.pickedTagEntries,
+    liveTagPreviewEntries,
+    unresolvedStatus,
+  };
 }
 
 /**

@@ -432,6 +432,60 @@ describe('Host previewTagNames pure-read resolver (Issue #71 B1..B3)', () => {
     }
   });
 
+  it('propagates database access/traversal errors instead of treating an inaccessible DB as an empty library', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-preview-inaccessible-'));
+    cleanups.push(dir);
+
+    // 1. Parent path component is a regular file (ENOTDIR) — must throw, never report 'new'
+    const blockingFile = path.join(dir, 'not-a-dir');
+    fs.writeFileSync(blockingFile, 'blocker');
+    const enotdirService = new MediaLibrarySpikeService({
+      baseDir: dir,
+      dbPath: path.join(blockingFile, 'library.sqlite3'),
+      autoDailyBackup: false,
+    });
+    await assert.rejects(
+      () => enotdirService.previewTagNames({ names: ['ExistingTag'] }),
+      (err: unknown) => (err as NodeJS.ErrnoException)?.code === 'ENOTDIR',
+      'ENOTDIR parent error must propagate instead of returning confirmed new misses',
+    );
+
+    // 2. Untraversable parent directory (chmod 0o000 -> EACCES on POSIX non-root) — must throw, never report 'new'
+    if (process.platform !== 'win32' && typeof process.getuid === 'function' && process.getuid() !== 0) {
+      const lockedDir = path.join(dir, 'locked');
+      fs.mkdirSync(lockedDir);
+      const lockedDbPath = path.join(lockedDir, 'library.sqlite3');
+      const seeded = new DatabaseSync(lockedDbPath);
+      try {
+        seeded.exec('PRAGMA foreign_keys = ON;');
+        await migrateDatabase(seeded, { dbPath: lockedDbPath, appVersion: '0.7.10' });
+        const created = createTag(seeded, { name: 'SecretExisting' });
+        assert.equal(created.ok, true);
+      } finally {
+        seeded.close();
+      }
+
+      fs.chmodSync(lockedDir, 0o000);
+      try {
+        const lockedService = new MediaLibrarySpikeService({
+          baseDir: dir,
+          dbPath: lockedDbPath,
+          autoDailyBackup: false,
+        });
+        await assert.rejects(
+          () => lockedService.previewTagNames({ names: ['SecretExisting'] }),
+          (err: unknown) => {
+            const code = (err as NodeJS.ErrnoException)?.code;
+            return code === 'EACCES' || code === 'EPERM';
+          },
+          'EACCES on untraversable parent directory must propagate instead of returning confirmed new misses',
+        );
+      } finally {
+        fs.chmodSync(lockedDir, 0o700);
+      }
+    }
+  });
+
   it('Client and Host tag normalization share one implementation', () => {
     const samples = ['  High   Res  ', '\tUPPER\n  Case ', '日本語  タグ', '   '];
     for (const sample of samples) {

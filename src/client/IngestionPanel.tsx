@@ -14,16 +14,17 @@ import { PerformerDrawer, PerformerInlineCard } from './PerformerReviewSection.t
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
 import {
+  buildDraftTagPreviewSources,
   buildDraftTagRequestKey,
+  EMPTY_LIVE_TAG_PREVIEW_STATE,
   parseDraftTagNames,
   pruneTagPreviewEntries,
   removeTagPreviewEntriesByName,
   resolveDraftTagPills,
-  resolveUnresolvedTagStatus,
   TagPreviewRequestTracker,
   toPickedTagPreviewEntry,
   upsertTagPreviewEntry,
-  type LiveTagPreviewStatus,
+  type LiveTagPreviewState,
 } from './tag-draft-preview.ts';
 import { TagPicker } from './ui/TagPicker.tsx';
 import { cx } from './ui/primitives.ts';
@@ -107,12 +108,13 @@ export function IngestionPanel({
   const [error, setError] = useState<string | null>(null);
   const [tagPickerQuery, setTagPickerQuery] = useState('');
   const [tagCandidates, setTagCandidates] = useState<readonly TagSummary[]>([]);
-  const [liveTagPreviewEntries, setLiveTagPreviewEntries] = useState<readonly NormalTagPreviewEntry[]>([]);
   const [pickedTagEntries, setPickedTagEntries] = useState<readonly NormalTagPreviewEntry[]>([]);
-  const [liveTagPreviewState, setLiveTagPreviewState] = useState<LiveTagPreviewStatus>({
-    status: 'idle',
-    requestKey: '',
-  });
+  const [liveTagPreviewState, setLiveTagPreviewState] = useState<LiveTagPreviewState>(
+    EMPTY_LIVE_TAG_PREVIEW_STATE,
+  );
+  const [tagDraftModified, setTagDraftModified] = useState<boolean>(() =>
+    Boolean(sessionCache.selectedKey && sessionCache.dirtyDrafts[sessionCache.selectedKey]),
+  );
   const [tagPreviewRefreshTick, setTagPreviewRefreshTick] = useState(0);
   const tagPreviewTrackerRef = useRef<TagPreviewRequestTracker | null>(null);
   if (tagPreviewTrackerRef.current === null) {
@@ -138,6 +140,9 @@ export function IngestionPanel({
   }, []);
 
   const updateDraft = useCallback((key: string, patch: Partial<DraftFields>, fallback: DraftFields) => {
+    if (patch.tagsText !== undefined) {
+      setTagDraftModified(true);
+    }
     setDirtyDrafts((prev) => {
       const current = prev[key] ?? fallback;
       const nextDraft = { ...current, ...patch };
@@ -394,18 +399,18 @@ export function IngestionPanel({
     void reloadSelectedPreview();
   }, [reloadSelectedPreview, manifests, performerAliases, pendingQueue]);
 
-  const resetTagPreviewCaches = useCallback((scheduleRefresh = false) => {
+  const resetTagPreviewCaches = useCallback((scheduleRefresh = false, modified = false) => {
     tagPreviewTrackerRef.current?.invalidate();
-    setLiveTagPreviewEntries([]);
     setPickedTagEntries([]);
-    setLiveTagPreviewState({ status: 'idle', requestKey: '' });
+    setLiveTagPreviewState(EMPTY_LIVE_TAG_PREVIEW_STATE);
+    setTagDraftModified(modified);
     if (scheduleRefresh) {
       setTagPreviewRefreshTick((tick) => tick + 1);
     }
   }, []);
 
   useEffect(() => {
-    resetTagPreviewCaches(false);
+    resetTagPreviewCaches(false, Boolean(selectedEntryKey && sessionCache.dirtyDrafts[selectedEntryKey]));
   }, [selectedEntryKey, resetTagPreviewCaches]);
 
   const serverFallback: DraftFields = useMemo(() => {
@@ -445,39 +450,47 @@ export function IngestionPanel({
     const tracker = tagPreviewTrackerRef.current!;
     if (!selectedEntryKey) {
       tracker.invalidate();
-      setLiveTagPreviewEntries([]);
       setPickedTagEntries([]);
-      setLiveTagPreviewState({ status: 'idle', requestKey: '' });
+      setLiveTagPreviewState(EMPTY_LIVE_TAG_PREVIEW_STATE);
       return;
     }
     const names = draftTagListRef.current;
     if (names.length === 0) {
       tracker.invalidate();
-      setLiveTagPreviewEntries([]);
       setPickedTagEntries([]);
-      setLiveTagPreviewState({ status: 'idle', requestKey: '' });
+      setLiveTagPreviewState(EMPTY_LIVE_TAG_PREVIEW_STATE);
       return;
     }
     setPickedTagEntries((prev) => pruneTagPreviewEntries(prev, names));
-    setLiveTagPreviewEntries((prev) => pruneTagPreviewEntries(prev, names));
     let cancelled = false;
     const seq = tracker.next();
-    setLiveTagPreviewState({ status: 'pending', requestKey: draftTagRequestKey });
+    setLiveTagPreviewState({ status: 'pending', requestKey: draftTagRequestKey, entries: [] });
     const timer = setTimeout(() => {
       void mediaLibrary
         .previewTagNames({ names })
         .then((res) => {
           if (cancelled || !tracker.isCurrent(seq)) return;
           if (!res.ok) {
-            setLiveTagPreviewState({ status: 'unavailable', requestKey: draftTagRequestKey });
+            setLiveTagPreviewState({
+              status: 'unavailable',
+              requestKey: draftTagRequestKey,
+              entries: [],
+            });
             return;
           }
-          setLiveTagPreviewEntries(res.value);
-          setLiveTagPreviewState({ status: 'ready', requestKey: draftTagRequestKey });
+          setLiveTagPreviewState({
+            status: 'ready',
+            requestKey: draftTagRequestKey,
+            entries: res.value,
+          });
         })
         .catch(() => {
           if (cancelled || !tracker.isCurrent(seq)) return;
-          setLiveTagPreviewState({ status: 'unavailable', requestKey: draftTagRequestKey });
+          setLiveTagPreviewState({
+            status: 'unavailable',
+            requestKey: draftTagRequestKey,
+            entries: [],
+          });
         });
     }, 150);
     return () => {
@@ -486,29 +499,29 @@ export function IngestionPanel({
     };
   }, [mediaLibrary, selectedEntryKey, draftTagRequestKey, tagPreviewRefreshTick]);
 
-  const unresolvedTagStatus = useMemo(
-    () => resolveUnresolvedTagStatus(liveTagPreviewState, draftTagRequestKey),
-    [liveTagPreviewState, draftTagRequestKey],
-  );
-
   const sortedTagPills = useMemo(
     () =>
-      resolveDraftTagPills(draftTagList, {
-        manifestTags: selected?.manifest?.tags,
-        performerPreview,
-        selectedManifestId,
-        pickedTagEntries,
-        liveTagPreviewEntries,
-        unresolvedStatus: unresolvedTagStatus,
-      }),
+      resolveDraftTagPills(
+        draftTagList,
+        buildDraftTagPreviewSources({
+          manifestTags: selected?.manifest?.tags,
+          performerPreview,
+          selectedManifestId,
+          pickedTagEntries,
+          liveTagPreviewState,
+          currentRequestKey: draftTagRequestKey,
+          tagDraftModified,
+        }),
+      ),
     [
       draftTagList,
       selected,
       performerPreview,
       selectedManifestId,
       pickedTagEntries,
-      liveTagPreviewEntries,
-      unresolvedTagStatus,
+      liveTagPreviewState,
+      draftTagRequestKey,
+      tagDraftModified,
     ],
   );
 
@@ -550,14 +563,19 @@ export function IngestionPanel({
       const norm = normalizeTagName(trimmed);
       const alreadyPresent = draftTagList.some((existing) => normalizeTagName(existing) === norm);
       const pickedEntry = toPickedTagPreviewEntry(tag);
+      setTagDraftModified(true);
       if (pickedEntry) {
         setPickedTagEntries((prev) => upsertTagPreviewEntry(prev, pickedEntry));
-        setLiveTagPreviewEntries((prev) => removeTagPreviewEntriesByName(prev, trimmed));
+        setLiveTagPreviewState((prev) => ({
+          ...prev,
+          entries: removeTagPreviewEntriesByName(prev.entries, trimmed),
+        }));
       }
       if (!alreadyPresent) {
         const nextList = [...draftTagList, trimmed];
         updateDraft(selected.key, { tagsText: nextList.join(', ') }, serverFallback);
       } else if (pickedEntry) {
+        setLiveTagPreviewState(EMPTY_LIVE_TAG_PREVIEW_STATE);
         setTagPreviewRefreshTick((tick) => tick + 1);
       }
       setTagPickerQuery('');

@@ -1523,14 +1523,29 @@ export class MediaLibrarySpikeService {
     }
     // Pure read-only path: never call `initialize()` (which migrates, marks interrupted tasks,
     // or triggers daily auto-backup) and never create files or directories on disk.
+    // Only return confirmed `'new'` misses when the DB file is confirmed absent (`ENOENT`);
+    // propagate permission/traversal or I/O errors so the client displays `Unverified`.
     const dbPath = resolveLocalDatabasePath({ dbPath: this.localDatabasePath });
-    if (dbPath === ':memory:' || !fs.existsSync(dbPath)) {
+    if (dbPath === ':memory:') {
       return cleaned.map((rawName) => ({
         rawName,
         matchedTagId: null,
         matchedTagName: null,
         matchedVia: 'new' as const,
       }));
+    }
+    try {
+      fs.statSync(dbPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return cleaned.map((rawName) => ({
+          rawName,
+          matchedTagId: null,
+          matchedTagName: null,
+          matchedVia: 'new' as const,
+        }));
+      }
+      throw err;
     }
     const db = new DatabaseSync(dbPath, { readOnly: true });
     try {

@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  buildDraftTagPreviewSources,
   buildDraftTagRequestKey,
+  EMPTY_LIVE_TAG_PREVIEW_STATE,
   parseDraftTagNames,
   pruneTagPreviewEntries,
   removeTagPreviewEntriesByName,
   resolveDraftTagPills,
   resolveUnresolvedTagStatus,
+  selectScopedLiveTagPreviewEntries,
   TagPreviewRequestTracker,
   toPickedTagPreviewEntry,
   upsertTagPreviewEntry,
@@ -335,6 +338,119 @@ describe('Client tag-draft-preview helper (Issue #71 B1..B3)', () => {
     // Clearing the text resets the entire cache so re-typing cannot reuse stale picker/live matches
     const cleared = pruneTagPreviewEntries(picked, []);
     assert.deepEqual(cleared, []);
+  });
+
+  it('scopes live and saved-manifest badge evidence to the current draft so failed lookups or retyped manifest tags never reuse stale misses', () => {
+    const studioKey = buildDraftTagRequestKey(['Studio']);
+    const appendedKey = buildDraftTagRequestKey(['Studio', 'ExtraTag']);
+
+    // 1. Resolve 'Studio' as 'new' on draft 1, then append 'ExtraTag' while previewTagNames is pending or fails.
+    const readyStudioState = {
+      status: 'ready' as const,
+      requestKey: studioKey,
+      entries: [{ rawName: 'Studio', matchedTagId: null, matchedTagName: null, matchedVia: 'new' as const }],
+    };
+    assert.equal(selectScopedLiveTagPreviewEntries(readyStudioState, studioKey).length, 1);
+    assert.deepEqual(selectScopedLiveTagPreviewEntries(readyStudioState, appendedKey), []);
+
+    // Immediately after appending 'ExtraTag' (before useEffect resets live state), stale 'Studio: new' must NOT apply.
+    const immediatelyAfterAppend = resolveDraftTagPills(
+      ['Studio', 'ExtraTag'],
+      buildDraftTagPreviewSources({
+        liveTagPreviewState: readyStudioState,
+        currentRequestKey: appendedKey,
+        tagDraftModified: true,
+      }),
+    );
+    assert.deepEqual(
+      immediatelyAfterAppend.map((p) => ({ tagName: p.tagName, matchedVia: p.matchedVia })),
+      [
+        { tagName: 'Studio', matchedVia: 'pending' },
+        { tagName: 'ExtraTag', matchedVia: 'pending' },
+      ],
+    );
+
+    // If the lookup for ['Studio', 'ExtraTag'] fails, BOTH tags show 'unavailable' (never stale '+ new').
+    const failedAppendedState = {
+      status: 'unavailable' as const,
+      requestKey: appendedKey,
+      entries: [],
+    };
+    const afterFailedLookup = resolveDraftTagPills(
+      ['Studio', 'ExtraTag'],
+      buildDraftTagPreviewSources({
+        liveTagPreviewState: failedAppendedState,
+        currentRequestKey: appendedKey,
+        tagDraftModified: true,
+      }),
+    );
+    assert.deepEqual(
+      afterFailedLookup.map((p) => ({ tagName: p.tagName, matchedVia: p.matchedVia })),
+      [
+        { tagName: 'Studio', matchedVia: 'unavailable' },
+        { tagName: 'ExtraTag', matchedVia: 'unavailable' },
+      ],
+    );
+
+    // 2. Manifest had saved tag 'Studio' marked 'new' in performerPreview.normalTags.
+    //    After clearing the input and retyping 'Studio' (tagDraftModified = true), performerPreview must NOT
+    //    supply the stale 'new' miss for badges, while saved manifest sorting remains intact.
+    const manifestTags: IngestionManifestTag[] = [{ name: 'Studio' }, { tagId: 2, name: 'SavedExisting' }];
+    const performerPreview = makePerformerPreview(10, [
+      { rawName: 'Studio', matchedTagId: null, matchedTagName: null, matchedVia: 'new' },
+      { rawName: 'SavedExisting', matchedTagId: 2, matchedTagName: 'SavedExisting', matchedVia: 'name' },
+    ]);
+
+    // Saved manifest sorting (serverFallback) still keeps performerPreview available
+    const sortedFallback = resolveDraftTagPills(
+      manifestTags.map((t) => t.name),
+      { manifestTags, performerPreview, selectedManifestId: 10 },
+    );
+    assert.deepEqual(
+      sortedFallback.map((p) => p.tagName),
+      ['SavedExisting', 'Studio'],
+    );
+
+    // After user cleared and retyped 'Studio', badges must show 'pending' (or 'unavailable' on RPC failure), never stale 'new'
+    const retypedPending = resolveDraftTagPills(
+      ['Studio'],
+      buildDraftTagPreviewSources({
+        manifestTags,
+        performerPreview,
+        selectedManifestId: 10,
+        liveTagPreviewState: EMPTY_LIVE_TAG_PREVIEW_STATE,
+        currentRequestKey: studioKey,
+        tagDraftModified: true,
+      }),
+    );
+    assert.equal(retypedPending[0]?.matchedVia, 'pending');
+
+    const retypedFailed = resolveDraftTagPills(
+      ['Studio'],
+      buildDraftTagPreviewSources({
+        manifestTags,
+        performerPreview,
+        selectedManifestId: 10,
+        liveTagPreviewState: { status: 'unavailable', requestKey: studioKey, entries: [] },
+        currentRequestKey: studioKey,
+        tagDraftModified: true,
+      }),
+    );
+    assert.equal(retypedFailed[0]?.matchedVia, 'unavailable');
+
+    // Even on an untouched manifest, a failed live lookup must not fall back to a stale performerPreview miss.
+    const untouchedFailed = resolveDraftTagPills(
+      ['Studio'],
+      buildDraftTagPreviewSources({
+        manifestTags,
+        performerPreview,
+        selectedManifestId: 10,
+        liveTagPreviewState: { status: 'unavailable', requestKey: studioKey, entries: [] },
+        currentRequestKey: studioKey,
+        tagDraftModified: false,
+      }),
+    );
+    assert.equal(untouchedFailed[0]?.matchedVia, 'unavailable');
   });
 
   it('TagPreviewRequestTracker monotonically invalidates superseded and switched requests', () => {
