@@ -639,17 +639,19 @@ function extractAvWikiActressValues(ddBlocks: readonly string[]): string[] {
   return out;
 }
 
-function isAvWikiChallengePage(html: string, rawTitle: string): boolean {
+function isAvWikiChallengePage(html: string, rawTitle: string, hasArticleEvidence: boolean): boolean {
   const loweredTitle = cleanMetadataText(rawTitle).toLowerCase();
   if (
-    loweredTitle === 'just a moment...' ||
     loweredTitle.startsWith('just a moment') ||
     loweredTitle.includes('attention required! | cloudflare') ||
-    loweredTitle.includes('access denied')
+    /cf-browser-verification|\/cdn-cgi\/challenge-platform|__cf_chl_/i.test(html)
   ) {
     return true;
   }
-  return /cf-browser-verification|\/cdn-cgi\/challenge-platform|__cf_chl_/i.test(html);
+  if (!hasArticleEvidence && /^(?:403\s+)?access denied(?:\s*[|｜\-–—].*)?$/i.test(loweredTitle)) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -659,35 +661,18 @@ function isAvWikiChallengePage(html: string, rawTitle: string): boolean {
  */
 export function parseAvWikiHtml(html: string, productCode: string, sourceUrl: string): ProviderLookupResult {
   const normalizedCode = cleanMetadataText(productCode).toUpperCase();
+  const requestedParsed = parseStandardProductCode(normalizedCode);
 
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
   const rawTitle = titleMatch?.[1] ?? '';
   const rawOgTitle = extractOgTitle(html);
-
-  if (isAvWikiChallengePage(html, rawTitle)) {
-    return {
-      metadata: null,
-      category: 'auth_or_blocked',
-      reason: 'Challenge or blocked interstitial returned by AV-WIKI.',
-      sourceUrl,
-    };
-  }
-
-  const title = stripAvWikiTitle(rawTitle, normalizedCode) || stripAvWikiTitle(rawOgTitle, normalizedCode);
-  if (!title) {
-    return {
-      metadata: null,
-      category: 'parse_error',
-      reason: 'Article title not found in AV-WIKI page.',
-      sourceUrl,
-    };
-  }
 
   const actressSet = new Set<string>();
   let maker = '';
   let mediaDate: string | null = null;
   let hasActressDlField = false;
   let hasRecognizedDlField = false;
+  let pageProductCodeRaw = '';
 
   const dlPairRe = /<dt\b[^>]*>([\s\S]*?)<\/dt>((?:\s*<dd\b[^>]*>[\s\S]*?<\/dd>)+)/gi;
   for (const pairMatch of html.matchAll(dlPairRe)) {
@@ -703,6 +688,9 @@ export function parseAvWikiHtml(html: string, productCode: string, sourceUrl: st
       }
     } else if (label === 'メーカー品番') {
       hasRecognizedDlField = true;
+      if (!pageProductCodeRaw) {
+        pageProductCodeRaw = cleanMetadataText(ddBlocks.map((b) => b.replace(/<[^>]+>/g, ' ')).join(' '));
+      }
     } else if (label === 'メーカー') {
       hasRecognizedDlField = true;
       if (!maker) {
@@ -743,14 +731,49 @@ export function parseAvWikiHtml(html: string, productCode: string, sourceUrl: st
 
   const codePattern = buildAvWikiCodePattern(normalizedCode);
   const titleHeaderText = `${cleanPreservingPunctuation(rawTitle)} ${cleanPreservingPunctuation(rawOgTitle)}`;
-  const hasCodeInTitle = Boolean(codePattern && new RegExp(codePattern, 'i').test(titleHeaderText));
-  const hasAvWikiTitleMarker = /に出てるAV女優|AV[- ]?WIKI/i.test(titleHeaderText);
+  const hasCodeInTitle = Boolean(
+    codePattern && new RegExp(`(?<![A-Za-z0-9])${codePattern}(?![A-Za-z0-9])`, 'i').test(titleHeaderText),
+  );
+  const hasAvWikiTitleMarker = /に出てるAV女優/i.test(titleHeaderText);
   const hasBodyArticleMarker = /(?:AV女優名|メーカー品番)\s*[:：]?/i.test(bodyPlainText);
-  if (!hasRecognizedDlField && !hasCodeInTitle && !hasAvWikiTitleMarker && !hasBodyArticleMarker) {
+  const hasArticleEvidence = hasRecognizedDlField || hasCodeInTitle || hasAvWikiTitleMarker || hasBodyArticleMarker;
+
+  if (isAvWikiChallengePage(html, rawTitle, hasArticleEvidence)) {
+    return {
+      metadata: null,
+      category: 'auth_or_blocked',
+      reason: 'Challenge or blocked interstitial returned by AV-WIKI.',
+      sourceUrl,
+    };
+  }
+
+  if (!hasArticleEvidence) {
     return {
       metadata: null,
       category: 'parse_error',
       reason: 'Response does not match an AV-WIKI article page.',
+      sourceUrl,
+    };
+  }
+
+  if (requestedParsed && pageProductCodeRaw) {
+    const pageParsed = parseStandardProductCode(pageProductCodeRaw);
+    if (pageParsed && pageParsed.baseCode !== requestedParsed.baseCode) {
+      return {
+        metadata: null,
+        category: 'parse_error',
+        reason: `AV-WIKI product code mismatch: expected ${requestedParsed.baseCode}, got ${pageParsed.baseCode}.`,
+        sourceUrl,
+      };
+    }
+  }
+
+  const title = stripAvWikiTitle(rawTitle, normalizedCode) || stripAvWikiTitle(rawOgTitle, normalizedCode);
+  if (!title) {
+    return {
+      metadata: null,
+      category: 'parse_error',
+      reason: 'Article title not found in AV-WIKI page.',
       sourceUrl,
     };
   }

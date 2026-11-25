@@ -299,6 +299,7 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
       sampleAvWikiHtml({
         title: '<title>ABP-76: Clean Title (Special) | AV-WIKI</title>',
         ogTitle: '',
+        body: '<dl><dt>メーカー品番</dt><dd>ABP-076</dd><dt>AV女優名</dt><dd><a>凰かなめ</a></dd></dl>',
       }),
       'ABP-076',
       'https://av-wiki.net/abp-076/',
@@ -415,6 +416,49 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
     assert.equal(nonArticleRes.metadata, null);
     assert.equal(nonArticleRes.category, 'parse_error');
 
+    // Site-brand suffix alone without article fields must NOT pass as article metadata.
+    const brandedMaintenanceRes = parseAvWikiHtml(
+      '<html><head><title>Maintenance Notice | AV-WIKI</title></head><body><p>Be right back.</p></body></html>',
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(brandedMaintenanceRes.metadata, null);
+    assert.equal(brandedMaintenanceRes.category, 'parse_error');
+
+    // Explicit メーカー品番 mismatch (e.g. ABP-5760 vs requested ABP-576) must be rejected.
+    const mismatchCodeRes = parseAvWikiHtml(
+      sampleAvWikiHtml({
+        title: '<title>ABP-5760：Different Work | AV-WIKI</title>',
+        body: '<dl><dt>メーカー品番</dt><dd>ABP-5760</dd><dt>AV女優名</dt><dd><a>Alice</a></dd></dl>',
+      }),
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(mismatchCodeRes.metadata, null);
+    assert.equal(mismatchCodeRes.category, 'parse_error');
+
+    // Real article titled "Access Denied" with matching メーカー品番 must NOT be misclassified as blocked.
+    const accessDeniedTitleRes = parseAvWikiHtml(
+      sampleAvWikiHtml({
+        title: '<title>ABP-576：Access Denied | AV-WIKI</title>',
+        body: '<dl><dt>メーカー品番</dt><dd>ABP-576</dd><dt>AV女優名</dt><dd><a>Alice</a></dd></dl>',
+      }),
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(accessDeniedTitleRes.category, 'ok');
+    assert.equal(accessDeniedTitleRes.metadata?.title, 'Access Denied');
+    assert.deepEqual(accessDeniedTitleRes.metadata?.actresses, ['Alice']);
+
+    // Standalone "Access Denied" block page without article fields returns auth_or_blocked.
+    const accessDeniedBlockRes = parseAvWikiHtml(
+      '<html><head><title>403 Access Denied</title></head><body><p>Forbidden</p></body></html>',
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(accessDeniedBlockRes.metadata, null);
+    assert.equal(accessDeniedBlockRes.category, 'auth_or_blocked');
+
     // Missing title -> parse_error
     const missingTitleRes = parseAvWikiHtml(
       '<html><head><title>AV-WIKI</title></head><body><dl><dt>AV女優名</dt><dd>凰かなめ</dd></dl></body></html>',
@@ -457,8 +501,19 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
       retries: 1,
       retryDelayMs: 0,
       requestDelayMs: 40,
-      fetchImpl: async () => {
+      fetchImpl: async (url) => {
         successTimestamps.push(Date.now());
+        if (url.includes('/ssis-001/')) {
+          return {
+            status: 200,
+            ok: true,
+            text: async () =>
+              sampleAvWikiHtml({
+                title: '<title>SSIS-001：Delayed Second Work | AV-WIKI</title>',
+                body: '<dl><dt>メーカー品番</dt><dd>SSIS-001</dd><dt>AV女優名</dt><dd><a>三上悠亜</a></dd></dl>',
+              }),
+          };
+        }
         return { status: 200, ok: true, text: async () => sampleAvWikiHtml() };
       },
     });
