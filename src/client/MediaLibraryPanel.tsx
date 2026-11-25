@@ -445,7 +445,11 @@ export function MediaLibraryPanel({
       if (nextSortBy === current.sortBy) return;
       coordinator.patchDraft({ sortBy: nextSortBy });
       setSortBy(nextSortBy);
-      void executeSearch({ overrideSortBy: nextSortBy, overrideSortOrder: current.sortOrder });
+      void executeSearch({
+        preserveAppliedFilters: true,
+        overrideSortBy: nextSortBy,
+        overrideSortOrder: current.sortOrder,
+      });
     },
     [coordinator, executeSearch],
   );
@@ -455,7 +459,11 @@ export function MediaLibraryPanel({
     const nextSortOrder: MediaSortOrder = current.sortOrder === 'desc' ? 'asc' : 'desc';
     coordinator.patchDraft({ sortOrder: nextSortOrder });
     setSortOrder(nextSortOrder);
-    void executeSearch({ overrideSortBy: current.sortBy, overrideSortOrder: nextSortOrder });
+    void executeSearch({
+      preserveAppliedFilters: true,
+      overrideSortBy: current.sortBy,
+      overrideSortOrder: nextSortOrder,
+    });
   }, [coordinator, executeSearch]);
 
   const handleResetFilters = useCallback(() => {

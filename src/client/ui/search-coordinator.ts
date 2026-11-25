@@ -21,6 +21,7 @@ export interface SearchDraftState {
 export interface SearchExecutionOptions {
   readonly cursor?: string | undefined;
   readonly append?: boolean | undefined;
+  readonly preserveAppliedFilters?: boolean | undefined;
   readonly overrideTagIds?: readonly number[] | undefined;
   readonly overrideKeyword?: string | undefined;
   readonly overrideCatalog?: string | undefined;
@@ -29,6 +30,38 @@ export interface SearchExecutionOptions {
   readonly overrideDateTo?: string | undefined;
   readonly overrideSortBy?: MediaSortField | undefined;
   readonly overrideSortOrder?: MediaSortOrder | undefined;
+}
+
+interface AppliedSearchFilters {
+  readonly text: string | undefined;
+  readonly catalogNumber: string | undefined;
+  readonly catalogMatchMode: CatalogMatchMode;
+  readonly tagIds: readonly number[] | undefined;
+  readonly dateFrom: string | undefined;
+  readonly dateTo: string | undefined;
+  readonly limit: number;
+}
+
+const EMPTY_APPLIED_FILTERS: AppliedSearchFilters = {
+  text: undefined,
+  catalogNumber: undefined,
+  catalogMatchMode: 'exact',
+  tagIds: undefined,
+  dateFrom: undefined,
+  dateTo: undefined,
+  limit: 50,
+};
+
+function extractAppliedFilters(query: SearchMediaInput): AppliedSearchFilters {
+  return {
+    text: query.text,
+    catalogNumber: query.catalogNumber,
+    catalogMatchMode: query.catalogMatchMode ?? 'exact',
+    tagIds: query.tagIds,
+    dateFrom: query.dateFrom,
+    dateTo: query.dateTo,
+    limit: query.limit ?? 50,
+  };
 }
 
 export type RpcResponse<T> =
@@ -52,6 +85,9 @@ export interface SearchCoordinatorCallbacks {
 export class MediaSearchCoordinator {
   private draft: SearchDraftState;
   private committedQuery: SearchMediaInput | null = null;
+  private committedFilters: AppliedSearchFilters = EMPTY_APPLIED_FILTERS;
+  private inFlightFilters: { readonly requestId: number; readonly filters: AppliedSearchFilters } | null =
+    null;
   private requestSeq = 0;
   private refreshSeq = 0;
   private appending = false;
@@ -95,30 +131,48 @@ export class MediaSearchCoordinator {
     callbacks.onError(null);
 
     const current = this.draft;
-    const effectiveTagIds = options?.overrideTagIds ?? current.selectedTagIds;
-    const effectiveKeyword = (options?.overrideKeyword ?? current.keyword).trim();
-    const effectiveCatalog = (options?.overrideCatalog ?? current.catalogNumber).trim();
-    const effectiveCatalogMode = options?.overrideCatalogMode ?? current.catalogMatchMode;
-    const effectiveDateFrom = (options?.overrideDateFrom ?? current.dateFrom).trim();
-    const effectiveDateTo = (options?.overrideDateTo ?? current.dateTo).trim();
     const effectiveSortBy = options?.overrideSortBy ?? current.sortBy;
     const effectiveSortOrder = options?.overrideSortOrder ?? current.sortOrder;
 
-    // The form is a draft. A cursor only belongs to the query that produced
-    // the currently displayed results, never to subsequent draft edits.
-    const query: SearchMediaInput = isAppend
-      ? this.committedQuery!
-      : {
-          text: effectiveKeyword || undefined,
-          catalogNumber: effectiveCatalog || undefined,
-          catalogMatchMode: effectiveCatalogMode,
-          tagIds: effectiveTagIds.length > 0 ? effectiveTagIds : undefined,
-          dateFrom: effectiveDateFrom || undefined,
-          dateTo: effectiveDateTo || undefined,
-          sortBy: effectiveSortBy,
-          sortOrder: effectiveSortOrder,
-          limit: 50,
-        };
+    // The form is a draft:
+    // - Load More reuses `committedQuery` so subsequent draft edits never corrupt pagination.
+    // - Sort changes (`preserveAppliedFilters: true`) retain the currently applied filters
+    //   (never silently applying unsubmitted draft edits) and restart at page 1.
+    let query: SearchMediaInput;
+    if (isAppend) {
+      query = this.committedQuery!;
+    } else if (options?.preserveAppliedFilters) {
+      const baseFilters = this.inFlightFilters?.filters ?? this.committedFilters;
+      query = {
+        ...baseFilters,
+        sortBy: effectiveSortBy,
+        sortOrder: effectiveSortOrder,
+      };
+      this.inFlightFilters = { requestId, filters: baseFilters };
+    } else {
+      const effectiveTagIds = options?.overrideTagIds ?? current.selectedTagIds;
+      const effectiveKeyword = (options?.overrideKeyword ?? current.keyword).trim();
+      const effectiveCatalog = (options?.overrideCatalog ?? current.catalogNumber).trim();
+      const effectiveCatalogMode = options?.overrideCatalogMode ?? current.catalogMatchMode;
+      const effectiveDateFrom = (options?.overrideDateFrom ?? current.dateFrom).trim();
+      const effectiveDateTo = (options?.overrideDateTo ?? current.dateTo).trim();
+
+      const nextFilters: AppliedSearchFilters = {
+        text: effectiveKeyword || undefined,
+        catalogNumber: effectiveCatalog || undefined,
+        catalogMatchMode: effectiveCatalogMode,
+        tagIds: effectiveTagIds.length > 0 ? effectiveTagIds : undefined,
+        dateFrom: effectiveDateFrom || undefined,
+        dateTo: effectiveDateTo || undefined,
+        limit: 50,
+      };
+      query = {
+        ...nextFilters,
+        sortBy: effectiveSortBy,
+        sortOrder: effectiveSortOrder,
+      };
+      this.inFlightFilters = { requestId, filters: nextFilters };
+    }
 
     try {
       const res = await callbacks.searchMedia({
@@ -129,6 +183,7 @@ export class MediaSearchCoordinator {
 
       if (res.ok) {
         this.committedQuery = query;
+        this.committedFilters = extractAppliedFilters(query);
         callbacks.onResult(res.value, isAppend);
       } else {
         callbacks.onError(res.error.message || callbacks.fallbackRpcError());
@@ -138,6 +193,9 @@ export class MediaSearchCoordinator {
         callbacks.onError(err instanceof Error ? err.message : String(err));
       }
     } finally {
+      if (this.inFlightFilters?.requestId === requestId) {
+        this.inFlightFilters = null;
+      }
       if (requestId === this.requestSeq) {
         this.appending = false;
         callbacks.onSearchingChange(false);

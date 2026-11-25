@@ -166,14 +166,16 @@ function canonicalAddedAtKey(raw: string | null): string | null {
   if (!raw) return null
   const trimmed = raw.trim()
   if (!/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return null
-  const isoCandidate = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
-    ? `${trimmed}T00:00:00.000Z`
-    : trimmed.includes('T')
-      ? trimmed
-      : trimmed.replace(' ', 'T') + (/[Zz]|[+-]\d{2}:\d{2}$/.test(trimmed) ? '' : 'Z')
-  const ms = Date.parse(isoCandidate)
-  if (!Number.isFinite(ms)) return null
-  return new Date(ms).toISOString()
+  const match = trimmed.match(
+    /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?)?$/i,
+  )
+  if (!match) return null
+  const [, datePart, timePart = '00:00:00', fracRaw = '', tzPart = 'Z'] = match
+  const wholeMs = Date.parse(`${datePart}T${timePart}${tzPart.toUpperCase()}`)
+  if (!Number.isFinite(wholeMs)) return null
+  const utcSeconds = new Date(wholeMs).toISOString().slice(0, 19)
+  const trimmedFrac = fracRaw.replace(/0+$/, '')
+  return `${utcSeconds}.${trimmedFrac}`
 }
 
 function getExpectedIds(
@@ -649,7 +651,7 @@ describe('Issue #68: Multi-dimensional sorting & stable keyset pagination (B1..B
     assert.equal(schema.safeParse({ sortOrder: 'up' }).success, false)
   })
 
-  it('B1/B2/B3: added_at orders mixed TagStudio space timestamps, ISO Z, offsets, and microseconds chronologically across keyset pages', async () => {
+  it('B1/B2/B3: added_at orders mixed TagStudio space timestamps, ISO Z, offsets, and same-millisecond microseconds chronologically across keyset pages', async () => {
     const mixedDbPath = path.join(tempRoot, 'mixed-added-at', 'library.sqlite3')
     const { db } = openMediaLibraryDatabase({ dbPath: mixedDbPath })
     try {
@@ -663,26 +665,38 @@ describe('Issue #68: Multi-dimensional sorting & stable keyset pagination (B1..B
           id, root_id, relative_path, filename, extension, added_at, status, revision
         ) VALUES (?, 'nas-main', ?, ?, 'mkv', ?, 'indexed', 1)
       `)
-      // Specifically includes Critic Round 1 repro: '2026-01-10 18:00:00' vs '2026-01-10T01:00:00.000Z'
-      // Raw text ASC would place space (0x20) before 'T' (0x54), putting 18:00 before 01:00!
+      // Includes:
+      // - Critic Round 1 repro: '2026-01-10 18:00:00' vs '2026-01-10T01:00:00.000Z'
+      // - Critic Round 2 repro: same-millisecond microseconds where the LATER timestamp has the
+      //   LOWER id (id=4 '.123400' vs id=9 '.123100'), so millisecond truncation would misorder them!
       const rows: ReadonlyArray<readonly [number, string | null]> = [
         [1, '2026-01-10 18:00:00'],
         [2, '2026-01-10T01:00:00.000Z'],
         [3, '2026-01-10T10:00:00+09:00'], // same UTC instant as id=2 (01:00:00Z)
-        [4, '2026-01-10 18:00:00.123456'], // 123ms after id=1
+        [4, '2026-01-10 18:00:00.123400'], // later microsecond with LOWER id
         [5, '2026-01-10'], // 00:00:00Z
         [6, 'not-a-timestamp'], // unparseable -> NULLS LAST
         [7, 'now'], // SQLite magic keyword must NOT evaluate dynamically -> NULLS LAST
         [8, null],
+        [9, '2026-01-10 18:00:00.123100'], // earlier microsecond in same ms with HIGHER id
+        [10, '2026-01-10 18:00:00.123'], // exact .123000 boundary -> strictly before .123100
+        [11, '2026-01-10T10:00:00.123400+09:00'], // 01:00:00.123400Z (later, lower id)
+        [12, '2026-01-10T01:00:00.123100Z'], // 01:00:00.123100Z (earlier, higher id)
       ]
       for (const [id, addedAt] of rows) {
         insert.run(id, `ts_${id}.mkv`, `ts_${id}.mkv`, addedAt)
       }
 
-      // Chronological ASC: 5 (00:00Z) < 2,3 (01:00Z) < 1 (18:00Z) < 4 (18:00.123Z) < NULL/unparseable [6, 7, 8]
-      const expectedAsc = ['5', '2', '3', '1', '4', '6', '7', '8']
-      // Chronological DESC: 4 (18:00.123Z) > 1 (18:00Z) > 3,2 (01:00Z) > 5 (00:00Z) > NULL/unparseable [8, 7, 6]
-      const expectedDesc = ['4', '1', '3', '2', '5', '8', '7', '6']
+      // Chronological ASC:
+      // 5 (00:00Z) < 2,3 (01:00Z) < 12 (01:00.1231Z) < 11 (01:00.1234Z)
+      // < 1 (18:00Z) < 10 (18:00.123Z) < 9 (18:00.1231Z) < 4 (18:00.1234Z)
+      // < NULL/unparseable [6, 7, 8]
+      const expectedAsc = ['5', '2', '3', '12', '11', '1', '10', '9', '4', '6', '7', '8']
+      // Chronological DESC:
+      // 4 (18:00.1234Z) > 9 (18:00.1231Z) > 10 (18:00.123Z) > 1 (18:00Z)
+      // > 11 (01:00.1234Z) > 12 (01:00.1231Z) > 3,2 (01:00Z) > 5 (00:00Z)
+      // > NULL/unparseable [8, 7, 6]
+      const expectedDesc = ['4', '9', '10', '1', '11', '12', '3', '2', '5', '8', '7', '6']
 
       for (const [sortOrder, expected] of [
         ['asc', expectedAsc],
@@ -698,7 +712,9 @@ describe('Issue #68: Multi-dimensional sorting & stable keyset pagination (B1..B
         // Verify keyset cursor pagination (limit=2 and limit=1) matches full chronological order
         for (const pageLimit of [2, 1]) {
           const paged: string[] = []
+          const seenCursors = new Set<string>()
           let cursor: string | undefined
+          let pages = 0
           do {
             const page = searchMediaInDatabase(db, {
               sortBy: 'added_at',
@@ -706,7 +722,17 @@ describe('Issue #68: Multi-dimensional sorting & stable keyset pagination (B1..B
               limit: pageLimit,
               cursor,
             })
+            pages += 1
+            assert.ok(pages <= rows.length + 2, `Pagination loop guard tripped for added_at ${sortOrder}`)
             paged.push(...page.items.map(i => i.mediaId))
+            if (page.nextCursor) {
+              assert.equal(
+                seenCursors.has(page.nextCursor),
+                false,
+                `Repeated pagination cursor detected for added_at ${sortOrder}: ${page.nextCursor}`,
+              )
+              seenCursors.add(page.nextCursor)
+            }
             cursor = page.nextCursor ?? undefined
           } while (cursor)
           assert.deepEqual(
@@ -719,6 +745,147 @@ describe('Issue #68: Multi-dimensional sorting & stable keyset pagination (B1..B
     } finally {
       db.close()
     }
+  })
+
+  it('B4: MediaSearchCoordinator preserves applied filters when sorting even after unsubmitted draft edits', async () => {
+    const searchCalls: SearchMediaInput[] = []
+    let failNextSearch = false
+    let activeCursor: string | null = null
+    let lastError: string | null = null
+
+    const coordinator = new MediaSearchCoordinator({
+      keyword: '',
+      catalogNumber: 'PAGE-10',
+      catalogMatchMode: 'prefix',
+      dateFrom: '',
+      dateTo: '',
+      selectedTagIds: [1],
+      sortBy: 'catalog_number',
+      sortOrder: 'desc',
+      tagSearchInput: '',
+    })
+
+    const callbacks = {
+      searchMedia: async (input: SearchMediaInput) => {
+        searchCalls.push(input)
+        if (failNextSearch) {
+          failNextSearch = false
+          return { ok: false as const, error: { message: 'Invalid dateFrom' } }
+        }
+        return {
+          ok: true as const,
+          value: {
+            items: [],
+            nextCursor: `cur:${input.catalogNumber ?? ''}:${input.sortBy}:${input.sortOrder}`,
+            totalMatching: 60,
+            elapsedMs: 1,
+            resolvedTagIds: input.tagIds ?? [],
+            unresolvedTagQueries: [],
+            ambiguousAliases: [],
+          },
+        }
+      },
+      onSearchingChange: () => {},
+      onLoadingMoreChange: () => {},
+      onClearNextCursor: () => {
+        activeCursor = null
+      },
+      onError: (msg: string | null) => {
+        lastError = msg
+      },
+      onResult: (res: SearchMediaResult) => {
+        activeCursor = res.nextCursor
+      },
+      fallbackRpcError: () => 'RPC error',
+    }
+
+    // 1. Submit applied filter: catalogNumber='PAGE-10' (prefix) + tagIds=[1]
+    await coordinator.executeSearch(callbacks)
+    assert.equal(searchCalls.length, 1)
+    assert.equal(searchCalls[0]?.catalogNumber, 'PAGE-10')
+    assert.equal(searchCalls[0]?.catalogMatchMode, 'prefix')
+    assert.deepEqual(searchCalls[0]?.tagIds, [1])
+    assert.equal(activeCursor, 'cur:PAGE-10:catalog_number:desc')
+
+    // 2. User edits draft fields WITHOUT submitting
+    coordinator.syncDraft({
+      keyword: 'unsubmitted keyword',
+      catalogNumber: 'ABP-909',
+      catalogMatchMode: 'exact',
+      dateFrom: '2026-01-01',
+      dateTo: '2026-12-31',
+      selectedTagIds: [1],
+      sortBy: 'catalog_number',
+      sortOrder: 'desc',
+      tagSearchInput: '',
+    })
+
+    // 3. Toggle sort direction -> must preserve applied PAGE-10 prefix filter & ignore draft edits
+    coordinator.patchDraft({ sortOrder: 'asc' })
+    await coordinator.executeSearch(callbacks, {
+      preserveAppliedFilters: true,
+      overrideSortBy: 'catalog_number',
+      overrideSortOrder: 'asc',
+    })
+    assert.equal(searchCalls.length, 2)
+    assert.equal(searchCalls[1]?.catalogNumber, 'PAGE-10')
+    assert.equal(searchCalls[1]?.catalogMatchMode, 'prefix')
+    assert.equal(searchCalls[1]?.text, undefined)
+    assert.equal(searchCalls[1]?.dateFrom, undefined)
+    assert.equal(searchCalls[1]?.dateTo, undefined)
+    assert.deepEqual(searchCalls[1]?.tagIds, [1])
+    assert.equal(searchCalls[1]?.sortBy, 'catalog_number')
+    assert.equal(searchCalls[1]?.sortOrder, 'asc')
+    assert.equal(searchCalls[1]?.cursor, undefined)
+    assert.equal(activeCursor, 'cur:PAGE-10:catalog_number:asc')
+
+    // 4. Switch sort field -> still preserves applied PAGE-10 prefix filter
+    coordinator.patchDraft({ sortBy: 'filename' })
+    await coordinator.executeSearch(callbacks, {
+      preserveAppliedFilters: true,
+      overrideSortBy: 'filename',
+      overrideSortOrder: 'asc',
+    })
+    assert.equal(searchCalls.length, 3)
+    assert.equal(searchCalls[2]?.catalogNumber, 'PAGE-10')
+    assert.equal(searchCalls[2]?.catalogMatchMode, 'prefix')
+    assert.equal(searchCalls[2]?.text, undefined)
+    assert.equal(searchCalls[2]?.sortBy, 'filename')
+    assert.equal(searchCalls[2]?.sortOrder, 'asc')
+
+    // 5. Load More uses the updated committedQuery (PAGE-10 + filename asc) + cursor
+    await coordinator.executeSearch(callbacks, {
+      cursor: activeCursor!,
+      append: true,
+    })
+    assert.equal(searchCalls.length, 4)
+    assert.equal(searchCalls[3]?.catalogNumber, 'PAGE-10')
+    assert.equal(searchCalls[3]?.sortBy, 'filename')
+    assert.equal(searchCalls[3]?.sortOrder, 'asc')
+    assert.equal(searchCalls[3]?.cursor, 'cur:PAGE-10:filename:asc')
+
+    // 6. A failed explicit search does NOT corrupt committedFilters for subsequent sort changes
+    failNextSearch = true
+    await coordinator.executeSearch(callbacks)
+    assert.equal(lastError, 'Invalid dateFrom')
+    coordinator.patchDraft({ sortOrder: 'desc' })
+    await coordinator.executeSearch(callbacks, {
+      preserveAppliedFilters: true,
+      overrideSortBy: 'filename',
+      overrideSortOrder: 'desc',
+    })
+    assert.equal(searchCalls[5]?.catalogNumber, 'PAGE-10')
+    assert.equal(searchCalls[5]?.catalogMatchMode, 'prefix')
+    assert.equal(searchCalls[5]?.dateFrom, undefined)
+    assert.equal(searchCalls[5]?.sortOrder, 'desc')
+
+    // 7. Explicit Search submission now applies the draft ('ABP-909' exact) with active sort
+    await coordinator.executeSearch(callbacks)
+    assert.equal(searchCalls[6]?.catalogNumber, 'ABP-909')
+    assert.equal(searchCalls[6]?.catalogMatchMode, 'exact')
+    assert.equal(searchCalls[6]?.text, 'unsubmitted keyword')
+    assert.equal(searchCalls[6]?.sortBy, 'filename')
+    assert.equal(searchCalls[6]?.sortOrder, 'desc')
   })
 
   it('B4: MediaSearchCoordinator prevents refreshAll from overwriting a newer sort selection during metadata wait', async () => {

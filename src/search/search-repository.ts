@@ -35,10 +35,21 @@ interface SortColumnSpec {
 
 // Normalize mixed added_at formats (TagStudio 'YYYY-MM-DD HH:MM:SS[.ffffff]', native ISO
 // 'YYYY-MM-DDTHH:MM:SS.sssZ', timezone offsets like '+09:00', or date-only 'YYYY-MM-DD') into
-// canonical UTC ISO-8601 ('YYYY-MM-DDTHH:MM:SS.fffZ') so lexicographic order matches chronological
-// order. Guarding with a YYYY-MM-DD prefix prevents SQLite magic strings like 'now'.
+// canonical UTC 'YYYY-MM-DDTHH:MM:SS.<rtrimmed-fractional-digits>'. Stripping trailing fractional
+// zeros without a trailing sentinel preserves arbitrary sub-millisecond precision (ms/us/ns) in
+// exact lexicographic == chronological order. Guarding with a YYYY-MM-DD prefix prevents SQLite
+// magic strings like 'now' from evaluating dynamically.
+const ADDED_AT_TRIMMED_EXPR = "TRIM(COALESCE(mf.added_at, ''))"
+const ADDED_AT_AFTER_DOT_EXPR = `SUBSTR(${ADDED_AT_TRIMMED_EXPR}, INSTR(${ADDED_AT_TRIMMED_EXPR}, '.') + 1)`
+const ADDED_AT_FRAC_EXPR =
+  `CASE WHEN INSTR(${ADDED_AT_TRIMMED_EXPR}, '.') > 0 ` +
+  `THEN RTRIM(SUBSTR(${ADDED_AT_AFTER_DOT_EXPR}, 1, LENGTH(${ADDED_AT_AFTER_DOT_EXPR}) - LENGTH(LTRIM(${ADDED_AT_AFTER_DOT_EXPR}, '0123456789'))), '0') ` +
+  `ELSE '' END`
 const ADDED_AT_CANONICAL_EXPR =
-  "CASE WHEN TRIM(COALESCE(mf.added_at, '')) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN strftime('%Y-%m-%dT%H:%M:%fZ', TRIM(mf.added_at)) ELSE NULL END"
+  `CASE WHEN ${ADDED_AT_TRIMMED_EXPR} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' ` +
+  `AND strftime('%Y-%m-%dT%H:%M:%S', ${ADDED_AT_TRIMMED_EXPR}) IS NOT NULL ` +
+  `THEN strftime('%Y-%m-%dT%H:%M:%S', ${ADDED_AT_TRIMMED_EXPR}) || '.' || (${ADDED_AT_FRAC_EXPR}) ` +
+  `ELSE NULL END`
 
 const SORT_COLUMN_SPECS: Readonly<Record<MediaSortField, SortColumnSpec>> = {
   media_date: {

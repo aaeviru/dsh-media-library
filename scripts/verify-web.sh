@@ -394,21 +394,29 @@ try {
   await page.click("[data-testid=\"sort-field-catalog_number\"]");
   await waitSortState(50, 66, "SSIS-999");
 
-  // Filter retention + page-1 reset across sort field and direction switches
+  // Filter retention + page-1 reset across sort field and direction switches,
+  // including when the user has unsubmitted draft edits in the filter form.
   await page.click("[data-testid=\"catalog-mode-prefix\"]");
   await page.fill("[data-testid=\"search-catalog-input\"]", "PAGE-10");
   await page.click("[data-testid=\"search-submit-btn\"]");
   await waitSortState(50, 60, "PAGE-1059");
   await page.click("[data-testid=\"load-more-btn\"]");
   await waitSortState(60, 60, "PAGE-1059");
+  // Edit draft catalog input & mode WITHOUT submitting; sort switches must preserve applied PAGE-10 prefix filter.
+  await page.click("[data-testid=\"catalog-mode-exact\"]");
+  await page.fill("[data-testid=\"search-catalog-input\"]", "ABP-909");
   await page.click("[data-testid=\"sort-order-toggle-btn\"]");
   await waitSortState(50, 60, "PAGE-1000");
+  assert.equal(await page.locator("[data-testid=\"search-catalog-input\"]").inputValue(), "ABP-909");
   await page.click("[data-testid=\"sort-field-filename\"]");
   await waitSortState(50, 60, "page1000.mkv");
   await page.click("[data-testid=\"load-more-btn\"]");
   await waitSortState(60, 60, "page1000.mkv");
   const filteredSortedIds = await page.locator("tr[data-testid^=\"media-row-\"]").evaluateAll(rows => rows.map(r => r.dataset.testid));
   assert.equal(new Set(filteredSortedIds).size, 60, "Filtered sorted pagination must neither repeat nor omit rows");
+  // Submitting now applies the previously edited draft ("ABP-909" exact) under the active filename asc sort.
+  await page.click("[data-testid=\"search-submit-btn\"]");
+  await waitSortState(1, 1, "2026-10-15_ABP-909");
 
   // Reset restores default sort (media_date desc) and full 50 / 66 page 1
   await page.click("[data-testid=\"search-reset-btn\"]");
