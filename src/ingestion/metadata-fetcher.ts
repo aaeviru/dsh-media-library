@@ -128,6 +128,16 @@ export function resolveMetadataLookupRoute(text: string | null | undefined): Met
   return null;
 }
 
+function safeFromCodePoint(codePoint: number): string {
+  if (!Number.isInteger(codePoint) || codePoint <= 0 || codePoint > 0x10ffff) {
+    return '';
+  }
+  if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+    return '';
+  }
+  return String.fromCodePoint(codePoint);
+}
+
 function decodeHtmlEntities(input: string): string {
   return input
     .replace(/&quot;/g, '"')
@@ -137,8 +147,16 @@ function decodeHtmlEntities(input: string): string {
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&amp;/g, '&')
-    .replace(/&#(\d+);/g, (_, dec: string) => String.fromCodePoint(Number(dec)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)));
+    .replace(/&#(\d+);/g, (_, dec: string) => safeFromCodePoint(Number(dec)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => safeFromCodePoint(Number.parseInt(hex, 16)));
+}
+
+function cleanPreservingPunctuation(text: string | null | undefined): string {
+  if (!text) return '';
+  return decodeHtmlEntities(text)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[ \t\r\n\f]+/g, ' ')
+    .trim();
 }
 
 export function cleanMetadataText(text: string | null | undefined): string {
@@ -550,22 +568,19 @@ function buildAvWikiCodePattern(productCode: string): string {
 }
 
 function stripAvWikiTitle(raw: string, productCode: string): string {
-  let value = cleanMetadataText(raw);
+  let value = cleanPreservingPunctuation(raw);
   if (!value) return '';
 
-  const hadActressSuffix = /に出てるAV女優/i.test(value);
   value = value.replace(/\s*に出てるAV女優[\s\S]*$/i, '').trim();
-  if (!hadActressSuffix) {
-    value = value.replace(/\s*\|\s*[^|]*$/, '').trim();
-  }
+  value = value.replace(/\s*[|｜\-–—]\s*AV[- ]?WIKI(?:\s*[|｜\-–—][\s\S]*)?$/i, '').trim();
 
   const codePattern = buildAvWikiCodePattern(productCode);
   if (codePattern) {
-    value = value.replace(new RegExp(`^(?:【\\s*)?${codePattern}(?:\\s*】)?\\s*:\\s*`, 'i'), '');
+    value = value.replace(new RegExp(`^(?:【\\s*)?${codePattern}(?:\\s*】)?\\s*[:：]\\s*`, 'i'), '');
     value = value.replace(new RegExp(`^【\\s*${codePattern}\\s*】\\s*`, 'i'), '');
   }
 
-  value = cleanMetadataText(value);
+  value = value.replace(/[ \t\r\n\f]+/g, ' ').trim();
   if (!value || /^AV[- ]?WIKI$/i.test(value)) {
     return '';
   }
@@ -619,8 +634,9 @@ function extractAvWikiAnchorOrTextValues(ddBlocks: readonly string[]): string[] 
 }
 
 /**
- * Parse `av-wiki.net` HTML pages for standard maker product codes (`Issue #67 B2`).
- * Extracts clean title, actresses, release/distribution date, and maker/studio without scraping noisy page tags.
+ * Parse `av-wiki.net` HTML pages for standard maker product codes (`Issue #67 B3`).
+ * Extracts clean title (preserving original punctuation), actresses, release/distribution date,
+ * and maker/studio without scraping noisy page tags.
  */
 export function parseAvWikiHtml(html: string, productCode: string, sourceUrl: string): ProviderLookupResult {
   const normalizedCode = cleanMetadataText(productCode).toUpperCase();
@@ -737,7 +753,7 @@ export type FetchLike = (
 export interface MetadataFetcherOptions {
   readonly cmadbBaseUrl?: string | undefined;
   readonly ppvdbBaseUrl?: string | undefined;
-  readonly avWikiBaseUrl?: string | undefined;
+  readonly avWikiBaseUrl?: string | (() => string) | undefined;
   readonly cmadbCookie?: string | undefined;
   readonly ppvdbCookie?: string | undefined;
   readonly retries?: number | undefined;
@@ -760,7 +776,7 @@ function classifyHttpStatus(status: number): FetchedMetadataCandidate['category'
 export class MetadataFetcher {
   private readonly cmadbBaseUrl: string;
   private readonly ppvdbBaseUrl: string;
-  private readonly avWikiBaseUrl: string;
+  private readonly avWikiBaseUrlOption: string | (() => string) | undefined;
   private readonly cmadbCookie: string;
   private readonly ppvdbCookie: string;
   private readonly retries: number;
@@ -772,7 +788,7 @@ export class MetadataFetcher {
   constructor(options: MetadataFetcherOptions = {}) {
     this.cmadbBaseUrl = (options.cmadbBaseUrl ?? 'https://fc2cmadb.com').replace(/\/+$/, '');
     this.ppvdbBaseUrl = (options.ppvdbBaseUrl ?? 'https://fc2ppvdb.com').replace(/\/+$/, '');
-    this.avWikiBaseUrl = (options.avWikiBaseUrl?.trim() || 'https://av-wiki.net').replace(/\/+$/, '');
+    this.avWikiBaseUrlOption = options.avWikiBaseUrl;
     this.cmadbCookie = (options.cmadbCookie ?? '').trim();
     this.ppvdbCookie = (options.ppvdbCookie ?? '').trim();
     this.retries = Math.max(1, options.retries ?? 2);
@@ -780,6 +796,12 @@ export class MetadataFetcher {
     this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 500);
     this.requestDelayMs = Math.max(0, options.requestDelayMs ?? 250);
     this.fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init));
+  }
+
+  private resolveAvWikiBaseUrl(): string {
+    const raw =
+      typeof this.avWikiBaseUrlOption === 'function' ? this.avWikiBaseUrlOption() : this.avWikiBaseUrlOption;
+    return (raw?.trim() || 'https://av-wiki.net').replace(/\/+$/, '');
   }
 
   private async fetchTextWithHeaders(
@@ -908,28 +930,39 @@ export class MetadataFetcher {
   }
 
   private async fetchAndParseWithRetry(
-    sourceUrl: string,
+    resolveUrl: string | (() => string),
     cookieHeader: string,
     parser: (html: string, sourceUrl: string) => ProviderLookupResult,
   ): Promise<ProviderLookupResult & { rawHtml?: string }> {
+    const getUrl = typeof resolveUrl === 'function' ? resolveUrl : () => resolveUrl;
     let last: ProviderLookupResult & { rawHtml?: string } = {
       metadata: null,
       category: 'transient_network',
       reason: 'No request made.',
-      sourceUrl,
+      sourceUrl: '',
     };
 
     for (let attempt = 1; attempt <= this.retries; attempt++) {
+      const sourceUrl = getUrl();
       const res = await this.fetchTextWithHeaders(sourceUrl, cookieHeader);
       const status = res.status;
       if (!res.ok) {
         last = { metadata: null, category: res.category, reason: res.reason, sourceUrl };
       } else {
-        const parsed = parser(res.body, sourceUrl);
-        last = parsed.metadata ? { ...parsed, rawHtml: res.body } : parsed;
+        try {
+          const parsed = parser(res.body, sourceUrl);
+          last = parsed.metadata ? { ...parsed, rawHtml: res.body } : parsed;
+        } catch (err) {
+          last = {
+            metadata: null,
+            category: 'parse_error',
+            reason: err instanceof Error ? err.message : String(err),
+            sourceUrl,
+          };
+        }
       }
 
-      if (last.metadata) return last;
+      if (last.metadata) break;
       const shouldRetry =
         last.category === 'transient_network' ||
         last.category === 'transient_http' ||
@@ -937,8 +970,9 @@ export class MetadataFetcher {
         (status !== null && RETRYABLE_STATUS.has(status));
 
       if (!shouldRetry || attempt >= this.retries) break;
-      if (this.retryDelayMs > 0) {
-        await new Promise((r) => setTimeout(r, this.retryDelayMs * attempt));
+      const retryWaitMs = Math.max(this.requestDelayMs, this.retryDelayMs * attempt);
+      if (retryWaitMs > 0) {
+        await new Promise((r) => setTimeout(r, retryWaitMs));
       }
     }
 
@@ -969,9 +1003,10 @@ export class MetadataFetcher {
       };
     }
 
-    const primaryUrl = `${this.avWikiBaseUrl}/${parsed.slug}/`;
-    const primary = await this.fetchAndParseWithRetry(primaryUrl, '', (html, url) =>
-      parseAvWikiHtml(html, parsed.code, url),
+    const primary = await this.fetchAndParseWithRetry(
+      () => `${this.resolveAvWikiBaseUrl()}/${parsed.slug}/`,
+      '',
+      (html, url) => parseAvWikiHtml(html, parsed.code, url),
     );
     if (primary.metadata) {
       return {
@@ -983,9 +1018,10 @@ export class MetadataFetcher {
     }
 
     if (parsed.slug !== parsed.baseSlug && primary.category === 'not_found') {
-      const fallbackUrl = `${this.avWikiBaseUrl}/${parsed.baseSlug}/`;
-      const fallback = await this.fetchAndParseWithRetry(fallbackUrl, '', (html, url) =>
-        parseAvWikiHtml(html, parsed.baseCode, url),
+      const fallback = await this.fetchAndParseWithRetry(
+        () => `${this.resolveAvWikiBaseUrl()}/${parsed.baseSlug}/`,
+        '',
+        (html, url) => parseAvWikiHtml(html, parsed.baseCode, url),
       );
       return {
         metadata: fallback.metadata,

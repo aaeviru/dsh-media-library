@@ -787,10 +787,7 @@ export async function fetchMetadataForManifest(
     };
   }
 
-  const lookup =
-    route.kind === 'fc2'
-      ? await fetcher.lookup(route.parsed.videoId)
-      : await fetcher.lookupAvWiki(route.parsed);
+  const lookup = await fetcher.lookupByText(route.parsed.code);
   if (!lookup.metadata) {
     return {
       ok: false,

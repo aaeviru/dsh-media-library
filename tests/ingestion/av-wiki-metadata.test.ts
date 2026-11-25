@@ -68,7 +68,57 @@ function sampleAvWikiHtml(overrides?: {
 }
 
 describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
-  it('B1: exports shared blocklists, skips leading technical tokens via matchAll, and guards uncensored studio codes', () => {
+  it('B1: deterministic routing isolates FC2-PPV-* from av-wiki.net and rejects unsupported codes with zero HTTP calls', async () => {
+    // Route resolution: FC2 -> fc2, standard -> avwiki, uncensored/non-coded -> null.
+    const fc2Route = resolveMetadataLookupRoute('FC2-PPV-4545625-1.mp4');
+    assert.equal(fc2Route?.kind, 'fc2');
+    assert.equal(fc2Route?.kind === 'fc2' ? fc2Route.parsed.videoId : '', '4545625');
+
+    const avWikiRoute = resolveMetadataLookupRoute('ABP-576-1.mp4');
+    assert.equal(avWikiRoute?.kind, 'avwiki');
+    assert.equal(avWikiRoute?.kind === 'avwiki' ? avWikiRoute.parsed.slug : '', 'abp-576-1');
+
+    assert.equal(resolveMetadataLookupRoute('10MU-061315_01'), null);
+    assert.equal(resolveMetadataLookupRoute('061315_01-10mu-1080p.mp4'), null);
+    assert.equal(resolveMetadataLookupRoute('random_home_clip.mp4'), null);
+
+    // FC2-PPV-* NEVER falls back to av-wiki.net even when both FC2 providers return 404.
+    const fc2Urls: string[] = [];
+    const fc2Fetcher = new MetadataFetcher({
+      retries: 1,
+      retryDelayMs: 0,
+      requestDelayMs: 0,
+      fetchImpl: async (url) => {
+        fc2Urls.push(url);
+        return { status: 404, ok: false, text: async () => 'Not Found' };
+      },
+    });
+    const fc2Miss = await fc2Fetcher.lookupByText('FC2-PPV-4545625.mp4');
+    assert.equal(fc2Miss.metadata, null);
+    assert.equal(fc2Miss.category, 'not_found');
+    assert.deepEqual(fc2Urls, [
+      'https://fc2cmadb.com/articles/4545625',
+      'https://fc2ppvdb.com/articles/4545625',
+    ]);
+    assert.equal(fc2Urls.some((u) => u.includes('av-wiki')), false);
+
+    // Uncensored studio code returns `no_code` with 0 HTTP requests.
+    const zeroUrls: string[] = [];
+    const zeroFetcher = new MetadataFetcher({
+      retries: 1,
+      retryDelayMs: 0,
+      requestDelayMs: 0,
+      fetchImpl: async (url) => {
+        zeroUrls.push(url);
+        return { status: 200, ok: true, text: async () => '' };
+      },
+    });
+    const uncensoredRes = await zeroFetcher.lookupByText('10MU-061315_01');
+    assert.equal(uncensoredRes.category, 'no_code');
+    assert.deepEqual(zeroUrls, []);
+  });
+
+  it('B2: normalizes standard codes using shared blocklists, zero-pads <3 digits, and falls back from suffixed slug on 404', async () => {
     for (const token of [
       'VIDEO', 'AUDIO', 'SAMPLE', 'H264', 'H265', 'X264', 'X265', 'HEVC', 'AVC',
       '1080P', '720P', '480P', '2160P', 'FHD', 'UHD', 'MP3', 'MP4', 'MOV', 'FLV',
@@ -128,21 +178,65 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
     assert.equal(parseStandardProductCode('VIDEO-001.mp4'), null);
     assert.equal(parseStandardProductCode('HEVC-1080.mp4'), null);
 
-    // Deterministic routing: FC2 -> fc2, standard -> avwiki, unsupported -> null.
-    const fc2Route = resolveMetadataLookupRoute('FC2-PPV-4545625-1.mp4');
-    assert.equal(fc2Route?.kind, 'fc2');
-    assert.equal(fc2Route?.kind === 'fc2' ? fc2Route.parsed.videoId : '', '4545625');
+    // 1) Suffixed slug `abp-576-1` -> 404 -> automatic fallback to `abp-576`.
+    const requestedUrls: string[] = [];
+    const fetcher = new MetadataFetcher({
+      avWikiBaseUrl: 'https://av-wiki.example/',
+      retries: 1,
+      retryDelayMs: 0,
+      requestDelayMs: 0,
+      fetchImpl: async (url) => {
+        requestedUrls.push(url);
+        if (url === 'https://av-wiki.example/abp-576-1/') {
+          return { status: 404, ok: false, text: async () => 'Not Found' };
+        }
+        if (url === 'https://av-wiki.example/abp-576/') {
+          return { status: 200, ok: true, text: async () => sampleAvWikiHtml() };
+        }
+        return { status: 404, ok: false, text: async () => 'Not Found' };
+      },
+    });
+    const fallbackRes = await fetcher.lookupAvWiki(parseStandardProductCode('ABP-576-1.mp4')!);
+    assert.equal(fallbackRes.category, 'ok');
+    assert.equal(fallbackRes.metadata?.provider, 'AVWIKI');
+    assert.equal(fallbackRes.sourceUrl, 'https://av-wiki.example/abp-576/');
+    assert.deepEqual(requestedUrls, [
+      'https://av-wiki.example/abp-576-1/',
+      'https://av-wiki.example/abp-576/',
+    ]);
 
-    const avWikiRoute = resolveMetadataLookupRoute('ABP-576-1.mp4');
-    assert.equal(avWikiRoute?.kind, 'avwiki');
-    assert.equal(avWikiRoute?.kind === 'avwiki' ? avWikiRoute.parsed.slug : '', 'abp-576-1');
+    // 2) Direct hit on suffixed slug does NOT request base slug.
+    const directUrls: string[] = [];
+    const directFetcher = new MetadataFetcher({
+      retries: 1,
+      retryDelayMs: 0,
+      requestDelayMs: 0,
+      fetchImpl: async (url) => {
+        directUrls.push(url);
+        return { status: 200, ok: true, text: async () => sampleAvWikiHtml() };
+      },
+    });
+    const directRes = await directFetcher.lookupByText('ABP-576-1.mp4');
+    assert.equal(directRes.category, 'ok');
+    assert.deepEqual(directUrls, ['https://av-wiki.net/abp-576-1/']);
 
-    assert.equal(resolveMetadataLookupRoute('10MU-061315_01'), null);
-    assert.equal(resolveMetadataLookupRoute('061315_01-10mu-1080p.mp4'), null);
-    assert.equal(resolveMetadataLookupRoute('random_home_clip.mp4'), null);
+    // 3) Auth block (403) on suffixed slug does NOT fall back to base slug.
+    const blockedUrls: string[] = [];
+    const blockedFetcher = new MetadataFetcher({
+      retries: 2,
+      retryDelayMs: 0,
+      requestDelayMs: 0,
+      fetchImpl: async (url) => {
+        blockedUrls.push(url);
+        return { status: 403, ok: false, text: async () => 'Forbidden' };
+      },
+    });
+    const blockedRes = await blockedFetcher.lookupByText('ABP-576-1.mp4');
+    assert.equal(blockedRes.category, 'auth_or_blocked');
+    assert.deepEqual(blockedUrls, ['https://av-wiki.net/abp-576-1/']);
   });
 
-  it('B2: parseAvWikiHtml extracts clean title, actresses, maker, date, and ignores noisy generic tags', () => {
+  it('B3: parseAvWikiHtml preserves original title punctuation, strips only provider boilerplate, and extracts actresses/maker/date', () => {
     const res = parseAvWikiHtml(sampleAvWikiHtml(), 'ABP-576', 'https://av-wiki.net/abp-576/');
     assert.equal(res.category, 'ok');
     assert.equal(res.metadata?.provider, 'AVWIKI');
@@ -153,7 +247,43 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
     assert.equal(res.metadata?.mediaDate, '2017-03-10');
     assert.deepEqual(res.metadata?.candidateTags, ['凰かなめ', '美谷朱里', 'プレステージ']);
 
-    // Title with CODE: and trailing ` | ...` (without `に出てるAV女優...`)
+    // Fullwidth Japanese punctuation must be preserved verbatim (never NFKC-folded to ASCII).
+    const fullwidthPunctRes = parseAvWikiHtml(
+      sampleAvWikiHtml({
+        title: '<title>ABP-576：原題！？（特典）に出てるAV女優名まとめ | AV-WIKI</title>',
+        ogTitle: '',
+      }),
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(fullwidthPunctRes.category, 'ok');
+    assert.equal(fullwidthPunctRes.metadata?.title, '原題！？（特典）');
+
+    // Non-boilerplate pipes inside titles must NOT be stripped.
+    const internalPipeRes = parseAvWikiHtml(
+      sampleAvWikiHtml({
+        title: '<title>ABP-576: Part A | Part B</title>',
+        ogTitle: '',
+      }),
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(internalPipeRes.category, 'ok');
+    assert.equal(internalPipeRes.metadata?.title, 'Part A | Part B');
+
+    // Recognized AV-WIKI suffix is stripped while preserving internal pipes.
+    const internalPipeWithSuffixRes = parseAvWikiHtml(
+      sampleAvWikiHtml({
+        title: '<title>ABP-576: Part A | Part B | AV-WIKI</title>',
+        ogTitle: '',
+      }),
+      'ABP-576',
+      'https://av-wiki.net/abp-576/',
+    );
+    assert.equal(internalPipeWithSuffixRes.category, 'ok');
+    assert.equal(internalPipeWithSuffixRes.metadata?.title, 'Part A | Part B');
+
+    // Title with CODE: and trailing ` | AV-WIKI` (without `に出てるAV女優...`)
     const pipeTitleRes = parseAvWikiHtml(
       sampleAvWikiHtml({
         title: '<title>ABP-76: Clean Title (Special) | AV-WIKI</title>',
@@ -244,110 +374,95 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
     assert.equal(missingTitleRes.category, 'parse_error');
   });
 
-  it('B3: MetadataFetcher retries transient HTTP, falls back from suffixed slug on 404, and keeps FC2 strictly isolated', async () => {
-    // 1) Suffixed slug `abp-576-1` -> 404 -> automatic fallback to `abp-576` with transient 503 retry.
-    const requestedUrls: string[] = [];
-    let baseAttempts = 0;
-    const fetcher = new MetadataFetcher({
-      avWikiBaseUrl: 'https://av-wiki.example/',
-      retries: 2,
-      retryDelayMs: 0,
-      requestDelayMs: 0,
-      fetchImpl: async (url) => {
-        requestedUrls.push(url);
-        if (url === 'https://av-wiki.example/abp-576-1/') {
-          return { status: 404, ok: false, text: async () => 'Not Found' };
-        }
-        if (url === 'https://av-wiki.example/abp-576/') {
-          baseAttempts += 1;
-          if (baseAttempts === 1) {
-            return { status: 503, ok: false, text: async () => 'Service Unavailable' };
-          }
-          return { status: 200, ok: true, text: async () => sampleAvWikiHtml() };
-        }
-        return { status: 404, ok: false, text: async () => 'Not Found' };
-      },
-    });
+  it('B4: handles malformed numeric entities as parse_error with sourceUrl, retries transient HTTP, and enforces requestDelayMs', async () => {
+    // 1) Malformed numeric entities never throw RangeError; return parse_error with sourceUrl.
+    for (const malformedHtml of [
+      '<html><head><title>&#99999999;</title></head><body></body></html>',
+      '<html><head><title>&#x99999999;</title></head><body></body></html>',
+      '<html><head><title>&#xD800;</title></head><body></body></html>',
+    ]) {
+      const directParsed = parseAvWikiHtml(malformedHtml, 'ABP-576', 'https://av-wiki.example/abp-576/');
+      assert.equal(directParsed.metadata, null);
+      assert.equal(directParsed.category, 'parse_error');
+      assert.equal(directParsed.sourceUrl, 'https://av-wiki.example/abp-576/');
 
-    const parsed = parseStandardProductCode('ABP-576-1.mp4')!;
-    const fallbackRes = await fetcher.lookupAvWiki(parsed);
-    assert.equal(fallbackRes.category, 'ok');
-    assert.equal(fallbackRes.metadata?.provider, 'AVWIKI');
-    assert.equal(fallbackRes.sourceUrl, 'https://av-wiki.example/abp-576/');
-    assert.deepEqual(requestedUrls, [
-      'https://av-wiki.example/abp-576-1/',
-      'https://av-wiki.example/abp-576/',
-      'https://av-wiki.example/abp-576/',
-    ]);
+      const malformedFetcher = new MetadataFetcher({
+        avWikiBaseUrl: 'https://av-wiki.example',
+        retries: 1,
+        retryDelayMs: 0,
+        requestDelayMs: 0,
+        fetchImpl: async () => ({ status: 200, ok: true, text: async () => malformedHtml }),
+      });
+      const lookupRes = await malformedFetcher.lookupByText('ABP-576');
+      assert.equal(lookupRes.metadata, null);
+      assert.equal(lookupRes.category, 'parse_error');
+      assert.equal(lookupRes.sourceUrl, 'https://av-wiki.example/abp-576/');
+    }
 
-    // 2) Direct hit on suffixed slug does NOT request base slug.
-    const directUrls: string[] = [];
-    const directFetcher = new MetadataFetcher({
+    // 2) Successful requests apply requestDelayMs before returning.
+    const successTimestamps: number[] = [];
+    const delayedSuccessFetcher = new MetadataFetcher({
+      avWikiBaseUrl: 'https://av-wiki.example',
       retries: 1,
       retryDelayMs: 0,
-      requestDelayMs: 0,
-      fetchImpl: async (url) => {
-        directUrls.push(url);
+      requestDelayMs: 40,
+      fetchImpl: async () => {
+        successTimestamps.push(Date.now());
         return { status: 200, ok: true, text: async () => sampleAvWikiHtml() };
       },
     });
-    const directRes = await directFetcher.lookupByText('ABP-576-1.mp4');
-    assert.equal(directRes.category, 'ok');
-    assert.deepEqual(directUrls, ['https://av-wiki.net/abp-576-1/']);
+    const tStart = Date.now();
+    const ok1 = await delayedSuccessFetcher.lookupByText('ABP-576');
+    const afterFirst = Date.now();
+    const ok2 = await delayedSuccessFetcher.lookupByText('SSIS-001');
+    assert.equal(ok1.category, 'ok');
+    assert.equal(ok2.category, 'ok');
+    assert.ok(afterFirst - tStart >= 30, `Expected successful request to wait requestDelayMs, elapsed=${afterFirst - tStart}ms`);
+    assert.equal(successTimestamps.length, 2);
+    assert.ok(
+      successTimestamps[1]! - successTimestamps[0]! >= 30,
+      `Expected consecutive requests spaced by requestDelayMs, gap=${successTimestamps[1]! - successTimestamps[0]!}ms`,
+    );
 
-    // 3) Auth block (403) on suffixed slug does NOT fall back to base slug.
-    const blockedUrls: string[] = [];
-    const blockedFetcher = new MetadataFetcher({
+    // 3) Retries respect requestDelayMs even when retryDelayMs is 0.
+    const retryTimestamps: number[] = [];
+    const retryDelayFetcher = new MetadataFetcher({
+      avWikiBaseUrl: 'https://av-wiki.example',
+      retries: 2,
+      retryDelayMs: 0,
+      requestDelayMs: 40,
+      fetchImpl: async () => {
+        retryTimestamps.push(Date.now());
+        if (retryTimestamps.length === 1) {
+          return { status: 503, ok: false, text: async () => 'Service Unavailable' };
+        }
+        return { status: 200, ok: true, text: async () => sampleAvWikiHtml() };
+      },
+    });
+    const retried = await retryDelayFetcher.lookupByText('ABP-576');
+    assert.equal(retried.category, 'ok');
+    assert.equal(retryTimestamps.length, 2);
+    assert.ok(
+      retryTimestamps[1]! - retryTimestamps[0]! >= 30,
+      `Expected retry to honor requestDelayMs when retryDelayMs=0, gap=${retryTimestamps[1]! - retryTimestamps[0]!}ms`,
+    );
+
+    // 4) Rate-limited 429 classifies as `rate_limited` when retries exhaust.
+    const rateLimitedFetcher = new MetadataFetcher({
+      avWikiBaseUrl: 'https://av-wiki.example',
       retries: 2,
       retryDelayMs: 0,
       requestDelayMs: 0,
-      fetchImpl: async (url) => {
-        blockedUrls.push(url);
-        return { status: 403, ok: false, text: async () => 'Forbidden' };
-      },
+      fetchImpl: async () => ({ status: 429, ok: false, text: async () => 'Too Many Requests' }),
     });
-    const blockedRes = await blockedFetcher.lookupByText('ABP-576-1.mp4');
-    assert.equal(blockedRes.category, 'auth_or_blocked');
-    assert.deepEqual(blockedUrls, ['https://av-wiki.net/abp-576-1/']);
-
-    // 4) FC2-PPV-* NEVER falls back to av-wiki.net even when both FC2 providers return 404.
-    const fc2Urls: string[] = [];
-    const fc2Fetcher = new MetadataFetcher({
-      retries: 1,
-      retryDelayMs: 0,
-      requestDelayMs: 0,
-      fetchImpl: async (url) => {
-        fc2Urls.push(url);
-        return { status: 404, ok: false, text: async () => 'Not Found' };
-      },
-    });
-    const fc2Miss = await fc2Fetcher.lookupByText('FC2-PPV-4545625.mp4');
-    assert.equal(fc2Miss.metadata, null);
-    assert.equal(fc2Miss.category, 'not_found');
-    assert.deepEqual(fc2Urls, [
-      'https://fc2cmadb.com/articles/4545625',
-      'https://fc2ppvdb.com/articles/4545625',
-    ]);
-    assert.equal(fc2Urls.some((u) => u.includes('av-wiki')), false);
-
-    // 5) Uncensored code returns `no_code` with 0 HTTP requests.
-    const zeroUrls: string[] = [];
-    const zeroFetcher = new MetadataFetcher({
-      retries: 1,
-      retryDelayMs: 0,
-      requestDelayMs: 0,
-      fetchImpl: async (url) => {
-        zeroUrls.push(url);
-        return { status: 200, ok: true, text: async () => '' };
-      },
-    });
-    const uncensoredRes = await zeroFetcher.lookupByText('10MU-061315_01');
-    assert.equal(uncensoredRes.category, 'no_code');
-    assert.deepEqual(zeroUrls, []);
+    const rateLimitedRes = await rateLimitedFetcher.lookupByText('ABP-576');
+    assert.equal(rateLimitedRes.metadata, null);
+    assert.equal(rateLimitedRes.category, 'rate_limited');
+    assert.equal(rateLimitedRes.sourceUrl, 'https://av-wiki.example/abp-576/');
   });
 
-  it('B4: fetchMetadataForManifest routes standard codes preserving filename suffix, integrates performer queue, and never renames files', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-avwiki-b4-'));
+  it('B1 & B5: both Ingestion Manifest and Metadata Backfill Draft share AV-WIKI routing without renaming files', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-avwiki-b5-'));
     try {
       const stagingDir = path.join(tmpDir, 'staging');
       fs.mkdirSync(stagingDir, { recursive: true });
@@ -366,7 +481,7 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
       try {
         await migrateDatabase(db, { dbPath, appVersion: '0.7.10' });
 
-        // 1) Standard file with part suffix in filename (`ABP-576-1.mp4`), base code in `catalogNumber` (`ABP-576`).
+        // --- Part A: Ingestion Manifest path ---
         const mStd = await ensureManifestForStagingFile(db, {
           tempPath: stdFile,
           stagingDir,
@@ -397,8 +512,8 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
                 ok: true,
                 text: async () =>
                   sampleAvWikiHtml({
-                    title: '<title>SSIS-001：Manual Override Titleに出てるAV女優名まとめ | AV-WIKI</title>',
-                    body: '<dl><dt>AV女優名</dt><dd><a>三上悠亜</a></dd><dt>メーカー</dt><dd><a>S1</a></dd></dl>',
+                    title: '<title>SSIS-001：Manual Override Title！？に出てるAV女優名まとめ | AV-WIKI</title>',
+                    body: '<dl><dt>AV女優名</dt><dd><a>三上悠亜</a></dd><dt>メーカー</dt><dd><a>S1</a></dd><dt>発売日</dt><dd>2024-01-15</dd></dl>',
                   }),
               };
             }
@@ -428,19 +543,17 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
           reviewItems.map((r) => r.rawName).sort(),
           ['凰かなめ', '美谷朱里'].sort(),
         );
-
-        // Staged file was never renamed or moved.
         assert.equal(fs.existsSync(stdFile), true);
 
-        // 2) Manual catalogNumber override takes precedence over filename when baseCode differs.
+        // Manual catalogNumber override takes precedence over filename when baseCode differs.
         db.prepare('UPDATE ingestion_manifests SET catalog_number = ? WHERE id = ?').run('SSIS-001', mStd.id);
         seenUrls.length = 0;
         const overrideRes = await fetchMetadataForManifest(db, mStd.id, fetcher);
         assert.equal(overrideRes.ok, true);
-        assert.equal(overrideRes.title, 'Manual Override Title');
+        assert.equal(overrideRes.title, 'Manual Override Title！？');
         assert.deepEqual(seenUrls, ['https://av-wiki.net/ssis-001/']);
 
-        // 3) Uncensored studio file produces `no_code` with 0 requests.
+        // Uncensored studio file produces `no_code` with 0 requests.
         const mUnc = await ensureManifestForStagingFile(db, {
           tempPath: uncensoredFile,
           stagingDir,
@@ -456,7 +569,7 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
         assert.equal(uncRes.category, 'no_code');
         assert.deepEqual(seenUrls, []);
 
-        // 4) FC2 file routes strictly to FC2 providers, never av-wiki.net.
+        // FC2 file routes strictly to FC2 providers, never av-wiki.net.
         const mFc2 = await ensureManifestForStagingFile(db, {
           tempPath: fc2File,
           stagingDir,
@@ -481,26 +594,58 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
     }
   });
 
-  it('B5: avWikiBaseUrl is a volatile Config setting dynamically read by MediaLibrarySpikeService', async () => {
-    // Verify Config schema exposes volatile avWikiBaseUrl with default 'https://av-wiki.net'
+  it('Shared Seam: volatile avWikiBaseUrl is read before EVERY request (including retries and suffix fallbacks)', async () => {
+    // 1) Config schema exposes volatile avWikiBaseUrl with default 'https://av-wiki.net'.
     const schemaDict = (Config as unknown as { dict?: Record<string, { meta?: { default?: unknown }; type?: string }> }).dict;
     assert.ok(schemaDict?.avWikiBaseUrl, 'Expected avWikiBaseUrl in Config schema');
     const resolvedDefault = Config({} as never);
     assert.equal(typeof resolvedDefault.avWikiBaseUrl.get, 'function');
     assert.equal(resolvedDefault.avWikiBaseUrl.get(), 'https://av-wiki.net');
 
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-avwiki-b5-'));
+    // 2) MetadataFetcher reads getter before EVERY attempt: retry attempt 2 sees updated base URL.
+    let dynamicRetryBase = 'https://mirror-a.av-wiki.local';
+    const retrySeenUrls: string[] = [];
+    const retryFetcher = new MetadataFetcher({
+      avWikiBaseUrl: () => dynamicRetryBase,
+      retries: 2,
+      retryDelayMs: 0,
+      requestDelayMs: 0,
+      fetchImpl: async (url) => {
+        retrySeenUrls.push(url);
+        if (retrySeenUrls.length === 1) {
+          dynamicRetryBase = 'https://mirror-b.av-wiki.local/';
+          return { status: 503, ok: false, text: async () => 'Service Unavailable' };
+        }
+        return { status: 200, ok: true, text: async () => sampleAvWikiHtml() };
+      },
+    });
+    const retryDynamicRes = await retryFetcher.lookupByText('ABP-576');
+    assert.equal(retryDynamicRes.category, 'ok');
+    assert.equal(retryDynamicRes.sourceUrl, 'https://mirror-b.av-wiki.local/abp-576/');
+    assert.deepEqual(retrySeenUrls, [
+      'https://mirror-a.av-wiki.local/abp-576/',
+      'https://mirror-b.av-wiki.local/abp-576/',
+    ]);
+
+    // 3) MediaLibrarySpikeService reads volatile avWikiBaseUrl before suffix fallback & across Ingestion and Backfill.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-avwiki-volatile-'));
     const originalFetch = globalThis.fetch;
     try {
       const stagingDir = path.join(tmpDir, 'staging');
       fs.mkdirSync(stagingDir, { recursive: true });
-      fs.writeFileSync(path.join(stagingDir, 'ABP-576.mp4'), 'payload');
+      const stagedFile = path.join(stagingDir, 'ABP-576-1.mp4');
+      fs.writeFileSync(stagedFile, 'payload');
 
       let activeBaseUrl = 'https://mirror-one.av-wiki.local';
       const seenUrls: string[] = [];
       globalThis.fetch = (async (input: string | URL | Request) => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
         seenUrls.push(url);
+        if (url === 'https://mirror-one.av-wiki.local/abp-576-1/') {
+          // Mutate volatile setting right after primary 404; suffix fallback must hit the new base URL.
+          activeBaseUrl = 'https://mirror-two.av-wiki.local/';
+          return { status: 404, ok: false, text: async () => 'Not Found' } as unknown as Response;
+        }
         return {
           status: 200,
           ok: true,
@@ -508,28 +653,24 @@ describe('AV-WIKI Remote Metadata Integration (Issue #67 B1..B5)', () => {
         } as unknown as Response;
       }) as typeof fetch;
 
+      const dbPath = path.join(tmpDir, 'library.sqlite3');
       const service = new MediaLibrarySpikeService({
         baseDir: tmpDir,
-        dbPath: path.join(tmpDir, 'library.sqlite3'),
+        dbPath,
         configuredStagingDir: () => stagingDir,
         configuredAvWikiBaseUrl: () => activeBaseUrl,
         autoDailyBackup: false,
       });
 
-      const first = await service.fetchIngestionMetadata({ relativePath: 'ABP-576.mp4' });
-      assert.equal(first.ok, true);
-      assert.equal(first.provider, 'AVWIKI');
-      assert.equal(first.sourceUrl, 'https://mirror-one.av-wiki.local/abp-576/');
-
-      // Update volatile setting without recreating service and re-fetch.
-      activeBaseUrl = 'https://mirror-two.av-wiki.local/';
-      const second = await service.fetchIngestionMetadata({ manifestId: first.manifest!.id });
-      assert.equal(second.ok, true);
-      assert.equal(second.sourceUrl, 'https://mirror-two.av-wiki.local/abp-576/');
+      const ingestionRes = await service.fetchIngestionMetadata({ relativePath: 'ABP-576-1.mp4' });
+      assert.equal(ingestionRes.ok, true);
+      assert.equal(ingestionRes.provider, 'AVWIKI');
+      assert.equal(ingestionRes.sourceUrl, 'https://mirror-two.av-wiki.local/abp-576/');
       assert.deepEqual(seenUrls, [
-        'https://mirror-one.av-wiki.local/abp-576/',
+        'https://mirror-one.av-wiki.local/abp-576-1/',
         'https://mirror-two.av-wiki.local/abp-576/',
       ]);
+      assert.equal(fs.existsSync(stagedFile), true);
     } finally {
       globalThis.fetch = originalFetch;
       fs.rmSync(tmpDir, { recursive: true, force: true });

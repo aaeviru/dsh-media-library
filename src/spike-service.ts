@@ -485,7 +485,7 @@ export class MediaLibrarySpikeService {
     return new MetadataFetcher({
       cmadbBaseUrl: this.cmadbBaseUrl,
       ppvdbBaseUrl: this.ppvdbBaseUrl,
-      avWikiBaseUrl: this.readStringSetting(this.configuredAvWikiBaseUrl),
+      avWikiBaseUrl: () => this.readStringSetting(this.configuredAvWikiBaseUrl),
       cmadbCookie: this.readStringSetting(this.configuredCmadbCookie),
       ppvdbCookie: this.readStringSetting(this.configuredPpvdbCookie),
     });
