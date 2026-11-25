@@ -657,11 +657,23 @@ export interface PerformerSkippedEntry {
   readonly normalizedName: string;
 }
 
+/**
+ * Deterministic normalization for normal tag names/aliases (`Issue #71`).
+ * Matches Host `normalizeLabel` / `normalizeLookupKey` (trim, collapse whitespace, lowercase).
+ */
+export function normalizeTagName(raw: string): string {
+  return raw.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 export interface NormalTagPreviewEntry {
   readonly rawName: string;
   readonly matchedTagId: number | null;
   readonly matchedTagName: string | null;
   readonly matchedVia: 'name' | 'alias' | 'new';
+}
+
+export interface PreviewTagNamesInput {
+  readonly names: readonly string[];
 }
 
 export interface ManifestPerformerPreview {

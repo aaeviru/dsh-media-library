@@ -1,16 +1,31 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type {
-  IngestionManifest,
-  IngestionTask,
-  ManifestPerformerPreview,
-  PerformerAliasRecord,
-  PerformerReviewItem,
-  StagingFileItem,
-  TagSummary,
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  normalizeTagName,
+  type IngestionManifest,
+  type IngestionTask,
+  type ManifestPerformerPreview,
+  type NormalTagPreviewEntry,
+  type PerformerAliasRecord,
+  type PerformerReviewItem,
+  type StagingFileItem,
+  type TagSummary,
 } from '../types.ts';
 import { PerformerDrawer, PerformerInlineCard } from './PerformerReviewSection.tsx';
 import type { MediaLibraryKey } from './locales.ts';
 import type { MediaLibraryNamespace } from './namespace.ts';
+import {
+  buildDraftTagPreviewSources,
+  buildDraftTagRequestKey,
+  EMPTY_LIVE_TAG_PREVIEW_STATE,
+  parseDraftTagNames,
+  pruneTagPreviewEntries,
+  removeTagPreviewEntriesByName,
+  resolveDraftTagPills,
+  TagPreviewRequestTracker,
+  toPickedTagPreviewEntry,
+  upsertTagPreviewEntry,
+  type LiveTagPreviewState,
+} from './tag-draft-preview.ts';
 import { TagPicker } from './ui/TagPicker.tsx';
 import { cx } from './ui/primitives.ts';
 import css from './ui/styles.module.css';
@@ -93,6 +108,22 @@ export function IngestionPanel({
   const [error, setError] = useState<string | null>(null);
   const [tagPickerQuery, setTagPickerQuery] = useState('');
   const [tagCandidates, setTagCandidates] = useState<readonly TagSummary[]>([]);
+  const [pickedTagEntries, setPickedTagEntries] = useState<readonly NormalTagPreviewEntry[]>([]);
+  const [liveTagPreviewState, setLiveTagPreviewState] = useState<LiveTagPreviewState>(
+    EMPTY_LIVE_TAG_PREVIEW_STATE,
+  );
+  const [tagDraftModified, setTagDraftModified] = useState<boolean>(() =>
+    Boolean(sessionCache.selectedKey && sessionCache.dirtyDrafts[sessionCache.selectedKey]),
+  );
+  const [tagPreviewRefreshTick, setTagPreviewRefreshTick] = useState(0);
+  const tagPreviewTrackerRef = useRef<TagPreviewRequestTracker | null>(null);
+  if (tagPreviewTrackerRef.current === null) {
+    tagPreviewTrackerRef.current = new TagPreviewRequestTracker();
+  }
+  const performerPreviewTrackerRef = useRef<TagPreviewRequestTracker | null>(null);
+  if (performerPreviewTrackerRef.current === null) {
+    performerPreviewTrackerRef.current = new TagPreviewRequestTracker();
+  }
 
   const togglePerformerDrawer = useCallback(() => {
     setShowPerformerDrawerState((prev) => {
@@ -109,6 +140,9 @@ export function IngestionPanel({
   }, []);
 
   const updateDraft = useCallback((key: string, patch: Partial<DraftFields>, fallback: DraftFields) => {
+    if (patch.tagsText !== undefined) {
+      setTagDraftModified(true);
+    }
     setDirtyDrafts((prev) => {
       const current = prev[key] ?? fallback;
       const nextDraft = { ...current, ...patch };
@@ -324,6 +358,7 @@ export function IngestionPanel({
     return null;
   }, [entries, selectedKey]);
   const selectedManifestId = selected?.manifest?.id ?? null;
+  const selectedEntryKey = selected?.key ?? null;
 
   // Smoothly migrate selection and any unsubmitted draft when a staged file gains a manifest ID
   // (e.g., after Fetch completes while the user switched away from the panel).
@@ -342,12 +377,16 @@ export function IngestionPanel({
   }, [selected, selectedKey, setSelectedKey]);
 
   const reloadSelectedPreview = useCallback(async () => {
+    const tracker = performerPreviewTrackerRef.current!;
     if (selectedManifestId === null) {
+      tracker.invalidate();
       setPerformerPreview(null);
       return;
     }
+    const seq = tracker.next();
     try {
       const res = await mediaLibrary.previewManifestPerformers({ manifestId: selectedManifestId });
+      if (!tracker.isCurrent(seq)) return;
       if (res.ok) {
         setPerformerPreview(res.value);
       }
@@ -360,44 +399,36 @@ export function IngestionPanel({
     void reloadSelectedPreview();
   }, [reloadSelectedPreview, manifests, performerAliases, pendingQueue]);
 
-  const previewTagByLower = useMemo(() => {
-    const map = new Map<string, { matchedVia: 'name' | 'alias' | 'new'; matchedTagName: string | null }>();
-    for (const entry of performerPreview?.normalTags ?? []) {
-      map.set(entry.rawName.toLowerCase(), {
-        matchedVia: entry.matchedVia,
-        matchedTagName: entry.matchedTagName,
-      });
+  const resetTagPreviewCaches = useCallback((scheduleRefresh = false, modified = false) => {
+    tagPreviewTrackerRef.current?.invalidate();
+    setPickedTagEntries([]);
+    setLiveTagPreviewState(EMPTY_LIVE_TAG_PREVIEW_STATE);
+    setTagDraftModified(modified);
+    if (scheduleRefresh) {
+      setTagPreviewRefreshTick((tick) => tick + 1);
     }
-    return map;
-  }, [performerPreview]);
+  }, []);
 
-  const manifestKnownTagLower = useMemo(() => {
-    const set = new Set<string>();
-    for (const tag of selected?.manifest?.tags ?? []) {
-      if (tag.tagId !== undefined) set.add(tag.name.toLowerCase());
-    }
-    return set;
-  }, [selected]);
-
-  const rankTagMatch = (via: 'name' | 'alias' | 'new') => (via === 'name' ? 0 : via === 'alias' ? 1 : 2);
+  useEffect(() => {
+    resetTagPreviewCaches(false, Boolean(selectedEntryKey && sessionCache.dirtyDrafts[selectedEntryKey]));
+  }, [selectedEntryKey, resetTagPreviewCaches]);
 
   const serverFallback: DraftFields = useMemo(() => {
-    const orderedTags = (selected?.manifest?.tags ?? [])
-      .map((tag, idx) => {
-        const lower = tag.name.toLowerCase();
-        const info = previewTagByLower.get(lower);
-        const matchedVia: 'name' | 'alias' | 'new' =
-          info?.matchedVia ?? (manifestKnownTagLower.has(lower) ? 'name' : 'new');
-        return { name: tag.name, idx, matchedVia };
-      })
-      .sort((a, b) => rankTagMatch(a.matchedVia) - rankTagMatch(b.matchedVia) || a.idx - b.idx)
-      .map((entry) => entry.name);
+    const manifestTags = selected?.manifest?.tags ?? [];
+    const orderedTags = resolveDraftTagPills(
+      manifestTags.map((tag) => tag.name),
+      {
+        manifestTags,
+        performerPreview,
+        selectedManifestId,
+      },
+    ).map((entry) => entry.tagName);
     return {
       title: selected?.manifest?.title ?? '',
       mediaDate: selected?.manifest?.mediaDate ?? '',
       tagsText: orderedTags.join(', '),
     };
-  }, [selected, previewTagByLower, manifestKnownTagLower]);
+  }, [selected, performerPreview, selectedManifestId]);
   const selectedFrozen = Boolean(selected && (executing?.key === selected.key ||
     (selected.manifest && frozenManifestIds.includes(selected.manifest.id))));
   const activeDraft = selected
@@ -405,35 +436,106 @@ export function IngestionPanel({
     : serverFallback;
 
   const draftTagList = useMemo(
-    () =>
-      activeDraft.tagsText
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean),
+    () => parseDraftTagNames(activeDraft.tagsText),
     [activeDraft.tagsText],
   );
+  const draftTagRequestKey = useMemo(
+    () => buildDraftTagRequestKey(draftTagList),
+    [draftTagList],
+  );
+  const draftTagListRef = useRef<readonly string[]>(draftTagList);
+  draftTagListRef.current = draftTagList;
 
-  const sortedTagPills = useMemo(() => {
-    return draftTagList
-      .map((tagName, idx) => {
-        const lower = tagName.toLowerCase();
-        const info = previewTagByLower.get(lower);
-        const matchedVia: 'name' | 'alias' | 'new' =
-          info?.matchedVia ?? (manifestKnownTagLower.has(lower) ? 'name' : 'new');
-        return {
-          tagName,
-          idx,
-          matchedVia,
-          matchedTagName: info?.matchedTagName ?? null,
-        };
-      })
-      .sort((a, b) => rankTagMatch(a.matchedVia) - rankTagMatch(b.matchedVia) || a.idx - b.idx);
-  }, [draftTagList, previewTagByLower, manifestKnownTagLower]);
+  useEffect(() => {
+    const tracker = tagPreviewTrackerRef.current!;
+    if (!selectedEntryKey) {
+      tracker.invalidate();
+      setPickedTagEntries([]);
+      setLiveTagPreviewState(EMPTY_LIVE_TAG_PREVIEW_STATE);
+      return;
+    }
+    const names = draftTagListRef.current;
+    if (names.length === 0) {
+      tracker.invalidate();
+      setPickedTagEntries([]);
+      setLiveTagPreviewState(EMPTY_LIVE_TAG_PREVIEW_STATE);
+      return;
+    }
+    setPickedTagEntries((prev) => pruneTagPreviewEntries(prev, names));
+    let cancelled = false;
+    const seq = tracker.next();
+    setLiveTagPreviewState({ status: 'pending', requestKey: draftTagRequestKey, entries: [] });
+    const timer = setTimeout(() => {
+      void mediaLibrary
+        .previewTagNames({ names })
+        .then((res) => {
+          if (cancelled || !tracker.isCurrent(seq)) return;
+          if (!res.ok) {
+            setLiveTagPreviewState({
+              status: 'unavailable',
+              requestKey: draftTagRequestKey,
+              entries: [],
+            });
+            return;
+          }
+          setLiveTagPreviewState({
+            status: 'ready',
+            requestKey: draftTagRequestKey,
+            entries: res.value,
+          });
+        })
+        .catch(() => {
+          if (cancelled || !tracker.isCurrent(seq)) return;
+          setLiveTagPreviewState({
+            status: 'unavailable',
+            requestKey: draftTagRequestKey,
+            entries: [],
+          });
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [mediaLibrary, selectedEntryKey, draftTagRequestKey, tagPreviewRefreshTick]);
+
+  const sortedTagPills = useMemo(
+    () =>
+      resolveDraftTagPills(
+        draftTagList,
+        buildDraftTagPreviewSources({
+          manifestTags: selected?.manifest?.tags,
+          performerPreview,
+          selectedManifestId,
+          pickedTagEntries,
+          liveTagPreviewState,
+          currentRequestKey: draftTagRequestKey,
+          tagDraftModified,
+        }),
+      ),
+    [
+      draftTagList,
+      selected,
+      performerPreview,
+      selectedManifestId,
+      pickedTagEntries,
+      liveTagPreviewState,
+      draftTagRequestKey,
+      tagDraftModified,
+    ],
+  );
 
   const removeDraftTag = useCallback(
     (indexToRemove: number) => {
       if (!selected) return;
+      const removedName = draftTagList[indexToRemove];
       const nextList = draftTagList.filter((_, i) => i !== indexToRemove);
+      if (removedName !== undefined) {
+        const removedNorm = normalizeTagName(removedName);
+        if (!nextList.some((item) => normalizeTagName(item) === removedNorm)) {
+          setPickedTagEntries((prev) => removeTagPreviewEntriesByName(prev, removedName));
+        }
+      }
       updateDraft(selected.key, { tagsText: nextList.join(', ') }, serverFallback);
     },
     [draftTagList, selected, serverFallback, updateDraft],
@@ -443,8 +545,8 @@ export function IngestionPanel({
     (rawTagName: string) => {
       const trimmed = rawTagName.trim();
       if (!trimmed || !selected) return;
-      const lower = trimmed.toLowerCase();
-      const alreadyPresent = draftTagList.some((existing) => existing.toLowerCase() === lower);
+      const norm = normalizeTagName(trimmed);
+      const alreadyPresent = draftTagList.some((existing) => normalizeTagName(existing) === norm);
       if (!alreadyPresent) {
         const nextList = [...draftTagList, trimmed];
         updateDraft(selected.key, { tagsText: nextList.join(', ') }, serverFallback);
@@ -454,14 +556,41 @@ export function IngestionPanel({
     [draftTagList, selected, serverFallback, updateDraft],
   );
 
+  const selectPickerTag = useCallback(
+    (tag: TagSummary) => {
+      const trimmed = tag.name.trim();
+      if (!trimmed || !selected) return;
+      const norm = normalizeTagName(trimmed);
+      const alreadyPresent = draftTagList.some((existing) => normalizeTagName(existing) === norm);
+      const pickedEntry = toPickedTagPreviewEntry(tag);
+      setTagDraftModified(true);
+      if (pickedEntry) {
+        setPickedTagEntries((prev) => upsertTagPreviewEntry(prev, pickedEntry));
+        setLiveTagPreviewState((prev) => ({
+          ...prev,
+          entries: removeTagPreviewEntriesByName(prev.entries, trimmed),
+        }));
+      }
+      if (!alreadyPresent) {
+        const nextList = [...draftTagList, trimmed];
+        updateDraft(selected.key, { tagsText: nextList.join(', ') }, serverFallback);
+      } else if (pickedEntry) {
+        setLiveTagPreviewState(EMPTY_LIVE_TAG_PREVIEW_STATE);
+        setTagPreviewRefreshTick((tick) => tick + 1);
+      }
+      setTagPickerQuery('');
+    },
+    [draftTagList, selected, serverFallback, updateDraft],
+  );
+
   const trimmedPickerQuery = tagPickerQuery.trim();
   const hasExactPickerMatch = useMemo(() => {
     if (!trimmedPickerQuery) return true;
-    const lower = trimmedPickerQuery.toLowerCase();
+    const norm = normalizeTagName(trimmedPickerQuery);
     return tagCandidates.some(
       (tag) =>
-        tag.name.toLowerCase() === lower ||
-        tag.aliases.some((alias) => alias.toLowerCase() === lower),
+        normalizeTagName(tag.name) === norm ||
+        tag.aliases.some((alias) => normalizeTagName(alias) === norm),
     );
   }, [tagCandidates, trimmedPickerQuery]);
 
@@ -478,7 +607,11 @@ export function IngestionPanel({
     () => performerAliases.filter((a) => a.needsRemediation).length,
     [performerAliases],
   );
-  const commitBlockedByPerformer = Boolean(performerPreview && !performerPreview.canCommit);
+  const activePerformerPreview =
+    performerPreview && selectedManifestId !== null && performerPreview.manifestId === selectedManifestId
+      ? performerPreview
+      : null;
+  const commitBlockedByPerformer = Boolean(activePerformerPreview && !activePerformerPreview.canCommit);
 
   const handleReconcile = async () => {
     setExecuting({ op: 'reconcile', key: null });
@@ -549,12 +682,16 @@ export function IngestionPanel({
         clearDraft(`m:${res.value.manifest.id}`);
         setSelectedKey(`m:${res.value.manifest.id}`);
       }
+      resetTagPreviewCaches(false);
+      performerPreviewTrackerRef.current?.invalidate();
+      setPerformerPreview(null);
       if (res.value.ok) {
         setMessage(`Fetched from ${res.value.provider}: ${res.value.title ?? ''}`);
       } else {
         setError(`[${res.value.category}] ${res.value.reason}`);
       }
       await reloadServerState();
+      setTagPreviewRefreshTick((tick) => tick + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -579,6 +716,7 @@ export function IngestionPanel({
     }
     clearDraft(entry.key);
     clearDraft(`m:${manifest.id}`);
+    resetTagPreviewCaches(true);
     setSelectedKey(`m:${manifest.id}`);
     return manifest;
   };
@@ -829,10 +967,10 @@ export function IngestionPanel({
                   </label>
                 </div>
 
-                {performerPreview ? (
+                {activePerformerPreview ? (
                   <PerformerInlineCard
                     t={t}
-                    preview={performerPreview}
+                    preview={activePerformerPreview}
                     mediaLibrary={mediaLibrary}
                     disabled={busy || selectedFrozen || degraded || selected.manifest?.state === 'indexed'}
                     onChanged={handlePerformerChanged}
@@ -850,14 +988,26 @@ export function IngestionPanel({
                             ? t('tagPreviewExisting')
                             : matchedVia === 'alias'
                               ? `${t('tagPreviewAlias')}→${matchedTagName ?? ''}`
-                              : `+ ${t('tagPreviewNew')}`;
+                              : matchedVia === 'new'
+                                ? `+ ${t('tagPreviewNew')}`
+                                : matchedVia === 'unavailable'
+                                  ? t('tagPreviewUnavailable')
+                                  : t('tagPreviewPending');
+                        const pillToneClass =
+                          matchedVia === 'name' || matchedVia === 'alias'
+                            ? css.pillChipSuccess
+                            : matchedVia === 'new'
+                              ? css.pillChipWarnDashed
+                              : undefined;
                         return (
                           <span
                             key={`${tagName}-${idx}`}
+                            data-tag-name={tagName}
+                            data-match-state={matchedVia}
                             className={cx(
                               css.pillChip,
                               css.pillChipStatic,
-                              matchedVia === 'new' ? css.pillChipWarnDashed : css.pillChipSuccess,
+                              pillToneClass,
                             )}
                           >
                             <span>{tagName}</span>
@@ -884,7 +1034,7 @@ export function IngestionPanel({
                     onQueryChange={setTagPickerQuery}
                     candidates={tagCandidates}
                     selectedTagId={null}
-                    onSelectTag={(tag) => appendDraftTag(tag.name)}
+                    onSelectTag={selectPickerTag}
                     showCreateOption={Boolean(trimmedPickerQuery && !hasExactPickerMatch)}
                     createOptionText={`+ ${t('batchCreateAndAdd')} “${trimmedPickerQuery}”`}
                     onCreateTag={() => appendDraftTag(trimmedPickerQuery)}

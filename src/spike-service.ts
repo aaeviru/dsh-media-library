@@ -23,6 +23,7 @@ import {
   getCurrentSchemaVersion,
   migrateDatabase,
   openMediaLibraryDatabase,
+  resolveLocalDatabasePath,
   runDatabaseHealthChecks,
 } from './db/schema.ts';
 import { importTagStudioDatabase, type TagStudioImportReport } from './import/tagstudio-importer.ts';
@@ -64,6 +65,7 @@ import {
   listPerformerAliases,
   listPerformerReviewQueue,
   normalizePerformerName,
+  previewTagNames,
   promotePerformerTagToManual,
   resolvePerformerReview,
   upsertPerformerAlias,
@@ -109,12 +111,14 @@ import type {
   MergeTagsInput,
   MergeTagsResult,
   MutationError,
+  NormalTagPreviewEntry,
   OpenStagingFileInput,
   OpsStatus,
   PerformerAliasRecord,
   PerformerReviewItem,
   PreviewManifestPerformersInput,
   PreviewMergeInput,
+  PreviewTagNamesInput,
   PromotePerformerTagInput,
   PromotePerformerTagResult,
   ReconcileIngestionResult,
@@ -1506,6 +1510,50 @@ export class MediaLibrarySpikeService {
     const res = await this.withInitializedDatabase((db) => evaluateManifestPerformers(db, input.manifestId, { now: this.now }));
     await this.maybeTriggerDailyAutoBackup();
     return res;
+  }
+
+  async previewTagNames(input: PreviewTagNamesInput): Promise<NormalTagPreviewEntry[]> {
+    const names = Array.isArray(input?.names) ? input.names : [];
+    const cleaned = names
+      .filter((n): n is string => typeof n === 'string')
+      .map((n) => n.trim())
+      .filter((n) => n.length > 0 && normalizeLabel(n).length > 0);
+    if (cleaned.length === 0) {
+      return [];
+    }
+    // Pure read-only path: never call `initialize()` (which migrates, marks interrupted tasks,
+    // or triggers daily auto-backup) and never create files or directories on disk.
+    // Only return confirmed `'new'` misses when the DB file is confirmed absent (`ENOENT`);
+    // propagate permission/traversal or I/O errors so the client displays `Unverified`.
+    const dbPath = resolveLocalDatabasePath({ dbPath: this.localDatabasePath });
+    if (dbPath === ':memory:') {
+      return cleaned.map((rawName) => ({
+        rawName,
+        matchedTagId: null,
+        matchedTagName: null,
+        matchedVia: 'new' as const,
+      }));
+    }
+    try {
+      fs.statSync(dbPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return cleaned.map((rawName) => ({
+          rawName,
+          matchedTagId: null,
+          matchedTagName: null,
+          matchedVia: 'new' as const,
+        }));
+      }
+      throw err;
+    }
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      db.exec('PRAGMA busy_timeout = 5000;');
+      return previewTagNames(db, cleaned);
+    } finally {
+      db.close();
+    }
   }
 
   async listPerformerAliases(): Promise<PerformerAliasRecord[]> {

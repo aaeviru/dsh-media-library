@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { normalizeTagName } from '../types.ts'
 
 export interface FileFingerprint {
   readonly path: string
@@ -273,7 +274,7 @@ export function withReadOnlySqlite<T>(
  * Normalize tag or alias string for case-folded uniqueness/lookup comparison.
  */
 export function normalizeLookupKey(value: string): string {
-  return value.trim().replace(/\s+/g, ' ').toLowerCase()
+  return normalizeTagName(value)
 }
 
 /**
