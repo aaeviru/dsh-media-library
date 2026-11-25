@@ -32,12 +32,14 @@ import type {
   MergePreviewResult,
   MergeTagsInput,
   MergeTagsResult,
+  NormalTagPreviewEntry,
   OpenStagingFileInput,
   OpsStatus,
   PerformerAliasRecord,
   PerformerReviewItem,
   PreviewManifestPerformersInput,
   PreviewMergeInput,
+  PreviewTagNamesInput,
   PromotePerformerTagInput,
   PromotePerformerTagResult,
   ReconcileIngestionResult,
@@ -334,6 +336,14 @@ export class MediaLibraryRemote extends TypertRemoteService {
   @Remote('previewManifestPerformers')
   async previewManifestPerformers(input: PreviewManifestPerformersInput): Promise<ManifestPerformerPreview> {
     return this.spikeService.previewManifestPerformers(input);
+  }
+
+  /**
+   * Pure read-only preview resolving arbitrary draft tag names against active tags and aliases.
+   */
+  @Remote('previewTagNames')
+  async previewTagNames(input: PreviewTagNamesInput): Promise<NormalTagPreviewEntry[]> {
+    return this.spikeService.previewTagNames(input);
   }
 
   /**

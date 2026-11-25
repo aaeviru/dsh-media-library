@@ -348,6 +348,88 @@ export function listPerformerReviewQueue(
   return rows.map((r) => mapReviewRow(db, r));
 }
 
+/**
+ * Pure read-only resolver for arbitrary draft tag names against active `tags` and `tag_aliases` (`Issue #71`).
+ * - Direct match on `tags.normalized_name` (`archived_at IS NULL`) -> `matchedVia: 'name'`.
+ * - Alias match on `tag_aliases.normalized_alias` joined to active `tags` (`ORDER BY tg.id ASC LIMIT 1`) -> `matchedVia: 'alias'`.
+ * - Otherwise (unknown or archived-only) -> `matchedVia: 'new'`.
+ * Preserves input order and trimmed `rawName`, caching SQLite lookups per normalized key.
+ */
+export function previewTagNames(
+  db: DatabaseSync,
+  names: readonly string[],
+): NormalTagPreviewEntry[] {
+  if (!Array.isArray(names) || names.length === 0) return [];
+  const hasTagsTable = tableExists(db, 'tags');
+  const hasAliasesTable = hasTagsTable && tableExists(db, 'tag_aliases');
+  const directStmt = hasTagsTable
+    ? db.prepare('SELECT id, name FROM tags WHERE normalized_name = ? AND archived_at IS NULL LIMIT 1')
+    : null;
+  const aliasStmt = hasAliasesTable
+    ? db.prepare(
+        `SELECT tg.id, tg.name
+         FROM tag_aliases ta
+         JOIN tags tg ON tg.id = ta.tag_id
+         WHERE ta.normalized_alias = ? AND tg.archived_at IS NULL
+         ORDER BY tg.id ASC
+         LIMIT 1`,
+      )
+    : null;
+
+  interface CachedLookup {
+    readonly matchedTagId: number | null;
+    readonly matchedTagName: string | null;
+    readonly matchedVia: 'name' | 'alias' | 'new';
+  }
+  const cache = new Map<string, CachedLookup>();
+  const out: NormalTagPreviewEntry[] = [];
+
+  for (const raw of names) {
+    if (typeof raw !== 'string') continue;
+    const cleanName = raw.trim();
+    if (!cleanName) continue;
+    const norm = normalizeLabel(cleanName);
+    if (!norm) continue;
+
+    let resolved = cache.get(norm);
+    if (!resolved) {
+      const direct = directStmt?.get(norm) as { id: number; name: string } | undefined;
+      if (direct) {
+        resolved = {
+          matchedTagId: Number(direct.id),
+          matchedTagName: String(direct.name),
+          matchedVia: 'name',
+        };
+      } else {
+        const viaAlias = aliasStmt?.get(norm) as { id: number; name: string } | undefined;
+        if (viaAlias) {
+          resolved = {
+            matchedTagId: Number(viaAlias.id),
+            matchedTagName: String(viaAlias.name),
+            matchedVia: 'alias',
+          };
+        } else {
+          resolved = {
+            matchedTagId: null,
+            matchedTagName: null,
+            matchedVia: 'new',
+          };
+        }
+      }
+      cache.set(norm, resolved);
+    }
+
+    out.push({
+      rawName: cleanName,
+      matchedTagId: resolved.matchedTagId,
+      matchedTagName: resolved.matchedTagName,
+      matchedVia: resolved.matchedVia,
+    });
+  }
+
+  return out;
+}
+
 function buildNormalTagPreview(db: DatabaseSync, rawTagsJson: string): NormalTagPreviewEntry[] {
   let tagNames: Array<{ tagId?: number; name: string }> = [];
   try {
@@ -359,50 +441,10 @@ function buildNormalTagPreview(db: DatabaseSync, rawTagsJson: string): NormalTag
     tagNames = [];
   }
 
-  const out: NormalTagPreviewEntry[] = [];
-  for (const t of tagNames) {
-    const cleanName = t.name.trim();
-    if (!cleanName) continue;
-    const norm = normalizeLabel(cleanName);
-    const direct = db
-      .prepare('SELECT id, name FROM tags WHERE normalized_name = ? AND archived_at IS NULL LIMIT 1')
-      .get(norm) as { id: number; name: string } | undefined;
-    if (direct) {
-      out.push({
-        rawName: cleanName,
-        matchedTagId: Number(direct.id),
-        matchedTagName: String(direct.name),
-        matchedVia: 'name',
-      });
-      continue;
-    }
-    const viaAlias = db
-      .prepare(
-        `SELECT tg.id, tg.name
-         FROM tag_aliases ta
-         JOIN tags tg ON tg.id = ta.tag_id
-         WHERE ta.normalized_alias = ? AND tg.archived_at IS NULL
-         ORDER BY tg.id ASC
-         LIMIT 1`,
-      )
-      .get(norm) as { id: number; name: string } | undefined;
-    if (viaAlias) {
-      out.push({
-        rawName: cleanName,
-        matchedTagId: Number(viaAlias.id),
-        matchedTagName: String(viaAlias.name),
-        matchedVia: 'alias',
-      });
-      continue;
-    }
-    out.push({
-      rawName: cleanName,
-      matchedTagId: null,
-      matchedTagName: null,
-      matchedVia: 'new',
-    });
-  }
-  return out;
+  return previewTagNames(
+    db,
+    tagNames.map((t) => t.name),
+  );
 }
 
 function tableExists(db: DatabaseSync, tableName: string): boolean {

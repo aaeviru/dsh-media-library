@@ -150,6 +150,8 @@ const MUTATION_SCHEMAS = [
   `let _mediaLibrary_performerPreviewEntry$schema$value\nconst _mediaLibrary_performerPreviewEntry$schema = () => (_mediaLibrary_performerPreviewEntry$schema$value ??= z.object({ reviewId: ${NUM}.nullable(), rawName: ${STR}, normalizedName: ${STR}, tagId: ${NUM}, tagName: ${STR}, source: z.enum(['performer-rule', 'manual']).readonly(), confidence: ${NUM}.nullable(), resolutionMode: z.enum(['bind_existing', 'create_performer_tag', 'skip']).nullable(), alreadyManual: ${BOOL} }).readonly())`,
   `let _mediaLibrary_performerSkippedEntry$schema$value\nconst _mediaLibrary_performerSkippedEntry$schema = () => (_mediaLibrary_performerSkippedEntry$schema$value ??= z.object({ reviewId: ${NUM}, rawName: ${STR}, normalizedName: ${STR} }).readonly())`,
   `let _mediaLibrary_normalTagPreviewEntry$schema$value\nconst _mediaLibrary_normalTagPreviewEntry$schema = () => (_mediaLibrary_normalTagPreviewEntry$schema$value ??= z.object({ rawName: ${STR}, matchedTagId: ${NUM}.nullable(), matchedTagName: ${STR}.nullable(), matchedVia: z.enum(['name', 'alias', 'new']).readonly() }).readonly())`,
+  `let _mediaLibrary_normalTagPreviewList$schema$value\nconst _mediaLibrary_normalTagPreviewList$schema = () => (_mediaLibrary_normalTagPreviewList$schema$value ??= z.array(_mediaLibrary_normalTagPreviewEntry$schema()).readonly())`,
+  `let _mediaLibrary_previewTagNamesInput$schema$value\nconst _mediaLibrary_previewTagNamesInput$schema = () => (_mediaLibrary_previewTagNamesInput$schema$value ??= z.object({ names: z.array(${STR}).readonly() }).readonly())`,
   `let _mediaLibrary_previewManifestPerformersInput$schema$value\nconst _mediaLibrary_previewManifestPerformersInput$schema = () => (_mediaLibrary_previewManifestPerformersInput$schema$value ??= z.object({ manifestId: ${NUM} }).readonly())`,
   `let _mediaLibrary_manifestPerformerPreview$schema$value\nconst _mediaLibrary_manifestPerformerPreview$schema = () => (_mediaLibrary_manifestPerformerPreview$schema$value ??= z.object({ manifestId: ${NUM}, canCommit: ${BOOL}, autoMatched: z.array(_mediaLibrary_performerPreviewEntry$schema()).readonly(), humanResolved: z.array(_mediaLibrary_performerPreviewEntry$schema()).readonly(), skipped: z.array(${STR}).readonly(), skippedEntries: z.array(_mediaLibrary_performerSkippedEntry$schema()).readonly(), pendingReview: _mediaLibrary_performerReviewList$schema(), normalTags: z.array(_mediaLibrary_normalTagPreviewEntry$schema()).readonly() }).readonly())`,
   `let _mediaLibrary_upsertPerformerAliasInput$schema$value\nconst _mediaLibrary_upsertPerformerAliasInput$schema = () => (_mediaLibrary_upsertPerformerAliasInput$schema$value ??= z.object({ rawAlias: ${STR}, tagId: ${NUM}, policy: z.enum(['auto', 'always_ask']).readonly().optional(), note: ${STR}.optional() }).readonly())`,
@@ -600,6 +602,36 @@ const REMOTE_INFO_BODY = `{
       },
       sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 332, column: 3 },
     },
+    'mediaLibrary/previewTagNames': {
+      service: 'mediaLibrary',
+      description: 'Pure read-only preview resolving arbitrary draft tag names against active tags and aliases.',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'input',
+          description: 'Draft tag names to resolve against active tags and aliases.',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: '@deepseek-ai/dsh-experimental-media-library#mediaLibrary/previewTagNames:input',
+            create: _mediaLibrary_previewTagNamesInput$schema,
+            jsonSchema: { type: 'object' },
+          },
+          strictCodec: {
+            mode: 'strict',
+            typeSymbol: '@deepseek-ai/dsh-experimental-media-library#mediaLibrary/previewTagNames:input',
+            create: _mediaLibrary_previewTagNamesInput$schema,
+            jsonSchema: { type: 'object' },
+          },
+        },
+      ],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@deepseek-ai/dsh-experimental-media-library/types#NormalTagPreviewEntry[]',
+        create: _mediaLibrary_normalTagPreviewList$schema,
+      },
+      sourceLocation: { file: 'packages/experimental/dsh-media-library/src/remote.ts', line: 344, column: 3 },
+    },
     'mediaLibrary/getMedia': {
       service: 'mediaLibrary',
       description: 'Get full details for a single media item by its mediaId.',
@@ -850,6 +882,8 @@ import type {
   PerformerAliasRecord,
   PerformerReviewItem,
   ListPerformerReviewInput,
+  NormalTagPreviewEntry,
+  PreviewTagNamesInput,
 ${MUTATION_DTS_IMPORTS.map(n => `  ${n},`).join('\n')}
 } from '../src/types.ts'
 
@@ -864,6 +898,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     reconcileIngestion: () => Promise<RemoteResult<ReconcileIngestionResult>>
     listPerformerAliases: () => Promise<RemoteResult<PerformerAliasRecord[]>>
     listPerformerReviewQueue: (input?: ListPerformerReviewInput) => Promise<RemoteResult<PerformerReviewItem[]>>
+    previewTagNames: (input: PreviewTagNamesInput) => Promise<RemoteResult<NormalTagPreviewEntry[]>>
     importTagStudioCopy: (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     listTags: (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
     openMedia: (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
@@ -882,6 +917,7 @@ ${MUTATION_DTS_NAMESPACE}
     'mediaLibrary/reconcileIngestion': () => Promise<RemoteResult<ReconcileIngestionResult>>
     'mediaLibrary/listPerformerAliases': () => Promise<RemoteResult<PerformerAliasRecord[]>>
     'mediaLibrary/listPerformerReviewQueue': (input?: ListPerformerReviewInput) => Promise<RemoteResult<PerformerReviewItem[]>>
+    'mediaLibrary/previewTagNames': (input: PreviewTagNamesInput) => Promise<RemoteResult<NormalTagPreviewEntry[]>>
     'mediaLibrary/importTagStudioCopy': (input?: ImportTagStudioInput) => Promise<RemoteResult<ImportTagStudioResult>>
     'mediaLibrary/listTags': (input?: ListTagsInput) => Promise<RemoteResult<ListTagsResult>>
     'mediaLibrary/openMedia': (mediaId: string) => Promise<RemoteResult<MediaActionResult>>
@@ -905,6 +941,7 @@ export declare const TYPERT_REMOTE: TypertRemoteInfo<{
   readonly 'mediaLibrary/reconcileIngestion': TypertRemoteMethod<{}, ReconcileIngestionResult>
   readonly 'mediaLibrary/listPerformerAliases': TypertRemoteMethod<{}, PerformerAliasRecord[]>
   readonly 'mediaLibrary/listPerformerReviewQueue': TypertRemoteMethod<{ readonly input?: ListPerformerReviewInput }, PerformerReviewItem[]>
+  readonly 'mediaLibrary/previewTagNames': TypertRemoteMethod<{ readonly input: PreviewTagNamesInput }, NormalTagPreviewEntry[]>
   readonly 'mediaLibrary/importTagStudioCopy': TypertRemoteMethod<{ readonly input?: ImportTagStudioInput }, ImportTagStudioResult>
   readonly 'mediaLibrary/listTags': TypertRemoteMethod<{ readonly input?: ListTagsInput }, ListTagsResult>
   readonly 'mediaLibrary/openMedia': TypertRemoteMethod<{ readonly mediaId: string }, MediaActionResult>

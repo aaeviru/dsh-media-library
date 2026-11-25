@@ -29,12 +29,14 @@ import type {
   MergePreviewResult,
   MergeTagsInput,
   MergeTagsResult,
+  NormalTagPreviewEntry,
   OpenStagingFileInput,
   OpsStatus,
   PerformerAliasRecord,
   PerformerReviewItem,
   PreviewManifestPerformersInput,
   PreviewMergeInput,
+  PreviewTagNamesInput,
   PromotePerformerTagInput,
   PromotePerformerTagResult,
   ReconcileIngestionResult,
@@ -86,6 +88,7 @@ export interface MediaLibraryNamespace {
   openStagingFile: (input: OpenStagingFileInput) => Promise<RemoteResult<MediaActionResult>>;
   deleteStagingFile: (input: DeleteStagingFileInput) => Promise<RemoteResult<DeleteStagingFileResult>>;
   previewManifestPerformers: (input: PreviewManifestPerformersInput) => Promise<RemoteResult<ManifestPerformerPreview>>;
+  previewTagNames: (input: PreviewTagNamesInput) => Promise<RemoteResult<NormalTagPreviewEntry[]>>;
   listPerformerAliases: () => Promise<RemoteResult<PerformerAliasRecord[]>>;
   upsertPerformerAlias: (input: UpsertPerformerAliasInput) => Promise<RemoteResult<UpsertPerformerAliasResult>>;
   deletePerformerAlias: (input: DeletePerformerAliasInput) => Promise<RemoteResult<DeletePerformerAliasResult>>;

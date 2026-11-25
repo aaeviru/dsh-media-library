@@ -64,6 +64,7 @@ import {
   listPerformerAliases,
   listPerformerReviewQueue,
   normalizePerformerName,
+  previewTagNames,
   promotePerformerTagToManual,
   resolvePerformerReview,
   upsertPerformerAlias,
@@ -109,12 +110,14 @@ import type {
   MergeTagsInput,
   MergeTagsResult,
   MutationError,
+  NormalTagPreviewEntry,
   OpenStagingFileInput,
   OpsStatus,
   PerformerAliasRecord,
   PerformerReviewItem,
   PreviewManifestPerformersInput,
   PreviewMergeInput,
+  PreviewTagNamesInput,
   PromotePerformerTagInput,
   PromotePerformerTagResult,
   ReconcileIngestionResult,
@@ -1506,6 +1509,23 @@ export class MediaLibrarySpikeService {
     const res = await this.withInitializedDatabase((db) => evaluateManifestPerformers(db, input.manifestId, { now: this.now }));
     await this.maybeTriggerDailyAutoBackup();
     return res;
+  }
+
+  async previewTagNames(input: PreviewTagNamesInput): Promise<NormalTagPreviewEntry[]> {
+    const names = Array.isArray(input?.names) ? input.names : [];
+    if (names.length === 0 || names.every((n) => typeof n !== 'string' || n.trim().length === 0)) {
+      return [];
+    }
+    await this.initialize();
+    if (this.degradedState.degraded) {
+      const db = new DatabaseSync(this.localDatabasePath, { readOnly: true });
+      try {
+        return previewTagNames(db, names);
+      } finally {
+        db.close();
+      }
+    }
+    return this.withInitializedDatabase((db) => previewTagNames(db, names));
   }
 
   async listPerformerAliases(): Promise<PerformerAliasRecord[]> {
