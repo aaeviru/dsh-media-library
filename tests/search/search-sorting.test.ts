@@ -4,13 +4,19 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { migrateDatabase, openMediaLibraryDatabase } from '../../src/db/schema.ts'
+import { MediaSearchCoordinator } from '../../src/client/ui/search-coordinator.ts'
 import {
   decodeKeysetCursor,
   encodeKeysetCursor,
   searchMediaInDatabase,
 } from '../../src/search/search-repository.ts'
 import { MediaLibrarySpikeService } from '../../src/spike-service.ts'
-import type { MediaSortField, MediaSortOrder, SearchMediaInput } from '../../src/types.ts'
+import type {
+  MediaSortField,
+  MediaSortOrder,
+  SearchMediaInput,
+  SearchMediaResult,
+} from '../../src/types.ts'
 
 const ALL_SORT_FIELDS: readonly MediaSortField[] = [
   'media_date',
@@ -36,6 +42,7 @@ interface FixtureRow {
  * - NULL and empty-string ('') values in every sortable column
  * - Duplicate sort keys (to verify deterministic mf.id tie-breaking)
  * - Mixed-case ASCII and non-ASCII uppercase characters (to verify SQLite LOWER() parity)
+ * - Mixed added_at timestamp formats (TagStudio space-separated, microseconds, ISO Z, timezone offset, date-only)
  * - Multiple rows inside the NULL/empty bucket (to verify keyset pagination inside NULLS LAST)
  */
 const FIXTURE_ROWS: readonly FixtureRow[] = [
@@ -46,7 +53,7 @@ const FIXTURE_ROWS: readonly FixtureRow[] = [
     title: 'Beta One',
     catalogNumber: 'abp-100',
     mediaDate: '2025-06-15',
-    addedAt: '2026-01-10T10:00:00Z',
+    addedAt: '2026-01-10 18:00:00',
     tagIds: [1],
   },
   {
@@ -56,7 +63,7 @@ const FIXTURE_ROWS: readonly FixtureRow[] = [
     title: 'Alpha Lower',
     catalogNumber: 'ABP-100',
     mediaDate: '2025-06-15',
-    addedAt: '2026-01-10T10:00:00Z',
+    addedAt: '2026-01-10T01:00:00.000Z',
     tagIds: [1],
   },
   {
@@ -66,7 +73,7 @@ const FIXTURE_ROWS: readonly FixtureRow[] = [
     title: 'Alpha Upper',
     catalogNumber: 'Abp-050',
     mediaDate: '2026-02-01',
-    addedAt: '2026-03-01T08:00:00Z',
+    addedAt: '2026-01-10T10:00:00+09:00',
     tagIds: [1, 2],
   },
   {
@@ -116,7 +123,7 @@ const FIXTURE_ROWS: readonly FixtureRow[] = [
     title: 'Non-ASCII Upper Umlaut',
     catalogNumber: 'SSIS-200',
     mediaDate: '2024-12-31',
-    addedAt: '2026-02-15T12:00:00Z',
+    addedAt: '2026-01-10 18:00:00.123456',
     tagIds: [1],
   },
   {
@@ -126,7 +133,7 @@ const FIXTURE_ROWS: readonly FixtureRow[] = [
     title: 'Non-ASCII Lower Umlaut',
     catalogNumber: 'ssis-200',
     mediaDate: '2025-06-15',
-    addedAt: '2026-02-15T12:00:00Z',
+    addedAt: '2026-01-10',
     tagIds: [2],
   },
   {
@@ -155,41 +162,52 @@ function sqliteAsciiLower(value: string): string {
   return value.replace(/[A-Z]/g, ch => ch.toLowerCase())
 }
 
+function canonicalAddedAtKey(raw: string | null): string | null {
+  if (!raw) return null
+  const trimmed = raw.trim()
+  if (!/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return null
+  const isoCandidate = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+    ? `${trimmed}T00:00:00.000Z`
+    : trimmed.includes('T')
+      ? trimmed
+      : trimmed.replace(' ', 'T') + (/[Zz]|[+-]\d{2}:\d{2}$/.test(trimmed) ? '' : 'Z')
+  const ms = Date.parse(isoCandidate)
+  if (!Number.isFinite(ms)) return null
+  return new Date(ms).toISOString()
+}
+
 function getExpectedIds(
   rows: readonly FixtureRow[],
   sortBy: MediaSortField,
   sortOrder: MediaSortOrder,
 ): string[] {
-  const getRaw = (r: FixtureRow): string | null => {
+  const getKey = (r: FixtureRow): string | null => {
     switch (sortBy) {
       case 'media_date':
-        return r.mediaDate
+        return r.mediaDate && r.mediaDate.length > 0 ? r.mediaDate : null
       case 'added_at':
-        return r.addedAt
+        return canonicalAddedAtKey(r.addedAt)
       case 'catalog_number':
-        return r.catalogNumber
+        return r.catalogNumber && r.catalogNumber.length > 0
+          ? sqliteAsciiLower(r.catalogNumber)
+          : null
       case 'filename':
-        return r.filename
+        return r.filename && r.filename.length > 0 ? sqliteAsciiLower(r.filename) : null
     }
   }
-  const caseFold = sortBy === 'catalog_number' || sortBy === 'filename'
 
   return [...rows]
     .sort((a, b) => {
-      const ra = getRaw(a)
-      const rb = getRaw(b)
-      const nullA = ra === null || ra === '' ? 1 : 0
-      const nullB = rb === null || rb === '' ? 1 : 0
+      const ka = getKey(a)
+      const kb = getKey(b)
+      const nullA = ka === null ? 1 : 0
+      const nullB = kb === null ? 1 : 0
       // NULLS LAST in BOTH asc and desc
       if (nullA !== nullB) return nullA - nullB
 
-      if (nullA === 0) {
-        const va = caseFold ? sqliteAsciiLower(ra!) : ra!
-        const vb = caseFold ? sqliteAsciiLower(rb!) : rb!
-        if (va !== vb) {
-          const cmp = va < vb ? -1 : 1
-          return sortOrder === 'asc' ? cmp : -cmp
-        }
+      if (nullA === 0 && ka !== kb) {
+        const cmp = ka! < kb! ? -1 : 1
+        return sortOrder === 'asc' ? cmp : -cmp
       }
       return sortOrder === 'asc' ? a.id - b.id : b.id - a.id
     })
@@ -629,5 +647,221 @@ describe('Issue #68: Multi-dimensional sorting & stable keyset pagination (B1..B
 
     assert.equal(schema.safeParse({ sortBy: 'invalid_col' }).success, false)
     assert.equal(schema.safeParse({ sortOrder: 'up' }).success, false)
+  })
+
+  it('B1/B2/B3: added_at orders mixed TagStudio space timestamps, ISO Z, offsets, and microseconds chronologically across keyset pages', async () => {
+    const mixedDbPath = path.join(tempRoot, 'mixed-added-at', 'library.sqlite3')
+    const { db } = openMediaLibraryDatabase({ dbPath: mixedDbPath })
+    try {
+      await migrateDatabase(db, { dbPath: mixedDbPath })
+      db.exec(`
+        INSERT INTO media_roots (id, name, canonical_unc_root, enabled, created_at)
+        VALUES ('nas-main', 'NAS Test', '\\\\SynologyNAS\\Media', 1, '2026-01-01T00:00:00Z');
+      `)
+      const insert = db.prepare(`
+        INSERT INTO media_files (
+          id, root_id, relative_path, filename, extension, added_at, status, revision
+        ) VALUES (?, 'nas-main', ?, ?, 'mkv', ?, 'indexed', 1)
+      `)
+      // Specifically includes Critic Round 1 repro: '2026-01-10 18:00:00' vs '2026-01-10T01:00:00.000Z'
+      // Raw text ASC would place space (0x20) before 'T' (0x54), putting 18:00 before 01:00!
+      const rows: ReadonlyArray<readonly [number, string | null]> = [
+        [1, '2026-01-10 18:00:00'],
+        [2, '2026-01-10T01:00:00.000Z'],
+        [3, '2026-01-10T10:00:00+09:00'], // same UTC instant as id=2 (01:00:00Z)
+        [4, '2026-01-10 18:00:00.123456'], // 123ms after id=1
+        [5, '2026-01-10'], // 00:00:00Z
+        [6, 'not-a-timestamp'], // unparseable -> NULLS LAST
+        [7, 'now'], // SQLite magic keyword must NOT evaluate dynamically -> NULLS LAST
+        [8, null],
+      ]
+      for (const [id, addedAt] of rows) {
+        insert.run(id, `ts_${id}.mkv`, `ts_${id}.mkv`, addedAt)
+      }
+
+      // Chronological ASC: 5 (00:00Z) < 2,3 (01:00Z) < 1 (18:00Z) < 4 (18:00.123Z) < NULL/unparseable [6, 7, 8]
+      const expectedAsc = ['5', '2', '3', '1', '4', '6', '7', '8']
+      // Chronological DESC: 4 (18:00.123Z) > 1 (18:00Z) > 3,2 (01:00Z) > 5 (00:00Z) > NULL/unparseable [8, 7, 6]
+      const expectedDesc = ['4', '1', '3', '2', '5', '8', '7', '6']
+
+      for (const [sortOrder, expected] of [
+        ['asc', expectedAsc],
+        ['desc', expectedDesc],
+      ] as const) {
+        const full = searchMediaInDatabase(db, { sortBy: 'added_at', sortOrder, limit: 50 })
+        assert.deepEqual(
+          full.items.map(i => i.mediaId),
+          expected,
+          `Chronological added_at ${sortOrder} mismatch`,
+        )
+
+        // Verify keyset cursor pagination (limit=2 and limit=1) matches full chronological order
+        for (const pageLimit of [2, 1]) {
+          const paged: string[] = []
+          let cursor: string | undefined
+          do {
+            const page = searchMediaInDatabase(db, {
+              sortBy: 'added_at',
+              sortOrder,
+              limit: pageLimit,
+              cursor,
+            })
+            paged.push(...page.items.map(i => i.mediaId))
+            cursor = page.nextCursor ?? undefined
+          } while (cursor)
+          assert.deepEqual(
+            paged,
+            expected,
+            `Paginated added_at ${sortOrder} (limit=${pageLimit}) diverged`,
+          )
+        }
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+  it('B4: MediaSearchCoordinator prevents refreshAll from overwriting a newer sort selection during metadata wait', async () => {
+    const createDeferred = <T,>() => {
+      let resolve!: (value: T) => void
+      const promise = new Promise<T>(res => {
+        resolve = res
+      })
+      return { promise, resolve }
+    }
+
+    const makeResult = (query: SearchMediaInput): SearchMediaResult => ({
+      items: [],
+      nextCursor: `cursor:${query.sortBy ?? 'media_date'}:${query.sortOrder ?? 'desc'}`,
+      totalMatching: 10,
+      elapsedMs: 1,
+      resolvedTagIds: [],
+      unresolvedTagQueries: [],
+      ambiguousAliases: [],
+    })
+
+    const coordinator = new MediaSearchCoordinator({
+      keyword: '',
+      catalogNumber: '',
+      catalogMatchMode: 'exact',
+      dateFrom: '',
+      dateTo: '',
+      selectedTagIds: [],
+      sortBy: 'media_date',
+      sortOrder: 'desc',
+      tagSearchInput: '',
+    })
+
+    const searchCalls: SearchMediaInput[] = []
+    let searching = false
+    let activeCursor: string | null = null
+    let lastError: string | null = null
+
+    const metaGate = createDeferred<void>()
+    const userSearchGate = createDeferred<void>()
+
+    const callbacks = {
+      searchMedia: async (input: SearchMediaInput) => {
+        searchCalls.push(input)
+        if (input.sortBy === 'filename') {
+          await userSearchGate.promise
+        }
+        return { ok: true as const, value: makeResult(input) }
+      },
+      onSearchingChange: (next: boolean) => {
+        searching = next
+      },
+      onLoadingMoreChange: () => {},
+      onClearNextCursor: () => {
+        activeCursor = null
+      },
+      onError: (msg: string | null) => {
+        lastError = msg
+      },
+      onResult: (res: SearchMediaResult) => {
+        activeCursor = res.nextCursor
+      },
+      fallbackRpcError: () => 'RPC error',
+    }
+
+    // 1. Start refreshAll while initial sort is media_date desc
+    const refreshPromise = coordinator.refreshAll({
+      loadMetadata: () => metaGate.promise,
+      loadTags: async () => {},
+      searchCallbacks: callbacks,
+    })
+    assert.equal(searching, true)
+
+    // 2. User changes sort to filename asc BEFORE metadata RPCs finish
+    coordinator.patchDraft({ sortBy: 'filename', sortOrder: 'asc' })
+    const userSearchPromise = coordinator.executeSearch(callbacks, {
+      overrideSortBy: 'filename',
+      overrideSortOrder: 'asc',
+    })
+
+    // 3. Metadata RPCs finish while user's filename asc search is still in flight
+    metaGate.resolve()
+    const refreshOutcome = await refreshPromise
+    assert.equal(refreshOutcome.searchSkippedDueToNewerRequest, true)
+    // Refresh MUST NOT issue a stale media_date desc search or prematurely clear searching!
+    assert.equal(searchCalls.length, 1)
+    assert.equal(searchCalls[0]?.sortBy, 'filename')
+    assert.equal(searchCalls[0]?.sortOrder, 'asc')
+    assert.equal(searching, true)
+
+    // 4. User's filename asc search resolves -> committed query & cursor match filename asc
+    userSearchGate.resolve()
+    await userSearchPromise
+    assert.equal(searching, false)
+    assert.equal(lastError, null)
+    assert.equal(activeCursor, 'cursor:filename:asc')
+    assert.equal(coordinator.getCommittedQuery()?.sortBy, 'filename')
+    assert.equal(coordinator.getCommittedQuery()?.sortOrder, 'asc')
+
+    // 5. Subsequent refreshAll (e.g. after import) reads the LATEST sort (catalog_number asc)
+    coordinator.patchDraft({ sortBy: 'catalog_number', sortOrder: 'asc' })
+    const postImportOutcome = await coordinator.refreshAll({
+      loadMetadata: async () => {},
+      loadTags: async () => {},
+      searchCallbacks: callbacks,
+    })
+    assert.equal(postImportOutcome.searchSkippedDueToNewerRequest, false)
+    assert.equal(searchCalls.length, 2)
+    assert.equal(searchCalls[1]?.sortBy, 'catalog_number')
+    assert.equal(searchCalls[1]?.sortOrder, 'asc')
+    assert.equal(activeCursor, 'cursor:catalog_number:asc')
+    assert.equal(searching, false)
+
+    // 6. Out-of-order concurrent sort clicks discard stale response
+    const slowFirst = createDeferred<void>()
+    const fastSecond = createDeferred<void>()
+    const raceCallbacks = {
+      ...callbacks,
+      searchMedia: async (input: SearchMediaInput) => {
+        if (input.sortBy === 'added_at') {
+          await slowFirst.promise
+        } else {
+          await fastSecond.promise
+        }
+        return { ok: true as const, value: makeResult(input) }
+      },
+    }
+    coordinator.patchDraft({ sortBy: 'added_at', sortOrder: 'desc' })
+    const firstClick = coordinator.executeSearch(raceCallbacks, {
+      overrideSortBy: 'added_at',
+      overrideSortOrder: 'desc',
+    })
+    coordinator.patchDraft({ sortBy: 'filename', sortOrder: 'desc' })
+    const secondClick = coordinator.executeSearch(raceCallbacks, {
+      overrideSortBy: 'filename',
+      overrideSortOrder: 'desc',
+    })
+    fastSecond.resolve()
+    await secondClick
+    assert.equal(activeCursor, 'cursor:filename:desc')
+    slowFirst.resolve()
+    await firstClick
+    assert.equal(activeCursor, 'cursor:filename:desc')
+    assert.equal(coordinator.getCommittedQuery()?.sortBy, 'filename')
   })
 })

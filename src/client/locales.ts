@@ -41,6 +41,7 @@ export const en = {
   sortFieldFilename: 'Filename',
   sortOrderDesc: 'Desc',
   sortOrderAsc: 'Asc',
+  sortOrderToggleAria: 'Ascending order',
   loadMoreBtn: 'Load More',
   loadingMoreBtn: 'Loading...',
   emptyLibraryState:
@@ -245,6 +246,7 @@ export const zh: Record<keyof typeof en, string> = {
   sortFieldFilename: '文件名',
   sortOrderDesc: '降序',
   sortOrderAsc: '升序',
+  sortOrderToggleAria: '升序排列',
   loadMoreBtn: '加载更多',
   loadingMoreBtn: '加载中...',
   emptyLibraryState:

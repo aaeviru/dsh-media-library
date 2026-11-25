@@ -33,14 +33,21 @@ interface SortColumnSpec {
   readonly valExpr: string
 }
 
+// Normalize mixed added_at formats (TagStudio 'YYYY-MM-DD HH:MM:SS[.ffffff]', native ISO
+// 'YYYY-MM-DDTHH:MM:SS.sssZ', timezone offsets like '+09:00', or date-only 'YYYY-MM-DD') into
+// canonical UTC ISO-8601 ('YYYY-MM-DDTHH:MM:SS.fffZ') so lexicographic order matches chronological
+// order. Guarding with a YYYY-MM-DD prefix prevents SQLite magic strings like 'now'.
+const ADDED_AT_CANONICAL_EXPR =
+  "CASE WHEN TRIM(COALESCE(mf.added_at, '')) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN strftime('%Y-%m-%dT%H:%M:%fZ', TRIM(mf.added_at)) ELSE NULL END"
+
 const SORT_COLUMN_SPECS: Readonly<Record<MediaSortField, SortColumnSpec>> = {
   media_date: {
     nullExpr: "CASE WHEN mf.media_date IS NULL OR mf.media_date = '' THEN 1 ELSE 0 END",
     valExpr: "COALESCE(mf.media_date, '')",
   },
   added_at: {
-    nullExpr: "CASE WHEN mf.added_at IS NULL OR mf.added_at = '' THEN 1 ELSE 0 END",
-    valExpr: "COALESCE(mf.added_at, '')",
+    nullExpr: `CASE WHEN (${ADDED_AT_CANONICAL_EXPR}) IS NULL THEN 1 ELSE 0 END`,
+    valExpr: `COALESCE(${ADDED_AT_CANONICAL_EXPR}, '')`,
   },
   catalog_number: {
     nullExpr: "CASE WHEN mf.catalog_number IS NULL OR mf.catalog_number = '' THEN 1 ELSE 0 END",
