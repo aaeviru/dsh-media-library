@@ -248,6 +248,7 @@ export interface SpikeServiceOptions {
   readonly configuredTargetSubdir?: string | (() => string) | undefined;
   readonly cmadbBaseUrl?: string | undefined;
   readonly ppvdbBaseUrl?: string | undefined;
+  readonly configuredAvWikiBaseUrl?: string | (() => string) | undefined;
   readonly configuredCmadbCookie?: string | (() => string) | undefined;
   readonly configuredPpvdbCookie?: string | (() => string) | undefined;
   readonly metadataFetcher?: MetadataFetcher | undefined;
@@ -403,6 +404,7 @@ export class MediaLibrarySpikeService {
   private configuredTargetSubdir: string | (() => string);
   private readonly cmadbBaseUrl: string;
   private readonly ppvdbBaseUrl: string;
+  private configuredAvWikiBaseUrl: string | (() => string);
   private configuredCmadbCookie: string | (() => string);
   private configuredPpvdbCookie: string | (() => string);
   private readonly explicitFetcher: MetadataFetcher | undefined;
@@ -442,6 +444,7 @@ export class MediaLibrarySpikeService {
     this.configuredTargetSubdir = options.configuredTargetSubdir ?? 'ingested';
     this.cmadbBaseUrl = options.cmadbBaseUrl ?? 'https://fc2cmadb.com';
     this.ppvdbBaseUrl = options.ppvdbBaseUrl ?? 'https://fc2ppvdb.com';
+    this.configuredAvWikiBaseUrl = options.configuredAvWikiBaseUrl ?? 'https://av-wiki.net';
     this.configuredCmadbCookie = options.configuredCmadbCookie ?? '';
     this.configuredPpvdbCookie = options.configuredPpvdbCookie ?? '';
     this.explicitFetcher = options.metadataFetcher;
@@ -486,6 +489,7 @@ export class MediaLibrarySpikeService {
     return new MetadataFetcher({
       cmadbBaseUrl: this.cmadbBaseUrl,
       ppvdbBaseUrl: this.ppvdbBaseUrl,
+      avWikiBaseUrl: () => this.readStringSetting(this.configuredAvWikiBaseUrl),
       cmadbCookie: this.readStringSetting(this.configuredCmadbCookie),
       ppvdbCookie: this.readStringSetting(this.configuredPpvdbCookie),
     });

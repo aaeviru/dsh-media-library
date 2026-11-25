@@ -285,12 +285,24 @@ export function normalizeLookupKey(value: string): string {
  * Returns null if no recognizable catalog number pattern is present.
  */
 const FC2_REGEX = /(?<![A-Za-z0-9])FC2[\s-_]*(?:PPV[\s-_]*)?(\d{5,8})(?![A-Za-z0-9])/i
-const UNCENSORED_STUDIO_REGEX =
+export const UNCENSORED_STUDIO_REGEX =
   /(?<![A-Za-z0-9])(\d{6}[_-]\d{2,4})[-_](1pon(?:do)?|10mu(?:sume)?|carib(?:pr)?|pacopacomama)(?![A-Za-z0-9])/i
+const NORMALIZED_UNCENSORED_STUDIO_REGEX =
+  /(?<![A-Za-z0-9])(1pon(?:do)?|10mu(?:sume)?|carib(?:pr)?|pacopacomama)[-_](\d{6}[_-]\d{2,4})(?![A-Za-z0-9])/i
 const STANDARD_CATALOG_REGEX =
-  /(?<![A-Za-z0-9])(\d{0,3}[A-Za-z]{1,6}\d{0,2})[-_]([A-Za-z]{0,2}\d{2,6})([A-Za-z])?(?![A-Za-z0-9])/i
+  /(?<![A-Za-z0-9])(\d{0,3}[A-Za-z]{1,6}\d{0,2})[-_]([A-Za-z]{0,2}\d{2,6})([A-Za-z])?(?![A-Za-z0-9])/gi
 
-const IGNORED_CATALOG_PREFIXES = new Set([
+export const UNCENSORED_STUDIO_PREFIXES: ReadonlySet<string> = new Set([
+  '1PON',
+  '1PONDO',
+  '10MU',
+  '10MUSUME',
+  'CARIB',
+  'CARIBPR',
+  'PACOPACOMAMA',
+])
+
+export const IGNORED_CATALOG_PREFIXES: ReadonlySet<string> = new Set([
   'UTF',
   'ISO',
   'SHA',
@@ -305,6 +317,31 @@ const IGNORED_CATALOG_PREFIXES = new Set([
   'WMV',
   'AVI',
   'MKV',
+  'VIDEO',
+  'AUDIO',
+  'SAMPLE',
+  'H264',
+  'H265',
+  'X264',
+  'X265',
+  'HEVC',
+  'AVC',
+  '1080P',
+  '720P',
+  '480P',
+  '2160P',
+  'FHD',
+  'UHD',
+  'MP3',
+  'MP4',
+  'MOV',
+  'FLV',
+  'WEBM',
+  'M4V',
+  'MPG',
+  'MPEG',
+  'FC2',
+  'PPV',
 ])
 
 export function extractCatalogNumber(text: string | null | undefined): string | null {
@@ -322,21 +359,34 @@ export function extractCatalogNumber(text: string | null | undefined): string | 
     return `${studio}-${code}`
   }
 
-  const stdMatch = STANDARD_CATALOG_REGEX.exec(text)
-  if (!stdMatch) return null
-  const prefix = stdMatch[1]!.toUpperCase()
-  const numberPart = stdMatch[2]!.toUpperCase()
-  const suffix = (stdMatch[3] ?? '').toUpperCase()
+  const normalizedUncensoredMatch = NORMALIZED_UNCENSORED_STUDIO_REGEX.exec(text)
+  if (normalizedUncensoredMatch) {
+    const studio = normalizedUncensoredMatch[1]!.toUpperCase()
+    const code = normalizedUncensoredMatch[2]!.replace(/-/g, '_')
+    return `${studio}-${code}`
+  }
 
-  // Must contain at least one letter in prefix, and not be an ignored technical token
-  if (!/[A-Z]/.test(prefix) || IGNORED_CATALOG_PREFIXES.has(prefix)) {
-    return null
+  for (const stdMatch of text.matchAll(STANDARD_CATALOG_REGEX)) {
+    const prefix = stdMatch[1]!.toUpperCase()
+    const numberPart = stdMatch[2]!.toUpperCase()
+    const suffix = (stdMatch[3] ?? '').toUpperCase()
+
+    // Must contain at least one letter in prefix, and not be an ignored technical token or uncensored studio prefix.
+    if (
+      !/[A-Z]/.test(prefix) ||
+      IGNORED_CATALOG_PREFIXES.has(prefix) ||
+      UNCENSORED_STUDIO_PREFIXES.has(prefix)
+    ) {
+      continue
+    }
+    // Single-letter prefixes (e.g. T-28634, C-2058) require at least 4 digits to avoid matching e.g. 'v-10'
+    if (prefix.length === 1 && numberPart.length < 4) {
+      continue
+    }
+    return `${prefix}-${numberPart}${suffix}`
   }
-  // Single-letter prefixes (e.g. T-28634, C-2058) require at least 4 digits to avoid matching e.g. 'v-10'
-  if (prefix.length === 1 && numberPart.length < 4) {
-    return null
-  }
-  return `${prefix}-${numberPart}${suffix}`
+
+  return null
 }
 
 /**

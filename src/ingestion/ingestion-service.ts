@@ -27,7 +27,7 @@ import type {
 } from '../types.ts';
 import { resolveAllowlistedUncPath } from '../unc-path.ts';
 import { evaluateManifestPerformers, normalizePerformerName } from '../performers/performer-service.ts';
-import { type MetadataFetcher, parseFc2Code } from './metadata-fetcher.ts';
+import { type MetadataFetcher, parseFc2Code, resolveMetadataLookupRoute } from './metadata-fetcher.ts';
 
 const VIDEO_EXTENSIONS = new Set(['.avi', '.mkv', '.mp4', '.mov', '.wmv', '.m4v', '.ts']);
 
@@ -734,7 +734,8 @@ export async function ensureManifestForStagingFile(
 }
 
 /**
- * Fetch candidate metadata & tags from `FC2CMADB` / `FC2PPVDB` for a staged file or manifest (`B3`).
+ * Fetch candidate metadata & tags from `FC2CMADB` / `FC2PPVDB` (for `FC2-PPV-*`) or `av-wiki.net`
+ * (for standard maker product codes) for a staged file or manifest (`Issue #7 B3` / `Issue #67 B4`).
  */
 export async function fetchMetadataForManifest(
   db: DatabaseSync,
@@ -759,13 +760,23 @@ export async function fetchMetadataForManifest(
     };
   }
 
-  const parsed = parseFc2Code(manifest.catalogNumber ?? manifest.filename);
-  if (!parsed) {
+  const catalogRoute = resolveMetadataLookupRoute(manifest.catalogNumber);
+  const filenameRoute = resolveMetadataLookupRoute(manifest.filename);
+  const route =
+    catalogRoute?.kind === 'avwiki' &&
+    !catalogRoute.parsed.partSuffix &&
+    filenameRoute?.kind === 'avwiki' &&
+    filenameRoute.parsed.baseCode === catalogRoute.parsed.baseCode &&
+    filenameRoute.parsed.partSuffix
+      ? filenameRoute
+      : (catalogRoute ?? filenameRoute);
+
+  if (!route) {
     return {
       ok: false,
       provider: null,
       category: 'no_code',
-      reason: 'No FC2-PPV code found in filename or catalogNumber.',
+      reason: 'No supported FC2-PPV or standard product code found in filename or catalogNumber.',
       sourceUrl: '',
       title: manifest.title,
       writer: null,
@@ -776,7 +787,7 @@ export async function fetchMetadataForManifest(
     };
   }
 
-  const lookup = await fetcher.lookup(parsed.videoId);
+  const lookup = await fetcher.lookupByText(route.parsed.code);
   if (!lookup.metadata) {
     return {
       ok: false,

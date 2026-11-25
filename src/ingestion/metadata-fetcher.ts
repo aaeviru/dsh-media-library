@@ -1,3 +1,8 @@
+import {
+  IGNORED_CATALOG_PREFIXES,
+  UNCENSORED_STUDIO_PREFIXES,
+  UNCENSORED_STUDIO_REGEX,
+} from '../inventory/tagstudio-inventory.ts';
 import type { FetchedMetadataCandidate } from '../types.ts';
 
 export interface ParsedFc2Code {
@@ -5,6 +10,20 @@ export interface ParsedFc2Code {
   readonly suffix: string;
   readonly code: string;
 }
+
+export interface ParsedStandardProductCode {
+  readonly prefix: string;
+  readonly number: string;
+  readonly partSuffix: string;
+  readonly baseCode: string;
+  readonly code: string;
+  readonly baseSlug: string;
+  readonly slug: string;
+}
+
+export type MetadataLookupRoute =
+  | { readonly kind: 'fc2'; readonly parsed: ParsedFc2Code }
+  | { readonly kind: 'avwiki'; readonly parsed: ParsedStandardProductCode };
 
 export interface ProviderMetadata {
   readonly videoId: string;
@@ -14,7 +33,7 @@ export interface ProviderMetadata {
   readonly mediaDate: string | null;
   readonly candidateTags: readonly string[];
   readonly sourceUrl: string;
-  readonly provider: 'FC2CMADB' | 'FC2PPVDB';
+  readonly provider: 'FC2CMADB' | 'FC2PPVDB' | 'AVWIKI';
 }
 
 export interface ProviderLookupResult {
@@ -25,6 +44,9 @@ export interface ProviderLookupResult {
 }
 
 const FC2_RE = /(?<![A-Z0-9])FC2[-_ ]?PPV[-_ ]?(\d{5,9})(?:[-_](?:pt)?(\d{1,3}))?(?![A-Z0-9])/i;
+const FC2_ANY_RE = /(?<![A-Za-z0-9])FC2[\s-_]*(?:PPV[\s-_]*)?(\d{5,9})(?![A-Za-z0-9])/i;
+const STANDARD_PRODUCT_CODE_RE =
+  /(?<![A-Za-z0-9])(\d{0,3}[A-Za-z]{1,6}\d{0,2})[-_]([A-Za-z]{0,2})(\d{1,6})(?:[-_](?:(?:pt|part|cd|disc|disk)[-_]?)?(\d{1,2}))?(?![A-Za-z0-9])/gi;
 
 export function parseFc2Code(text: string): ParsedFc2Code | null {
   const match = FC2_RE.exec(text);
@@ -38,6 +60,84 @@ export function parseFc2Code(text: string): ParsedFc2Code | null {
   };
 }
 
+/**
+ * Parse a standard maker product code for `av-wiki.net` routing:
+ * - Zero-pads the numeric part to >= 3 digits (e.g. `ABP-76` -> `ABP-076` / slug `abp-076`)
+ * - Preserves optional part suffix (e.g. `ABP-576-1` -> slug `abp-576-1`, baseSlug `abp-576`)
+ * - Rejects FC2 codes, uncensored studio date codes, and `IGNORED_CATALOG_PREFIXES`
+ */
+export function parseStandardProductCode(text: string | null | undefined): ParsedStandardProductCode | null {
+  if (!text || !text.trim()) return null;
+  if (FC2_ANY_RE.test(text) || UNCENSORED_STUDIO_REGEX.test(text)) {
+    return null;
+  }
+
+  for (const match of text.matchAll(STANDARD_PRODUCT_CODE_RE)) {
+    const prefix = match[1]!.toUpperCase();
+    const numPrefix = (match[2] ?? '').toUpperCase();
+    const rawDigits = match[3]!;
+    const partSuffix = match[4] ?? '';
+
+    if (
+      !/[A-Z]/.test(prefix) ||
+      IGNORED_CATALOG_PREFIXES.has(prefix) ||
+      UNCENSORED_STUDIO_PREFIXES.has(prefix)
+    ) {
+      continue;
+    }
+    if (prefix.length === 1 && numPrefix.length === 0 && rawDigits.length < 4) {
+      continue;
+    }
+
+    const paddedDigits = rawDigits.length < 3 ? rawDigits.padStart(3, '0') : rawDigits;
+    const number = `${numPrefix}${paddedDigits}`;
+    const baseCode = `${prefix}-${number}`;
+    const code = partSuffix ? `${baseCode}-${partSuffix}` : baseCode;
+    const baseSlug = baseCode.toLowerCase();
+    const slug = code.toLowerCase();
+
+    return {
+      prefix,
+      number,
+      partSuffix,
+      baseCode,
+      code,
+      baseSlug,
+      slug,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Deterministic metadata lookup router:
+ * - `FC2-PPV-*` always routes exclusively to FC2 providers and never falls back to `av-wiki.net`.
+ * - Standard maker product codes route to `AVWIKI`.
+ */
+export function resolveMetadataLookupRoute(text: string | null | undefined): MetadataLookupRoute | null {
+  if (!text || !text.trim()) return null;
+  const fc2 = parseFc2Code(text);
+  if (fc2) {
+    return { kind: 'fc2', parsed: fc2 };
+  }
+  const standard = parseStandardProductCode(text);
+  if (standard) {
+    return { kind: 'avwiki', parsed: standard };
+  }
+  return null;
+}
+
+function safeFromCodePoint(codePoint: number): string {
+  if (!Number.isInteger(codePoint) || codePoint <= 0 || codePoint > 0x10ffff) {
+    return '';
+  }
+  if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+    return '';
+  }
+  return String.fromCodePoint(codePoint);
+}
+
 function decodeHtmlEntities(input: string): string {
   return input
     .replace(/&quot;/g, '"')
@@ -47,8 +147,16 @@ function decodeHtmlEntities(input: string): string {
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&amp;/g, '&')
-    .replace(/&#(\d+);/g, (_, dec: string) => String.fromCodePoint(Number(dec)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)));
+    .replace(/&#(\d+);/g, (_, dec: string) => safeFromCodePoint(Number(dec)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => safeFromCodePoint(Number.parseInt(hex, 16)));
+}
+
+function cleanPreservingPunctuation(text: string | null | undefined): string {
+  if (!text) return '';
+  return decodeHtmlEntities(text)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[ \t\r\n\f]+/g, ' ')
+    .trim();
 }
 
 export function cleanMetadataText(text: string | null | undefined): string {
@@ -428,6 +536,290 @@ export function parsePpvdbHtml(html: string, videoId: string, sourceUrl: string)
   };
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractOgTitle(html: string): string {
+  const patterns = [
+    /<meta\b[^>]*property=["']og:title["'][^>]*content="([^"]*)"/i,
+    /<meta\b[^>]*property=["']og:title["'][^>]*content='([^']*)'/i,
+    /<meta\b[^>]*content="([^"]*)"[^>]*property=["']og:title["']/i,
+    /<meta\b[^>]*content='([^']*)'[^>]*property=["']og:title["']/i,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(html);
+    if (m?.[1]) return m[1];
+  }
+  return '';
+}
+
+function buildAvWikiCodePattern(productCode: string): string {
+  const normalized = cleanMetadataText(productCode).toUpperCase();
+  const parsed = /^([A-Z0-9]+)-([A-Z]{0,2})(\d+)(?:-(\d+))?$/.exec(normalized);
+  if (!parsed) {
+    return escapeRegExp(normalized);
+  }
+  const prefix = escapeRegExp(parsed[1]!);
+  const numPrefix = escapeRegExp(parsed[2] ?? '');
+  const unpaddedDigits = parsed[3]!.replace(/^0+/, '') || '0';
+  const suffix = parsed[4] ? `(?:[-_ ]?${escapeRegExp(parsed[4])})?` : '';
+  return `${prefix}[-_ ]?${numPrefix}0*${escapeRegExp(unpaddedDigits)}${suffix}`;
+}
+
+function stripAvWikiTitle(raw: string, productCode: string): string {
+  let value = cleanPreservingPunctuation(raw);
+  if (!value) return '';
+
+  value = value.replace(/\s*に出てるAV女優[\s\S]*$/i, '').trim();
+  value = value.replace(/\s*[|｜\-–—]\s*AV[- ]?WIKI(?:\s*[|｜\-–—][\s\S]*)?$/i, '').trim();
+
+  const codePattern = buildAvWikiCodePattern(productCode);
+  if (codePattern) {
+    value = value.replace(new RegExp(`^(?:【\\s*)?${codePattern}(?:\\s*】)?\\s*[:：]\\s*`, 'i'), '');
+    value = value.replace(new RegExp(`^【\\s*${codePattern}\\s*】\\s*`, 'i'), '');
+  }
+
+  value = value.replace(/[ \t\r\n\f]+/g, ' ').trim();
+  if (!value || /^AV[- ]?WIKI$/i.test(value)) {
+    return '';
+  }
+  if (codePattern && new RegExp(`^(?:【\\s*)?${codePattern}(?:\\s*】)?$`, 'i').test(value)) {
+    return '';
+  }
+  return value;
+}
+
+function extractAvWikiIsoDate(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const strict = extractIsoDateFromText(raw);
+  if (strict) return strict;
+
+  const cleaned = cleanMetadataText(raw);
+  const flexible = /(?<!\d)(20\d{2}|19\d{2})\s*(?:[-/.]|年)\s*(\d{1,2})\s*(?:[-/.]|月)\s*(\d{1,2})(?:\s*日)?(?!\d)/.exec(
+    cleaned,
+  );
+  if (!flexible) return null;
+  const year = flexible[1]!;
+  const month = Number(flexible[2]!);
+  const day = Number(flexible[3]!);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function splitAvWikiActressText(raw: string): string[] {
+  return cleanMetadataText(raw)
+    .split(/[,、/・\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => Boolean(s) && !/^[-—–_]+$/.test(s));
+}
+
+function extractAvWikiActressValues(ddBlocks: readonly string[]): string[] {
+  const out: string[] = [];
+  const anchorRe = /<a\b[^>]*>([\s\S]*?)<\/a>/gi;
+  for (const block of ddBlocks) {
+    let lastIndex = 0;
+    for (const m of block.matchAll(anchorRe)) {
+      const idx = m.index ?? 0;
+      if (idx > lastIndex) {
+        const before = block.slice(lastIndex, idx).replace(/<[^>]+>/g, ' ');
+        out.push(...splitAvWikiActressText(before));
+      }
+      const anchorText = cleanMetadataText(m[1]!.replace(/<[^>]+>/g, ''));
+      if (anchorText && !/^[-—–_]+$/.test(anchorText)) {
+        out.push(anchorText);
+      }
+      lastIndex = idx + m[0].length;
+    }
+    if (lastIndex < block.length) {
+      const tail = block.slice(lastIndex).replace(/<[^>]+>/g, ' ');
+      out.push(...splitAvWikiActressText(tail));
+    }
+  }
+  return out;
+}
+
+function isAvWikiChallengePage(html: string, rawTitle: string, hasArticleEvidence: boolean): boolean {
+  const loweredTitle = cleanMetadataText(rawTitle).toLowerCase();
+  if (
+    loweredTitle.startsWith('just a moment') ||
+    loweredTitle.includes('attention required! | cloudflare') ||
+    /cf-browser-verification|\/cdn-cgi\/challenge-platform|__cf_chl_/i.test(html)
+  ) {
+    return true;
+  }
+  if (!hasArticleEvidence && /^(?:403\s+)?access denied(?:\s*[|｜\-–—].*)?$/i.test(loweredTitle)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Parse `av-wiki.net` HTML pages for standard maker product codes (`Issue #67 B3`).
+ * Extracts clean title (preserving original punctuation), actresses, release/distribution date,
+ * and maker/studio without scraping noisy page tags.
+ */
+export function parseAvWikiHtml(html: string, productCode: string, sourceUrl: string): ProviderLookupResult {
+  const normalizedCode = cleanMetadataText(productCode).toUpperCase();
+  const requestedParsed = parseStandardProductCode(normalizedCode);
+
+  const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  const rawTitle = titleMatch?.[1] ?? '';
+  const rawOgTitle = extractOgTitle(html);
+
+  const actressSet = new Set<string>();
+  let maker = '';
+  let mediaDate: string | null = null;
+  let hasActressDlField = false;
+  let hasRecognizedDlField = false;
+  let pageProductCodeRaw = '';
+
+  const dlPairRe = /<dt\b[^>]*>([\s\S]*?)<\/dt>((?:\s*<dd\b[^>]*>[\s\S]*?<\/dd>)+)/gi;
+  for (const pairMatch of html.matchAll(dlPairRe)) {
+    const label = cleanMetadataText(pairMatch[1]!.replace(/<[^>]+>/g, '')).replace(/[:：]+$/, '');
+    const ddBlocks = [...pairMatch[2]!.matchAll(/<dd\b[^>]*>([\s\S]*?)<\/dd>/gi)].map((m) => m[1]!);
+    if (ddBlocks.length === 0) continue;
+
+    if (label === 'AV女優名' || label === 'AV女優' || label === '女優名') {
+      hasActressDlField = true;
+      hasRecognizedDlField = true;
+      for (const name of extractAvWikiActressValues(ddBlocks)) {
+        actressSet.add(name);
+      }
+    } else if (label === 'メーカー品番') {
+      hasRecognizedDlField = true;
+      if (!pageProductCodeRaw) {
+        pageProductCodeRaw = cleanMetadataText(ddBlocks.map((b) => b.replace(/<[^>]+>/g, ' ')).join(' '));
+      }
+    } else if (label === 'メーカー') {
+      hasRecognizedDlField = true;
+      if (!maker) {
+        const anchors = ddBlocks.flatMap((block) =>
+          [...block.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)]
+            .map((m) => cleanMetadataText(m[1]!.replace(/<[^>]+>/g, '')))
+            .filter((s) => Boolean(s) && !/^[-—–_]+$/.test(s)),
+        );
+        if (anchors.length > 0) {
+          maker = anchors[0]!;
+        } else {
+          const plainMaker = cleanMetadataText(ddBlocks.map((b) => b.replace(/<[^>]+>/g, ' ')).join(' '));
+          if (plainMaker && !/^[-—–_]+$/.test(plainMaker)) {
+            maker = plainMaker;
+          }
+        }
+      }
+    } else if (label === '配信日' || label === '配信開始日' || label === '発売日' || label === '公開日') {
+      hasRecognizedDlField = true;
+      if (!mediaDate) {
+        for (const block of ddBlocks) {
+          const foundDate = extractAvWikiIsoDate(block.replace(/<[^>]+>/g, ' '));
+          if (foundDate) {
+            mediaDate = foundDate;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  const bodyHtml = html
+    .replace(/<head\b[\s\S]*?<\/head>/gi, ' ')
+    .replace(/<title\b[\s\S]*?<\/title>/gi, ' ')
+    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ');
+  const bodyPlainText = cleanMetadataText(bodyHtml.replace(/<[^>]+>/g, ' '));
+
+  const codePattern = buildAvWikiCodePattern(normalizedCode);
+  const titleHeaderText = `${cleanPreservingPunctuation(rawTitle)} ${cleanPreservingPunctuation(rawOgTitle)}`;
+  const hasCodeInTitle = Boolean(
+    codePattern && new RegExp(`(?<![A-Za-z0-9])${codePattern}(?![A-Za-z0-9])`, 'i').test(titleHeaderText),
+  );
+  const hasAvWikiTitleMarker = /に出てるAV女優/i.test(titleHeaderText);
+  const hasBodyArticleMarker = /(?:AV女優名|メーカー品番)\s*[:：]?/i.test(bodyPlainText);
+  const hasArticleEvidence = hasRecognizedDlField || hasCodeInTitle || hasAvWikiTitleMarker || hasBodyArticleMarker;
+
+  if (isAvWikiChallengePage(html, rawTitle, hasArticleEvidence)) {
+    return {
+      metadata: null,
+      category: 'auth_or_blocked',
+      reason: 'Challenge or blocked interstitial returned by AV-WIKI.',
+      sourceUrl,
+    };
+  }
+
+  if (!hasArticleEvidence) {
+    return {
+      metadata: null,
+      category: 'parse_error',
+      reason: 'Response does not match an AV-WIKI article page.',
+      sourceUrl,
+    };
+  }
+
+  if (requestedParsed && pageProductCodeRaw) {
+    const pageParsed = parseStandardProductCode(pageProductCodeRaw);
+    if (pageParsed && pageParsed.baseCode !== requestedParsed.baseCode) {
+      return {
+        metadata: null,
+        category: 'parse_error',
+        reason: `AV-WIKI product code mismatch: expected ${requestedParsed.baseCode}, got ${pageParsed.baseCode}.`,
+        sourceUrl,
+      };
+    }
+  }
+
+  const title = stripAvWikiTitle(rawTitle, normalizedCode) || stripAvWikiTitle(rawOgTitle, normalizedCode);
+  if (!title) {
+    return {
+      metadata: null,
+      category: 'parse_error',
+      reason: 'Article title not found in AV-WIKI page.',
+      sourceUrl,
+    };
+  }
+
+  if ((!hasActressDlField && actressSet.size === 0) || !mediaDate) {
+    if (!hasActressDlField && actressSet.size === 0) {
+      const plainActressMatch =
+        /AV女優名\s*(?:[:：]\s*|\s+)(?!まとめ)(.+?)(?=\s*(?:メーカー品番|メーカー|配信開始日|配信日|発売日|公開日|FANZA|MGS動画)|$)/i.exec(
+          bodyPlainText,
+        );
+      const captured = plainActressMatch?.[1]?.trim() ?? '';
+      if (captured && !/^(?:メーカー品番|メーカー|配信開始日|配信日|発売日|公開日|FANZA|MGS動画)\b/i.test(captured)) {
+        for (const name of splitAvWikiActressText(captured)) {
+          actressSet.add(name);
+        }
+      }
+    }
+
+    if (!mediaDate) {
+      const plainDateMatch = /(?:配信開始日|配信日|発売日|公開日)\s*[:：]?\s*([^\s].{0,24})/.exec(bodyPlainText);
+      if (plainDateMatch?.[1]) {
+        mediaDate = extractAvWikiIsoDate(plainDateMatch[1]);
+      }
+    }
+  }
+
+  const actresses = [...actressSet];
+  const candidateTags = [...new Set([...actresses, ...(maker ? [maker] : [])])];
+
+  return {
+    metadata: {
+      videoId: normalizedCode,
+      title,
+      writer: maker,
+      actresses,
+      mediaDate,
+      candidateTags,
+      sourceUrl,
+      provider: 'AVWIKI',
+    },
+    category: 'ok',
+    reason: '',
+    sourceUrl,
+  };
+}
+
 export type FetchLike = (
   url: string,
   init: { method: string; headers: Record<string, string>; signal?: AbortSignal },
@@ -436,6 +828,7 @@ export type FetchLike = (
 export interface MetadataFetcherOptions {
   readonly cmadbBaseUrl?: string | undefined;
   readonly ppvdbBaseUrl?: string | undefined;
+  readonly avWikiBaseUrl?: string | (() => string) | undefined;
   readonly cmadbCookie?: string | undefined;
   readonly ppvdbCookie?: string | undefined;
   readonly retries?: number | undefined;
@@ -458,6 +851,7 @@ function classifyHttpStatus(status: number): FetchedMetadataCandidate['category'
 export class MetadataFetcher {
   private readonly cmadbBaseUrl: string;
   private readonly ppvdbBaseUrl: string;
+  private readonly avWikiBaseUrlOption: string | (() => string) | undefined;
   private readonly cmadbCookie: string;
   private readonly ppvdbCookie: string;
   private readonly retries: number;
@@ -469,6 +863,7 @@ export class MetadataFetcher {
   constructor(options: MetadataFetcherOptions = {}) {
     this.cmadbBaseUrl = (options.cmadbBaseUrl ?? 'https://fc2cmadb.com').replace(/\/+$/, '');
     this.ppvdbBaseUrl = (options.ppvdbBaseUrl ?? 'https://fc2ppvdb.com').replace(/\/+$/, '');
+    this.avWikiBaseUrlOption = options.avWikiBaseUrl;
     this.cmadbCookie = (options.cmadbCookie ?? '').trim();
     this.ppvdbCookie = (options.ppvdbCookie ?? '').trim();
     this.retries = Math.max(1, options.retries ?? 2);
@@ -476,6 +871,12 @@ export class MetadataFetcher {
     this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 500);
     this.requestDelayMs = Math.max(0, options.requestDelayMs ?? 250);
     this.fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init));
+  }
+
+  private resolveAvWikiBaseUrl(): string {
+    const raw =
+      typeof this.avWikiBaseUrlOption === 'function' ? this.avWikiBaseUrlOption() : this.avWikiBaseUrlOption;
+    return (raw?.trim() || 'https://av-wiki.net').replace(/\/+$/, '');
   }
 
   private async fetchTextWithHeaders(
@@ -603,31 +1004,40 @@ export class MetadataFetcher {
     return names;
   }
 
-  private async lookupProvider(
-    baseUrl: string,
+  private async fetchAndParseWithRetry(
+    resolveUrl: string | (() => string),
     cookieHeader: string,
-    parser: (html: string, videoId: string, sourceUrl: string) => ProviderLookupResult,
-    videoId: string,
+    parser: (html: string, sourceUrl: string) => ProviderLookupResult,
   ): Promise<ProviderLookupResult & { rawHtml?: string }> {
-    const sourceUrl = `${baseUrl}/articles/${videoId}`;
+    const getUrl = typeof resolveUrl === 'function' ? resolveUrl : () => resolveUrl;
     let last: ProviderLookupResult & { rawHtml?: string } = {
       metadata: null,
       category: 'transient_network',
       reason: 'No request made.',
-      sourceUrl,
+      sourceUrl: '',
     };
 
     for (let attempt = 1; attempt <= this.retries; attempt++) {
+      const sourceUrl = getUrl();
       const res = await this.fetchTextWithHeaders(sourceUrl, cookieHeader);
       const status = res.status;
       if (!res.ok) {
         last = { metadata: null, category: res.category, reason: res.reason, sourceUrl };
       } else {
-        const parsed = parser(res.body, videoId, sourceUrl);
-        last = parsed.metadata ? { ...parsed, rawHtml: res.body } : parsed;
+        try {
+          const parsed = parser(res.body, sourceUrl);
+          last = parsed.metadata ? { ...parsed, rawHtml: res.body } : parsed;
+        } catch (err) {
+          last = {
+            metadata: null,
+            category: 'parse_error',
+            reason: err instanceof Error ? err.message : String(err),
+            sourceUrl,
+          };
+        }
       }
 
-      if (last.metadata) return last;
+      if (last.metadata) break;
       const shouldRetry =
         last.category === 'transient_network' ||
         last.category === 'transient_http' ||
@@ -635,8 +1045,9 @@ export class MetadataFetcher {
         (status !== null && RETRYABLE_STATUS.has(status));
 
       if (!shouldRetry || attempt >= this.retries) break;
-      if (this.retryDelayMs > 0) {
-        await new Promise((r) => setTimeout(r, this.retryDelayMs * attempt));
+      const retryWaitMs = Math.max(this.requestDelayMs, this.retryDelayMs * attempt);
+      if (retryWaitMs > 0) {
+        await new Promise((r) => setTimeout(r, retryWaitMs));
       }
     }
 
@@ -644,6 +1055,79 @@ export class MetadataFetcher {
       await new Promise((r) => setTimeout(r, this.requestDelayMs));
     }
     return last;
+  }
+
+  private async lookupProvider(
+    baseUrl: string,
+    cookieHeader: string,
+    parser: (html: string, videoId: string, sourceUrl: string) => ProviderLookupResult,
+    videoId: string,
+  ): Promise<ProviderLookupResult & { rawHtml?: string }> {
+    const sourceUrl = `${baseUrl}/articles/${videoId}`;
+    return this.fetchAndParseWithRetry(sourceUrl, cookieHeader, (html, url) => parser(html, videoId, url));
+  }
+
+  async lookupAvWiki(codeOrParsed: ParsedStandardProductCode | string): Promise<ProviderLookupResult> {
+    const parsed = typeof codeOrParsed === 'string' ? parseStandardProductCode(codeOrParsed) : codeOrParsed;
+    if (!parsed) {
+      return {
+        metadata: null,
+        category: 'no_code',
+        reason: 'No standard product code found.',
+        sourceUrl: '',
+      };
+    }
+
+    const primary = await this.fetchAndParseWithRetry(
+      () => `${this.resolveAvWikiBaseUrl()}/${parsed.slug}/`,
+      '',
+      (html, url) => parseAvWikiHtml(html, parsed.code, url),
+    );
+    if (primary.metadata) {
+      return {
+        metadata: primary.metadata,
+        category: primary.category,
+        reason: primary.reason,
+        sourceUrl: primary.sourceUrl,
+      };
+    }
+
+    if (parsed.slug !== parsed.baseSlug && primary.category === 'not_found') {
+      const fallback = await this.fetchAndParseWithRetry(
+        () => `${this.resolveAvWikiBaseUrl()}/${parsed.baseSlug}/`,
+        '',
+        (html, url) => parseAvWikiHtml(html, parsed.baseCode, url),
+      );
+      return {
+        metadata: fallback.metadata,
+        category: fallback.category,
+        reason: fallback.reason,
+        sourceUrl: fallback.sourceUrl,
+      };
+    }
+
+    return {
+      metadata: null,
+      category: primary.category,
+      reason: primary.reason,
+      sourceUrl: primary.sourceUrl,
+    };
+  }
+
+  async lookupByText(text: string): Promise<ProviderLookupResult> {
+    const route = resolveMetadataLookupRoute(text);
+    if (!route) {
+      return {
+        metadata: null,
+        category: 'no_code',
+        reason: 'No supported FC2-PPV or standard product code found.',
+        sourceUrl: '',
+      };
+    }
+    if (route.kind === 'fc2') {
+      return this.lookup(route.parsed.videoId);
+    }
+    return this.lookupAvWiki(route.parsed);
   }
 
   async lookup(videoId: string): Promise<ProviderLookupResult> {
