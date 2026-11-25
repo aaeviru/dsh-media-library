@@ -340,6 +340,92 @@ try {
   await page.locator("[data-testid=\"media-status-missing\"]").first().waitFor();
   console.log(`Pagination after editing draft filters and loading more: ${pageSummary}`);
 
+  // Issue #68 B4: Multi-column sorting, NULLS LAST, filter retention, and page-1 reset
+  const waitSortState = async (expectedRows, expectedTotal, expectedFirstRowSubstr) => {
+    await page.waitForFunction(
+      ([rowsCount, totalCount, firstSubstr]) => {
+        const submitBtn = document.querySelector("[data-testid=\"search-submit-btn\"]");
+        if (!submitBtn || submitBtn.disabled) return false;
+        const rows = document.querySelectorAll("tr[data-testid^=\"media-row-\"]");
+        if (rows.length !== rowsCount) return false;
+        const summary = document.querySelector("[data-testid=\"search-results-summary\"]")?.textContent ?? "";
+        if (!summary.includes(`(${rowsCount} / ${totalCount}`)) return false;
+        if (firstSubstr && !(rows[0]?.textContent ?? "").includes(firstSubstr)) return false;
+        return true;
+      },
+      [expectedRows, expectedTotal, expectedFirstRowSubstr],
+    );
+  };
+
+  assert.equal(
+    await page.locator("[data-testid=\"library-main-view\"] select").count(),
+    0,
+    "Zero native <select> elements allowed in Media Library view",
+  );
+  await page.click("[data-testid=\"search-reset-btn\"]");
+  await waitSortState(50, 66, "LIB-101");
+  assert.equal(await page.locator("[data-testid=\"sort-field-media_date\"]").getAttribute("aria-pressed"), "true");
+  assert.equal(await page.locator("[data-testid=\"sort-order-toggle-btn\"]").getAttribute("data-sort-order"), "desc");
+  assert.equal(await page.locator("[data-testid=\"sort-order-toggle-btn\"]").getAttribute("aria-pressed"), "false");
+
+  // Load page 2 (66 / 66), then switch sort field -> must restart at page 1 (50 / 66)
+  await page.click("[data-testid=\"load-more-btn\"]");
+  await waitSortState(66, 66, "LIB-101");
+  await page.click("[data-testid=\"sort-field-filename\"]");
+  await waitSortState(50, 66, "video.mp4");
+  assert.equal(await page.locator("[data-testid=\"sort-field-filename\"]").getAttribute("aria-pressed"), "true");
+  assert.equal(await page.locator("[data-testid=\"sort-field-media_date\"]").getAttribute("aria-pressed"), "false");
+
+  // Toggle direction to asc -> must restart at page 1 and reverse order
+  await page.click("[data-testid=\"load-more-btn\"]");
+  await waitSortState(66, 66, "video.mp4");
+  await page.click("[data-testid=\"sort-order-toggle-btn\"]");
+  await waitSortState(50, 66, "2026-10-15_ABP-909");
+  assert.equal(await page.locator("[data-testid=\"sort-order-toggle-btn\"]").getAttribute("data-sort-order"), "asc");
+  assert.equal(await page.locator("[data-testid=\"sort-order-toggle-btn\"]").getAttribute("aria-pressed"), "true");
+
+  // Added Time asc -> NULLS LAST keeps earliest non-null imported row (untagged_clip.mp4, 2026-08-02) first
+  await page.click("[data-testid=\"sort-field-added_at\"]");
+  await waitSortState(50, 66, "untagged_clip.mp4");
+  await page.click("[data-testid=\"sort-order-toggle-btn\"]");
+  await waitSortState(50, 66, "video.mp4");
+
+  // Catalog No. desc -> SSIS-999 first
+  await page.click("[data-testid=\"sort-field-catalog_number\"]");
+  await waitSortState(50, 66, "SSIS-999");
+
+  // Filter retention + page-1 reset across sort field and direction switches,
+  // including when the user has unsubmitted draft edits in the filter form.
+  await page.click("[data-testid=\"catalog-mode-prefix\"]");
+  await page.fill("[data-testid=\"search-catalog-input\"]", "PAGE-10");
+  await page.click("[data-testid=\"search-submit-btn\"]");
+  await waitSortState(50, 60, "PAGE-1059");
+  await page.click("[data-testid=\"load-more-btn\"]");
+  await waitSortState(60, 60, "PAGE-1059");
+  // Edit draft catalog input & mode WITHOUT submitting; sort switches must preserve applied PAGE-10 prefix filter.
+  await page.click("[data-testid=\"catalog-mode-exact\"]");
+  await page.fill("[data-testid=\"search-catalog-input\"]", "ABP-909");
+  await page.click("[data-testid=\"sort-order-toggle-btn\"]");
+  await waitSortState(50, 60, "PAGE-1000");
+  assert.equal(await page.locator("[data-testid=\"search-catalog-input\"]").inputValue(), "ABP-909");
+  await page.click("[data-testid=\"sort-field-filename\"]");
+  await waitSortState(50, 60, "page1000.mkv");
+  await page.click("[data-testid=\"load-more-btn\"]");
+  await waitSortState(60, 60, "page1000.mkv");
+  const filteredSortedIds = await page.locator("tr[data-testid^=\"media-row-\"]").evaluateAll(rows => rows.map(r => r.dataset.testid));
+  assert.equal(new Set(filteredSortedIds).size, 60, "Filtered sorted pagination must neither repeat nor omit rows");
+  // Submitting now applies the previously edited draft ("ABP-909" exact) under the active filename asc sort.
+  await page.click("[data-testid=\"search-submit-btn\"]");
+  await waitSortState(1, 1, "2026-10-15_ABP-909");
+
+  // Reset restores default sort (media_date desc) and full 50 / 66 page 1
+  await page.click("[data-testid=\"search-reset-btn\"]");
+  await waitSortState(50, 66, "LIB-101");
+  assert.equal(await page.locator("[data-testid=\"sort-field-media_date\"]").getAttribute("aria-pressed"), "true");
+  assert.equal(await page.locator("[data-testid=\"sort-order-toggle-btn\"]").getAttribute("data-sort-order"), "desc");
+  assert.equal(await page.locator("[data-testid=\"sort-order-toggle-btn\"]").getAttribute("aria-pressed"), "false");
+  console.log("Issue #68 B4 browser sorting verified: all 4 fields, asc/desc toggle, NULLS LAST, filter retention, and page-1 reset.");
+
   // A context menu must remain clickable when invoked at a row edge.
   const edgeRow = page.locator("tr[data-testid^=\"media-row-\"]").first();
   await edgeRow.scrollIntoViewIfNeeded();

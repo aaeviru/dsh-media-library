@@ -12,6 +12,8 @@ import type {
   MediaDetailItem,
   MediaFileStatus,
   MediaSearchItem,
+  MediaSortField,
+  MediaSortOrder,
   MediaTagChip,
   SearchMediaInput,
   SearchMediaResult,
@@ -19,8 +21,80 @@ import type {
 } from '../types.ts'
 
 export interface KeysetCursorPayload {
-  readonly d: string
+  readonly sortBy: MediaSortField
+  readonly sortOrder: MediaSortOrder
+  readonly isNull: 0 | 1
+  readonly v: string
   readonly id: number
+}
+
+interface SortColumnSpec {
+  readonly nullExpr: string
+  readonly valExpr: string
+}
+
+// Normalize mixed added_at formats (TagStudio 'YYYY-MM-DD HH:MM:SS[.ffffff]', native ISO
+// 'YYYY-MM-DDTHH:MM:SS.sssZ', timezone offsets like '+09:00', or date-only 'YYYY-MM-DD') into
+// canonical UTC 'YYYY-MM-DDTHH:MM:SS.<rtrimmed-fractional-digits>'. Stripping trailing fractional
+// zeros without a trailing sentinel preserves arbitrary sub-millisecond precision (ms/us/ns) in
+// exact lexicographic == chronological order. Guarding with a YYYY-MM-DD prefix prevents SQLite
+// magic strings like 'now' from evaluating dynamically.
+const ADDED_AT_TRIMMED_EXPR = "TRIM(COALESCE(mf.added_at, ''))"
+const ADDED_AT_AFTER_DOT_EXPR = `SUBSTR(${ADDED_AT_TRIMMED_EXPR}, INSTR(${ADDED_AT_TRIMMED_EXPR}, '.') + 1)`
+const ADDED_AT_FRAC_EXPR =
+  `CASE WHEN INSTR(${ADDED_AT_TRIMMED_EXPR}, '.') > 0 ` +
+  `THEN RTRIM(SUBSTR(${ADDED_AT_AFTER_DOT_EXPR}, 1, LENGTH(${ADDED_AT_AFTER_DOT_EXPR}) - LENGTH(LTRIM(${ADDED_AT_AFTER_DOT_EXPR}, '0123456789'))), '0') ` +
+  `ELSE '' END`
+const ADDED_AT_CANONICAL_EXPR =
+  `CASE WHEN ${ADDED_AT_TRIMMED_EXPR} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' ` +
+  `AND strftime('%Y-%m-%dT%H:%M:%S', ${ADDED_AT_TRIMMED_EXPR}) IS NOT NULL ` +
+  `THEN strftime('%Y-%m-%dT%H:%M:%S', ${ADDED_AT_TRIMMED_EXPR}) || '.' || (${ADDED_AT_FRAC_EXPR}) ` +
+  `ELSE NULL END`
+
+const SORT_COLUMN_SPECS: Readonly<Record<MediaSortField, SortColumnSpec>> = {
+  media_date: {
+    nullExpr: "CASE WHEN mf.media_date IS NULL OR mf.media_date = '' THEN 1 ELSE 0 END",
+    valExpr: "COALESCE(mf.media_date, '')",
+  },
+  added_at: {
+    nullExpr: `CASE WHEN (${ADDED_AT_CANONICAL_EXPR}) IS NULL THEN 1 ELSE 0 END`,
+    valExpr: `COALESCE(${ADDED_AT_CANONICAL_EXPR}, '')`,
+  },
+  catalog_number: {
+    nullExpr: "CASE WHEN mf.catalog_number IS NULL OR mf.catalog_number = '' THEN 1 ELSE 0 END",
+    valExpr: "LOWER(COALESCE(mf.catalog_number, ''))",
+  },
+  filename: {
+    nullExpr: "CASE WHEN mf.filename IS NULL OR mf.filename = '' THEN 1 ELSE 0 END",
+    valExpr: "LOWER(COALESCE(mf.filename, ''))",
+  },
+}
+
+const VALID_SORT_FIELDS = new Set<MediaSortField>([
+  'media_date',
+  'added_at',
+  'catalog_number',
+  'filename',
+])
+
+const VALID_SORT_ORDERS = new Set<MediaSortOrder>(['desc', 'asc'])
+
+export function validateSortField(raw: unknown): MediaSortField {
+  if (raw === undefined) return 'media_date'
+  if (typeof raw !== 'string' || !VALID_SORT_FIELDS.has(raw as MediaSortField)) {
+    throw new Error(
+      `Invalid sortBy "${String(raw)}": expected one of media_date, added_at, catalog_number, filename`,
+    )
+  }
+  return raw as MediaSortField
+}
+
+export function validateSortOrder(raw: unknown): MediaSortOrder {
+  if (raw === undefined) return 'desc'
+  if (typeof raw !== 'string' || !VALID_SORT_ORDERS.has(raw as MediaSortOrder)) {
+    throw new Error(`Invalid sortOrder "${String(raw)}": expected "desc" or "asc"`)
+  }
+  return raw as MediaSortOrder
 }
 
 export function escapeSqlLike(value: string): string {
@@ -75,24 +149,85 @@ export function encodeKeysetCursor(payload: KeysetCursorPayload): string {
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
 }
 
-export function decodeKeysetCursor(cursor: string): KeysetCursorPayload {
+export function decodeKeysetCursor(
+  cursor: string,
+  expectedSort?: {
+    readonly sortBy: MediaSortField
+    readonly sortOrder: MediaSortOrder
+  },
+): KeysetCursorPayload {
+  let payload: KeysetCursorPayload
   try {
     const raw = Buffer.from(cursor.trim(), 'base64url').toString('utf8')
-    const parsed = JSON.parse(raw) as Partial<KeysetCursorPayload>
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      typeof parsed.d !== 'string' ||
-      typeof parsed.id !== 'number' ||
-      !Number.isInteger(parsed.id) ||
-      parsed.id <= 0
-    ) {
-      throw new Error('Malformed cursor fields')
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('Malformed cursor object')
     }
-    return { d: parsed.d, id: parsed.id }
+
+    const hasNewFields =
+      'sortBy' in parsed || 'sortOrder' in parsed || 'isNull' in parsed || 'v' in parsed
+
+    if (hasNewFields) {
+      const sortBy = parsed.sortBy
+      const sortOrder = parsed.sortOrder
+      const isNull = parsed.isNull
+      const v = parsed.v
+      const id = parsed.id
+      if (
+        typeof sortBy !== 'string' ||
+        !VALID_SORT_FIELDS.has(sortBy as MediaSortField) ||
+        typeof sortOrder !== 'string' ||
+        !VALID_SORT_ORDERS.has(sortOrder as MediaSortOrder) ||
+        (isNull !== 0 && isNull !== 1) ||
+        typeof v !== 'string' ||
+        (isNull === 1 ? v !== '' : v.length === 0) ||
+        typeof id !== 'number' ||
+        !Number.isInteger(id) ||
+        id <= 0
+      ) {
+        throw new Error('Malformed cursor fields')
+      }
+      payload = {
+        sortBy: sortBy as MediaSortField,
+        sortOrder: sortOrder as MediaSortOrder,
+        isNull,
+        v,
+        id,
+      }
+    } else {
+      // Legacy cursor compatibility: `{ d, id }` corresponds strictly to `media_date desc`
+      const d = parsed.d
+      const id = parsed.id
+      if (
+        typeof d !== 'string' ||
+        typeof id !== 'number' ||
+        !Number.isInteger(id) ||
+        id <= 0
+      ) {
+        throw new Error('Malformed legacy cursor fields')
+      }
+      payload = {
+        sortBy: 'media_date',
+        sortOrder: 'desc',
+        isNull: d === '' ? 1 : 0,
+        v: d,
+        id,
+      }
+    }
   } catch {
     throw new Error(`Invalid pagination cursor: "${cursor}"`)
   }
+
+  if (
+    expectedSort &&
+    (payload.sortBy !== expectedSort.sortBy || payload.sortOrder !== expectedSort.sortOrder)
+  ) {
+    throw new Error(
+      `Invalid pagination cursor: cursor sort (${payload.sortBy} ${payload.sortOrder}) does not match requested sort (${expectedSort.sortBy} ${expectedSort.sortOrder})`,
+    )
+  }
+
+  return payload
 }
 
 function computeAsciiPrefixUpperBound(prefix: string): string | null {
@@ -385,6 +520,8 @@ export function searchMediaInDatabase(
   const startMs = performance.now()
   const limit = Math.min(Math.max(Number(input?.limit ?? 50), 1), 200)
   const catalogMatchMode: CatalogMatchMode = input?.catalogMatchMode === 'prefix' ? 'prefix' : 'exact'
+  const sortBy = validateSortField(input?.sortBy)
+  const sortOrder = validateSortOrder(input?.sortOrder)
 
   const dateFrom = validateIsoDateBound(input?.dateFrom, 'dateFrom')
   const dateTo = validateIsoDateBound(input?.dateTo, 'dateTo')
@@ -392,7 +529,9 @@ export function searchMediaInDatabase(
     throw new Error(`Invalid date range: dateFrom (${dateFrom}) must be <= dateTo (${dateTo})`)
   }
 
-  const cursorPayload = input?.cursor?.trim() ? decodeKeysetCursor(input.cursor) : null
+  const cursorPayload = input?.cursor?.trim()
+    ? decodeKeysetCursor(input.cursor, { sortBy, sortOrder })
+    : null
 
   const { resolvedTagIds, unresolvedTagQueries, ambiguousAliases } = resolveTagFilters(
     db,
@@ -484,14 +623,34 @@ export function searchMediaInDatabase(
     .get(...baseParams) as { cnt: number }
   const totalMatching = Number(countRow.cnt)
 
+  const sortSpec = SORT_COLUMN_SPECS[sortBy]
+  const useDefaultDateDescFastPath = sortBy === 'media_date' && sortOrder === 'desc'
+  const dirSql = sortOrder === 'asc' ? 'ASC' : 'DESC'
+  const cmpOp = sortOrder === 'asc' ? '>' : '<'
+
   const pageWhereClauses = [...whereClauses]
   const pageParams = [...baseParams]
   if (cursorPayload) {
-    pageWhereClauses.push(
-      "(COALESCE(mf.media_date, '') < ? OR (COALESCE(mf.media_date, '') = ? AND mf.id < ?))",
-    )
-    pageParams.push(cursorPayload.d, cursorPayload.d, cursorPayload.id)
+    if (useDefaultDateDescFastPath) {
+      // Preserves O(log N) scan on idx_media_files_keyset_order (COALESCE(media_date, '') DESC, id DESC)
+      pageWhereClauses.push(
+        "(COALESCE(mf.media_date, '') < ? OR (COALESCE(mf.media_date, '') = ? AND mf.id < ?))",
+      )
+      pageParams.push(cursorPayload.v, cursorPayload.v, cursorPayload.id)
+    } else if (cursorPayload.isNull === 1) {
+      pageWhereClauses.push(`(${sortSpec.nullExpr} = 1 AND mf.id ${cmpOp} ?)`)
+      pageParams.push(cursorPayload.id)
+    } else {
+      pageWhereClauses.push(
+        `(${sortSpec.nullExpr} > 0 OR (${sortSpec.nullExpr} = 0 AND (${sortSpec.valExpr} ${cmpOp} ? OR (${sortSpec.valExpr} = ? AND mf.id ${cmpOp} ?))))`,
+      )
+      pageParams.push(cursorPayload.v, cursorPayload.v, cursorPayload.id)
+    }
   }
+
+  const orderBySql = useDefaultDateDescFastPath
+    ? "COALESCE(mf.media_date, '') DESC, mf.id DESC"
+    : `${sortSpec.nullExpr} ASC, ${sortSpec.valExpr} ${dirSql}, mf.id ${dirSql}`
 
   const pageWhereSql = pageWhereClauses.join(' AND ')
   const rawRows = db
@@ -507,10 +666,12 @@ export function searchMediaInDatabase(
          mf.media_date,
          mf.added_at,
          mf.status,
-         mf.revision
+         mf.revision,
+         ${sortSpec.nullExpr} AS __sort_is_null,
+         ${sortSpec.valExpr} AS __sort_key
        FROM media_files mf
        WHERE ${pageWhereSql}
-       ORDER BY COALESCE(mf.media_date, '') DESC, mf.id DESC
+       ORDER BY ${orderBySql}
        LIMIT ?`,
     )
     .all(...pageParams, limit + 1) as Array<{
@@ -525,6 +686,8 @@ export function searchMediaInDatabase(
     added_at: string | null
     status: MediaFileStatus
     revision: number
+    __sort_is_null: number
+    __sort_key: string
   }>
 
   const hasNextPage = rawRows.length > limit
@@ -554,8 +717,12 @@ export function searchMediaInDatabase(
   let nextCursor: string | null = null
   if (hasNextPage && pageRows.length > 0) {
     const last = pageRows[pageRows.length - 1]!
+    const isNull: 0 | 1 = Number(last.__sort_is_null) === 1 ? 1 : 0
     nextCursor = encodeKeysetCursor({
-      d: last.media_date !== null ? String(last.media_date) : '',
+      sortBy,
+      sortOrder,
+      isNull,
+      v: isNull === 1 ? '' : String(last.__sort_key),
       id: Number(last.id),
     })
   }

@@ -57,6 +57,9 @@ export interface SpikeStatus {
 
 export type CatalogMatchMode = 'exact' | 'prefix';
 
+export type MediaSortField = 'media_date' | 'added_at' | 'catalog_number' | 'filename';
+export type MediaSortOrder = 'desc' | 'asc';
+
 export type MediaFileStatus =
   | 'indexed'
   | 'missing'
@@ -136,6 +139,8 @@ export interface SearchMediaInput {
   readonly tagNamesOrAliases?: readonly string[] | undefined;
   readonly dateFrom?: string | undefined;
   readonly dateTo?: string | undefined;
+  readonly sortBy?: MediaSortField | undefined;
+  readonly sortOrder?: MediaSortOrder | undefined;
   readonly cursor?: string | undefined;
   readonly limit?: number | undefined;
 }

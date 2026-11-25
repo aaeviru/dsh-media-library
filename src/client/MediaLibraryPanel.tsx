@@ -18,8 +18,9 @@ import type {
   MediaActionResult,
   MediaFileStatus,
   MediaSearchItem,
+  MediaSortField,
+  MediaSortOrder,
   OpsStatus,
-  SearchMediaInput,
   SpikeStatus,
   TagSummary,
 } from '../types.ts';
@@ -28,6 +29,12 @@ import type { MediaLibraryNamespace } from './namespace.ts';
 import { BatchTagBar } from './BatchTagBar.tsx';
 import { IngestionPanel } from './IngestionPanel.tsx';
 import { TagManagementPanel } from './TagManagementPanel.tsx';
+import { MediaSortControls } from './ui/MediaSortControls.tsx';
+import {
+  MediaSearchCoordinator,
+  type SearchCoordinatorCallbacks,
+  type SearchExecutionOptions,
+} from './ui/search-coordinator.ts';
 import { Button, Tag, cx, type TagTone } from './ui/primitives.ts';
 import css from './ui/styles.module.css';
 
@@ -106,6 +113,8 @@ export function MediaLibraryPanel({
   const [availableTags, setAvailableTags] = useState<readonly TagSummary[]>([]);
   const [tagAmbiguousAliases, setTagAmbiguousAliases] = useState<readonly AmbiguousAliasWarning[]>([]);
   const [selectedTags, setSelectedTags] = useState<readonly { id: number; name: string }[]>([]);
+  const [sortBy, setSortBy] = useState<MediaSortField>('media_date');
+  const [sortOrder, setSortOrder] = useState<MediaSortOrder>('desc');
 
   // Search results & pagination state
   const [items, setItems] = useState<readonly MediaSearchItem[]>([]);
@@ -115,9 +124,32 @@ export function MediaLibraryPanel({
   const [searching, setSearching] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const committedQuery = useRef<SearchMediaInput | null>(null);
-  const searchRequest = useRef(0);
-  const appending = useRef(false);
+  const coordinatorRef = useRef<MediaSearchCoordinator | null>(null);
+  if (!coordinatorRef.current) {
+    coordinatorRef.current = new MediaSearchCoordinator({
+      keyword,
+      catalogNumber,
+      catalogMatchMode,
+      dateFrom,
+      dateTo,
+      selectedTagIds: selectedTags.map((tag) => tag.id),
+      sortBy,
+      sortOrder,
+      tagSearchInput,
+    });
+  }
+  const coordinator = coordinatorRef.current;
+  coordinator.syncDraft({
+    keyword,
+    catalogNumber,
+    catalogMatchMode,
+    dateFrom,
+    dateTo,
+    selectedTagIds: selectedTags.map((tag) => tag.id),
+    sortBy,
+    sortOrder,
+    tagSearchInput,
+  });
 
   // Import form state
   const [importSourcePath, setImportSourcePath] = useState('');
@@ -149,120 +181,59 @@ export function MediaLibraryPanel({
     [mediaLibrary],
   );
 
+  const createSearchCallbacks = useCallback(
+    (): SearchCoordinatorCallbacks => ({
+      searchMedia: (query) => mediaLibrary.searchMedia(query),
+      onSearchingChange: setSearching,
+      onLoadingMoreChange: setLoadingMore,
+      onClearNextCursor: () => setNextCursor(null),
+      onError: setLoadError,
+      onResult: (val, isAppend) => {
+        setItems((prev) => (isAppend ? [...prev, ...val.items] : val.items));
+        setNextCursor(val.nextCursor);
+        setTotalMatching(val.totalMatching);
+        setSearchElapsedMs(val.elapsedMs);
+      },
+      fallbackRpcError: () => t('rpcError'),
+    }),
+    [mediaLibrary, t],
+  );
+
   const executeSearch = useCallback(
-    async (options?: {
-      readonly cursor?: string | undefined;
-      readonly append?: boolean | undefined;
-      readonly overrideTagIds?: readonly number[] | undefined;
-      readonly overrideKeyword?: string | undefined;
-      readonly overrideCatalog?: string | undefined;
-      readonly overrideCatalogMode?: CatalogMatchMode | undefined;
-      readonly overrideDateFrom?: string | undefined;
-      readonly overrideDateTo?: string | undefined;
-    }) => {
-      const isAppend = Boolean(options?.append && options?.cursor);
-      if (isAppend && (!committedQuery.current || appending.current)) return;
-      const requestId = ++searchRequest.current;
-      appending.current = isAppend;
-      if (isAppend) {
-        setLoadingMore(true);
-      } else {
-        setSearching(true);
-        setLoadingMore(false);
-        setNextCursor(null);
-      }
-      setLoadError(null);
-
-      const effectiveTagIds = options?.overrideTagIds ?? selectedTags.map((tag) => tag.id);
-      const effectiveKeyword = (options?.overrideKeyword ?? keyword).trim();
-      const effectiveCatalog = (options?.overrideCatalog ?? catalogNumber).trim();
-      const effectiveCatalogMode = options?.overrideCatalogMode ?? catalogMatchMode;
-      const effectiveDateFrom = (options?.overrideDateFrom ?? dateFrom).trim();
-      const effectiveDateTo = (options?.overrideDateTo ?? dateTo).trim();
-
-      // The form is a draft. A cursor only belongs to the query that produced
-      // the currently displayed results, never to subsequent draft edits.
-      const query: SearchMediaInput = isAppend
-        ? committedQuery.current!
-        : {
-            text: effectiveKeyword || undefined,
-            catalogNumber: effectiveCatalog || undefined,
-            catalogMatchMode: effectiveCatalogMode,
-            tagIds: effectiveTagIds.length > 0 ? effectiveTagIds : undefined,
-            dateFrom: effectiveDateFrom || undefined,
-            dateTo: effectiveDateTo || undefined,
-            limit: 50,
-          };
-      try {
-        const res = await mediaLibrary.searchMedia({ ...query, cursor: isAppend ? options?.cursor : undefined });
-        if (requestId !== searchRequest.current) return;
-
-        if (res.ok) {
-          committedQuery.current = query;
-          const val = res.value;
-          setItems((prev) => (isAppend ? [...prev, ...val.items] : val.items));
-          setNextCursor(val.nextCursor);
-          setTotalMatching(val.totalMatching);
-          setSearchElapsedMs(val.elapsedMs);
-        } else {
-          setLoadError(res.error.message || t('rpcError'));
-        }
-      } catch (err) {
-        if (requestId === searchRequest.current) {
-          setLoadError(err instanceof Error ? err.message : String(err));
-        }
-      } finally {
-        if (requestId === searchRequest.current) {
-          appending.current = false;
-          setSearching(false);
-          setLoadingMore(false);
-        }
-      }
+    async (options?: SearchExecutionOptions) => {
+      await coordinator.executeSearch(createSearchCallbacks(), options);
     },
-    [
-      mediaLibrary,
-      selectedTags,
-      keyword,
-      catalogNumber,
-      catalogMatchMode,
-      dateFrom,
-      dateTo,
-      t,
-    ],
+    [coordinator, createSearchCallbacks],
   );
 
   const refreshAll = useCallback(async () => {
-    setSearching(true);
-    setLoadError(null);
-    try {
-      const [statusRes, overviewRes, opsRes] = await Promise.all([
-        mediaLibrary.spikeStatus(),
-        mediaLibrary.getLibraryOverview(),
-        mediaLibrary.getOpsStatus(),
-      ]);
+    await coordinator.refreshAll({
+      loadMetadata: async () => {
+        const [statusRes, overviewRes, opsRes] = await Promise.all([
+          mediaLibrary.spikeStatus(),
+          mediaLibrary.getLibraryOverview(),
+          mediaLibrary.getOpsStatus(),
+        ]);
 
-      if (statusRes.ok) {
-        setStatus(statusRes.value);
-      } else {
-        setLoadError(statusRes.error.message || t('rpcError'));
-      }
-      if (opsRes.ok) {
-        setOpsStatus(opsRes.value);
-      }
+        if (statusRes.ok) {
+          setStatus(statusRes.value);
+        } else {
+          setLoadError(statusRes.error.message || t('rpcError'));
+        }
+        if (opsRes.ok) {
+          setOpsStatus(opsRes.value);
+        }
 
-      if (overviewRes.ok) {
-        setOverview(overviewRes.value);
-        setImportSourcePath((prev) => prev || overviewRes.value.defaultTagStudioSourcePath);
-        setImportUncRoot((prev) => prev || overviewRes.value.activeUncRoot);
-      }
-
-      await Promise.all([loadTags(tagSearchInput), executeSearch()]);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSearching(false);
-    }
-  }, [mediaLibrary, t, loadTags, tagSearchInput, executeSearch]);
+        if (overviewRes.ok) {
+          setOverview(overviewRes.value);
+          setImportSourcePath((prev) => prev || overviewRes.value.defaultTagStudioSourcePath);
+          setImportUncRoot((prev) => prev || overviewRes.value.activeUncRoot);
+        }
+      },
+      loadTags,
+      searchCallbacks: createSearchCallbacks(),
+    });
+  }, [coordinator, mediaLibrary, t, loadTags, createSearchCallbacks]);
 
   useEffect(() => {
     void refreshAll();
@@ -293,8 +264,8 @@ export function MediaLibraryPanel({
   }, []);
 
   const handleTagsChanged = useCallback(async () => {
-    await Promise.all([loadTags(tagSearchInput), executeSearch()]);
-  }, [loadTags, tagSearchInput, executeSearch]);
+    await Promise.all([loadTags(coordinator.getDraft().tagSearchInput), executeSearch()]);
+  }, [coordinator, loadTags, executeSearch]);
 
   useLayoutEffect(() => {
     const menu = contextMenuRef.current;
@@ -459,12 +430,41 @@ export function MediaLibraryPanel({
       setSelectedTags((prev) => {
         const exists = prev.some((item) => item.id === tag.id);
         const next = exists ? prev.filter((item) => item.id !== tag.id) : [...prev, tag];
-        void executeSearch({ overrideTagIds: next.map((item) => item.id) });
+        const nextIds = next.map((item) => item.id);
+        coordinator.patchDraft({ selectedTagIds: nextIds });
+        void executeSearch({ overrideTagIds: nextIds });
         return next;
       });
     },
-    [executeSearch],
+    [coordinator, executeSearch],
   );
+
+  const handleSortFieldChange = useCallback(
+    (nextSortBy: MediaSortField) => {
+      const current = coordinator.getDraft();
+      if (nextSortBy === current.sortBy) return;
+      coordinator.patchDraft({ sortBy: nextSortBy });
+      setSortBy(nextSortBy);
+      void executeSearch({
+        preserveAppliedFilters: true,
+        overrideSortBy: nextSortBy,
+        overrideSortOrder: current.sortOrder,
+      });
+    },
+    [coordinator, executeSearch],
+  );
+
+  const handleSortOrderToggle = useCallback(() => {
+    const current = coordinator.getDraft();
+    const nextSortOrder: MediaSortOrder = current.sortOrder === 'desc' ? 'asc' : 'desc';
+    coordinator.patchDraft({ sortOrder: nextSortOrder });
+    setSortOrder(nextSortOrder);
+    void executeSearch({
+      preserveAppliedFilters: true,
+      overrideSortBy: current.sortBy,
+      overrideSortOrder: nextSortOrder,
+    });
+  }, [coordinator, executeSearch]);
 
   const handleResetFilters = useCallback(() => {
     setKeyword('');
@@ -473,6 +473,18 @@ export function MediaLibraryPanel({
     setDateFrom('');
     setDateTo('');
     setSelectedTags([]);
+    setSortBy('media_date');
+    setSortOrder('desc');
+    coordinator.patchDraft({
+      keyword: '',
+      catalogNumber: '',
+      catalogMatchMode: 'exact',
+      dateFrom: '',
+      dateTo: '',
+      selectedTagIds: [],
+      sortBy: 'media_date',
+      sortOrder: 'desc',
+    });
     void executeSearch({
       overrideTagIds: [],
       overrideKeyword: '',
@@ -480,8 +492,10 @@ export function MediaLibraryPanel({
       overrideCatalogMode: 'exact',
       overrideDateFrom: '',
       overrideDateTo: '',
+      overrideSortBy: 'media_date',
+      overrideSortOrder: 'desc',
     });
-  }, [executeSearch]);
+  }, [coordinator, executeSearch]);
 
   const handleRowContextMenu = useCallback(
     (ev: ReactMouseEvent<HTMLTableRowElement>, item: MediaSearchItem) => {
@@ -1068,6 +1082,13 @@ export function MediaLibraryPanel({
                 ({items.length} / {totalMatching} · {searchElapsedMs} ms)
               </code>
             </h3>
+            <MediaSortControls
+              t={t}
+              sortBy={sortBy}
+              sortOrder={sortOrder}
+              onSortByChange={handleSortFieldChange}
+              onSortOrderToggle={handleSortOrderToggle}
+            />
           </div>
 
           {items.length > 0 && (

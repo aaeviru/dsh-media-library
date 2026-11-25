@@ -375,6 +375,13 @@ const _mediaLibrary_searchMediaInput$schema = () => (_mediaLibrary_searchMediaIn
   tagNamesOrAliases: z.array(z.string()).optional().readonly(),
   dateFrom: z.string().optional().readonly(),
   dateTo: z.string().optional().readonly(),
+  sortBy: z.union([
+    z.literal('media_date'),
+    z.literal('added_at'),
+    z.literal('catalog_number'),
+    z.literal('filename'),
+  ]).optional().readonly(),
+  sortOrder: z.union([z.literal('desc'), z.literal('asc')]).optional().readonly(),
   cursor: z.string().optional().readonly(),
   limit: z.number().optional().readonly(),
 }).optional())
