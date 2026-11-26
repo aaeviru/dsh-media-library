@@ -282,13 +282,12 @@ export async function verifyIngestionWeb(page) {
   console.log('Issue #45 cold-install E2E: filename-bound manifest rebinding across stagingDir change and stale manifest cleanup on Scan: PASS');
 
   await page.getByTestId('ingestion-file-issue30-slow.mp4').click();
-  // Issue #69 B5: live preview updates target path YYYY/MM as media_date draft changes
+  // Issue #69 B5: live preview updates target path YYYY/MM as media_date draft changes; keep date for commit check
   await page.getByTestId('ingestion-date-input').fill('2024-08-15');
   await page.waitForFunction(() =>
     document.querySelector('[data-testid="ingestion-target-preview"]')?.textContent?.trim() ===
       'ingested/2024/08/issue30-slow.mp4'
   );
-  await page.getByTestId('ingestion-date-input').fill('');
   console.log('Issue #69 cold-install E2E: B5 live YYYY/MM target path preview updates with media_date draft: PASS');
   await page.getByTestId('ingestion-title-input').fill('Issue 30 controlled rename');
   const requested = page.waitForRequest('**/api/mediaLibrary/commitIngestion');
@@ -345,7 +344,7 @@ export async function verifyIngestionWeb(page) {
   await page.waitForFunction(() => !document.querySelector('[data-testid="ingestion-busy"]'));
   assert.equal(fs.existsSync(path.join(staging, 'issue30-slow.mp4')), false);
   assert.equal(fs.existsSync(path.join(staging, 'issue30-other.mp4')), true, 'rejected work was never queued');
-  assert.equal(fs.existsSync(path.join(work, '\\\\NAS\\MediaTest\\ingested\\issue30-slow.mp4')), true);
+  assert.equal(fs.existsSync(path.join(work, '\\\\NAS\\MediaTest\\ingested\\2024\\08\\issue30-slow.mp4')), true);
 
   await page.getByTestId('toggle-ingestion-panel-btn').click();
   console.log('Issue #30 cold-install E2E: actual task, busy feedback, frozen inputs, other-item review, navigation/reload, 30s warning, disconnected-operation completion: PASS (controlled local rename; no Windows/SMB claim)');

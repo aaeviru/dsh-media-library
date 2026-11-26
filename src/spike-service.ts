@@ -745,6 +745,8 @@ export class MediaLibrarySpikeService {
       localDatabasePath: this.localDatabasePath,
       spikeOverridePath: this.spikeOverridePath,
       activeUncRoot,
+      ingestionTargetSubdir: normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir)),
+      ingestionAutoDateSubdir: this.readAutoDateSubdir(),
       roots,
       items,
     };

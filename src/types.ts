@@ -51,6 +51,8 @@ export interface SpikeStatus {
   readonly localDatabasePath: string;
   readonly spikeOverridePath: string;
   readonly activeUncRoot: string;
+  readonly ingestionTargetSubdir?: string | undefined;
+  readonly ingestionAutoDateSubdir?: boolean | undefined;
   readonly roots: readonly MediaRootConfig[];
   readonly items: readonly M1TestMediaItem[];
 }
@@ -480,7 +482,9 @@ export function parseIsoYearMonth(
   const monthNum = Number(match[2]);
   const dayNum = Number(match[3]);
   if (monthNum < 1 || monthNum > 12 || dayNum < 1 || dayNum > 31) return null;
-  const check = new Date(Date.UTC(yearNum, monthNum - 1, dayNum));
+  const check = new Date(0);
+  check.setUTCFullYear(yearNum, monthNum - 1, dayNum);
+  check.setUTCHours(0, 0, 0, 0);
   if (
     check.getUTCFullYear() !== yearNum ||
     check.getUTCMonth() !== monthNum - 1 ||
@@ -493,6 +497,7 @@ export function parseIsoYearMonth(
 
 /**
  * Pure Host/Client shared helper computing the canonical target relative path for ingestion (`Issue #69 B1/B2`).
+ * - Expects `targetSubdir` to be already normalized or raw (without re-trimming segment spaces that `normalizeTargetSubdir` preserves).
  * - When `autoDateSubdir` is false, preserves flat `<targetSubdir>/<filename>` (or `<filename>` when subdir is empty).
  * - When `autoDateSubdir` is true, appends `YYYY/MM` from valid `mediaDate` (`YYYY-MM-DD`), falling back to local `now`.
  */
@@ -504,7 +509,6 @@ export function computeIngestionTargetRelativePath(options: {
   readonly now?: Date | undefined;
 }): string {
   const cleanSubdir = options.targetSubdir
-    .trim()
     .replace(/\\/g, '/')
     .replace(/^\/+|\/+$/g, '')
     .split('/')

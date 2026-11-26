@@ -7,10 +7,12 @@ import { describe, it } from 'node:test';
 import { Config } from '../../src/config.ts';
 import { migrateDatabase } from '../../src/db/schema.ts';
 import {
+  commitIngestionManifest,
   computeIngestionTargetRelativePath,
   defaultIngestionFileOps,
   ensureManifestForStagingFile,
   getIngestionManifestById,
+  normalizeTargetSubdir,
   parseIsoYearMonth,
   reconcileIngestionManifests,
   reviewIngestionManifest,
@@ -61,6 +63,7 @@ describe('Auto YYYY/MM Ingestion Target Folder (Issue #69 B1..B5)', () => {
     const fixedNow = new Date(2026, 10, 27, 23, 59, 0); // local 2026-11-27
 
     assert.deepEqual(parseIsoYearMonth('2024-08-15'), { year: '2024', month: '08' });
+    assert.deepEqual(parseIsoYearMonth('0099-01-15'), { year: '0099', month: '01' });
     assert.equal(parseIsoYearMonth('2025-02-30'), null);
     assert.equal(parseIsoYearMonth('2025-13-01'), null);
     assert.equal(parseIsoYearMonth('2024/08/15'), null);
@@ -103,7 +106,7 @@ describe('Auto YYYY/MM Ingestion Target Folder (Issue #69 B1..B5)', () => {
       '2023/02/FC2-PPV-1234567.mp4',
     );
 
-    // Auto disabled -> flat legacy behavior
+    // Auto disabled -> flat legacy behavior (including segment trailing space parity with normalizeTargetSubdir)
     assert.equal(
       computeIngestionTargetRelativePath({
         filename: 'FC2-PPV-1234567.mp4',
@@ -113,6 +116,15 @@ describe('Auto YYYY/MM Ingestion Target Folder (Issue #69 B1..B5)', () => {
         now: fixedNow,
       }),
       'ingested/FC2-PPV-1234567.mp4',
+    );
+    assert.equal(
+      computeIngestionTargetRelativePath({
+        filename: 'video.mp4',
+        targetSubdir: normalizeTargetSubdir('incoming /'),
+        autoDateSubdir: false,
+        now: fixedNow,
+      }),
+      'incoming /video.mp4',
     );
   });
 
@@ -248,6 +260,88 @@ describe('Auto YYYY/MM Ingestion Target Folder (Issue #69 B1..B5)', () => {
       } finally {
         db.close();
       }
+    } finally {
+      fs.rmSync(env.tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('P1/P2 Regressions: failed retry re-approval preserves frozen destination, review without roots skips recompute, and spikeStatus tracks live toggle', async () => {
+    const env = createTempEnv('dsh-i69-reg-');
+    try {
+      const stagedFile = path.join(env.stagingDir, 'RETRY-777.mp4');
+      fs.writeFileSync(stagedFile, 'payload-retry');
+
+      const db = new DatabaseSync(env.dbPath);
+      try {
+        await migrateDatabase(db, { dbPath: env.dbPath, appVersion: APP_VERSION });
+
+        // November: create & approve, then mark 'failed' (simulating interrupted copy/index)
+        const novEnd = new Date(2026, 10, 30, 23, 59, 0);
+        const m = await ensureManifestForStagingFile(db, {
+          relativePath: 'RETRY-777.mp4',
+          stagingDir: env.stagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir: 'ingested',
+          autoDateSubdir: true,
+          roots: env.roots,
+          fileOps: env.fileOps,
+          now: () => novEnd,
+        });
+        assert.equal(m.targetRelativePath, 'ingested/2026/11/RETRY-777.mp4');
+
+        // Review WITHOUT roots must NOT overwrite target_relative_path with unvalidated input
+        const unvalidatedRev = reviewIngestionManifest(
+          db,
+          { manifestId: m.id, decision: 'approved', mediaDate: '' },
+          () => novEnd,
+          { targetSubdir: 'C:/evil', autoDateSubdir: true },
+        );
+        assert.equal(unvalidatedRev.ok, true);
+        assert.equal(unvalidatedRev.manifest?.targetRelativePath, 'ingested/2026/11/RETRY-777.mp4');
+
+        // Transition to 'failed' with November destination frozen
+        db.prepare(`UPDATE ingestion_manifests SET state = 'failed', last_error = 'network blip' WHERE id = ?`).run(m.id);
+
+        // December: user clicks Move & Index (which re-approves then commits) — MUST stay in 2026/11!
+        const decStart = new Date(2026, 11, 1, 0, 5, 0);
+        const reapproved = reviewIngestionManifest(
+          db,
+          { manifestId: m.id, decision: 'approved', mediaDate: '' },
+          () => decStart,
+          { targetSubdir: 'ingested', autoDateSubdir: true, roots: env.roots },
+        );
+        assert.equal(reapproved.ok, true);
+        assert.equal(reapproved.manifest?.state, 'failed');
+        assert.equal(reapproved.manifest?.targetRelativePath, 'ingested/2026/11/RETRY-777.mp4');
+
+        const retried = await commitIngestionManifest(db, {
+          manifestId: m.id,
+          stagingDir: env.stagingDir,
+          targetSubdir: 'ingested',
+          autoDateSubdir: true,
+          roots: env.roots,
+          fileOps: env.fileOps,
+          now: () => decStart,
+        });
+        assert.equal(retried.ok, true);
+        assert.equal(retried.manifest?.targetRelativePath, 'ingested/2026/11/RETRY-777.mp4');
+        assert.equal(fs.existsSync(path.join(env.nasRoot, 'ingested', '2026', '11', 'RETRY-777.mp4')), true);
+      } finally {
+        db.close();
+      }
+
+      // Live volatile toggle reflected immediately via getSpikeStatus()
+      let autoDate = true;
+      const service = new MediaLibrarySpikeService({
+        dbPath: env.dbPath,
+        roots: env.roots,
+        configuredTargetSubdir: () => 'ingested',
+        configuredAutoDateSubdir: () => autoDate,
+        autoDailyBackup: false,
+      });
+      assert.equal(service.getSpikeStatus().ingestionAutoDateSubdir, true);
+      autoDate = false;
+      assert.equal(service.getSpikeStatus().ingestionAutoDateSubdir, false);
     } finally {
       fs.rmSync(env.tmpDir, { recursive: true, force: true });
     }

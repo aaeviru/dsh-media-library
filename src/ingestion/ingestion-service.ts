@@ -463,7 +463,7 @@ export async function scanStagingDirectory(
                state = ?,
                last_error = ?,
                updated_at = ?
-           WHERE id = ?`,
+           WHERE id = ? AND state = ?`,
         ).run(
           safeSourceId,
           f.tempPath,
@@ -475,6 +475,7 @@ export async function scanStagingDirectory(
           nextError,
           nowIso,
           existing.id,
+          existing.state,
         );
         existing = getIngestionManifestById(db, existing.id) ?? existing;
         unindexedByFilename.set(filenameKey, existing);
@@ -1039,12 +1040,24 @@ export function reviewIngestionManifest(
   const nextTitle = input.title !== undefined ? input.title.trim() || null : manifest.title;
   const nextCatalog = input.catalogNumber !== undefined ? input.catalogNumber.trim() || null : manifest.catalogNumber;
   const nextDate = input.mediaDate !== undefined ? input.mediaDate.trim() || null : manifest.mediaDate;
-  const nextState: IngestionState = input.decision === 'approved' ? 'reviewed' : 'planned';
 
-  // Issue #69 B3: Solidify target_relative_path during review unless already frozen in 'moving'/'failed'.
-  let nextTargetRelativePath = manifest.targetRelativePath;
+  // Issue #69 B3 Freeze Invariant:
+  // Once a manifest has entered 'moving' or 'failed', keep both its frozen state (on re-approval)
+  // and its frozen target_relative_path so a retry/reconcile across month rollover never recalculates it.
   const pathFrozen = manifest.state === 'moving' || manifest.state === 'failed';
-  if (!pathFrozen && targetOptions && (targetOptions.targetSubdir !== undefined || targetOptions.autoDateSubdir !== undefined)) {
+  const nextState: IngestionState = pathFrozen
+    ? manifest.state
+    : input.decision === 'approved'
+      ? 'reviewed'
+      : 'planned';
+
+  let nextTargetRelativePath = manifest.targetRelativePath;
+  if (
+    !pathFrozen &&
+    targetOptions &&
+    targetOptions.roots &&
+    (targetOptions.targetSubdir !== undefined || targetOptions.autoDateSubdir !== undefined)
+  ) {
     const computed = computeIngestionTargetRelativePath({
       filename: manifest.filename,
       targetSubdir: targetOptions.targetSubdir ?? '',
@@ -1052,11 +1065,9 @@ export function reviewIngestionManifest(
       mediaDate: nextDate,
       now: nowDate,
     });
-    if (targetOptions.roots) {
-      const check = resolveAllowlistedUncPath(targetOptions.roots, manifest.targetRootId, computed);
-      if (!check.ok) {
-        return { ok: false, code: 'INVALID_INPUT', message: `${check.code}: ${check.message}` };
-      }
+    const check = resolveAllowlistedUncPath(targetOptions.roots, manifest.targetRootId, computed);
+    if (!check.ok) {
+      return { ok: false, code: 'INVALID_INPUT', message: `${check.code}: ${check.message}` };
     }
     nextTargetRelativePath = computed;
   }

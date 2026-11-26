@@ -193,12 +193,23 @@ export function IngestionPanel({
 
   const reloadServerState = useCallback(async () => {
     try {
-      const [mRes, tRes, paRes, pqRes] = await Promise.all([
+      const [mRes, tRes, paRes, pqRes, statusRes] = await Promise.all([
         mediaLibrary.listIngestionManifests(),
         mediaLibrary.listIngestionTasks(),
         mediaLibrary.listPerformerAliases(),
         mediaLibrary.listPerformerReviewQueue({ status: 'pending' }),
+        mediaLibrary.spikeStatus(),
       ]);
+      if (statusRes.ok) {
+        if (typeof statusRes.value.ingestionTargetSubdir === 'string') {
+          sessionCache.targetSubdir = statusRes.value.ingestionTargetSubdir;
+          setTargetSubdir(statusRes.value.ingestionTargetSubdir);
+        }
+        if (typeof statusRes.value.ingestionAutoDateSubdir === 'boolean') {
+          sessionCache.autoDateSubdir = statusRes.value.ingestionAutoDateSubdir;
+          setAutoDateSubdir(statusRes.value.ingestionAutoDateSubdir);
+        }
+      }
       if (mRes.ok) {
         setManifests(mRes.value);
       } else {

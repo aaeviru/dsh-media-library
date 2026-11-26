@@ -293,6 +293,8 @@ const _mediaLibrary_spikeStatus$schema = () => (_mediaLibrary_spikeStatus$schema
   localDatabasePath: z.string().readonly(),
   spikeOverridePath: z.string().readonly(),
   activeUncRoot: z.string().readonly(),
+  ingestionTargetSubdir: z.string().optional().readonly(),
+  ingestionAutoDateSubdir: z.boolean().optional().readonly(),
   roots: z.array(z.object({
     rootId: z.string().readonly(),
     label: z.string().readonly(),
