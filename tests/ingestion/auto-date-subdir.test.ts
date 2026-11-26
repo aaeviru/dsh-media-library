@@ -124,8 +124,12 @@ describe('Auto YYYY/MM Ingestion Target Folder (Issue #69 B1..B5)', () => {
         autoDateSubdir: false,
         now: fixedNow,
       }),
-      'incoming /video.mp4',
+      'incoming/video.mp4',
     );
+    assert.equal(normalizeTargetSubdir(' incoming'), 'incoming');
+    assert.equal(normalizeTargetSubdir(' /incoming/ '), 'incoming');
+    assert.equal(normalizeTargetSubdir('../ incoming/'), 'incoming');
+    assert.equal(normalizeTargetSubdir('   '), '');
   });
 
   it('B1/B2/B3/B4: hot-reloads volatile toggle via SpikeService, solidifies on review/commit, and auto-creates YYYY/MM dir', async () => {
@@ -265,7 +269,7 @@ describe('Auto YYYY/MM Ingestion Target Folder (Issue #69 B1..B5)', () => {
     }
   });
 
-  it('P1/P2 Regressions: failed retry re-approval preserves frozen destination, review without roots skips recompute, and spikeStatus tracks live toggle', async () => {
+  it('P1/P2 Regressions: failed retry re-approval preserves frozen destination, review without roots fails closed, and spikeStatus tracks live toggle', async () => {
     const env = createTempEnv('dsh-i69-reg-');
     try {
       const stagedFile = path.join(env.stagingDir, 'RETRY-777.mp4');
@@ -300,8 +304,8 @@ describe('Auto YYYY/MM Ingestion Target Folder (Issue #69 B1..B5)', () => {
         assert.equal(unvalidatedRev.code, 'INVALID_INPUT');
         assert.equal(getIngestionManifestById(db, m.id)?.targetRelativePath, 'ingested/2026/11/RETRY-777.mp4');
 
-        // Idempotent double-normalization check for segment trailing spaces
-        assert.equal(normalizeTargetSubdir(normalizeTargetSubdir('incoming /')), 'incoming ');
+        // Idempotent double-normalization check (aligned with unc-path.ts)
+        assert.equal(normalizeTargetSubdir(normalizeTargetSubdir(' incoming / ')), 'incoming');
 
         // Transition to 'failed' with November destination frozen
         db.prepare(`UPDATE ingestion_manifests SET state = 'failed', last_error = 'network blip' WHERE id = ?`).run(m.id);
@@ -346,6 +350,94 @@ describe('Auto YYYY/MM Ingestion Target Folder (Issue #69 B1..B5)', () => {
       assert.equal(service.getSpikeStatus().ingestionAutoDateSubdir, true);
       autoDate = false;
       assert.equal(service.getSpikeStatus().ingestionAutoDateSubdir, false);
+    } finally {
+      fs.rmSync(env.tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Concurrency: scanStagingDirectory preserves manifest that transitions reviewed -> failed during async probe', async () => {
+    const env = createTempEnv('dsh-i69-conc-');
+    try {
+      const probeFile = path.join(env.stagingDir, 'PROBE-1.mp4');
+      const racingFile = path.join(env.stagingDir, 'RACE-2.mp4');
+      fs.writeFileSync(probeFile, 'p1');
+      fs.writeFileSync(racingFile, 'p2');
+
+      const db = new DatabaseSync(env.dbPath);
+      try {
+        await migrateDatabase(db, { dbPath: env.dbPath, appVersion: APP_VERSION });
+        const nov = new Date(2026, 10, 30, 23, 59, 0);
+
+        const mProbe = await ensureManifestForStagingFile(db, {
+          relativePath: 'PROBE-1.mp4',
+          stagingDir: env.stagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir: 'ingested',
+          autoDateSubdir: true,
+          roots: env.roots,
+          fileOps: env.fileOps,
+          now: () => nov,
+        });
+        reviewIngestionManifest(db, { manifestId: mProbe.id, decision: 'approved' }, () => nov, {
+          targetSubdir: 'ingested',
+          autoDateSubdir: true,
+          roots: env.roots,
+        });
+        db.prepare(`UPDATE ingestion_manifests SET state = 'failed' WHERE id = ?`).run(mProbe.id);
+        fs.rmSync(probeFile);
+
+        const mRace = await ensureManifestForStagingFile(db, {
+          relativePath: 'RACE-2.mp4',
+          stagingDir: env.stagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir: 'ingested',
+          autoDateSubdir: true,
+          roots: env.roots,
+          fileOps: env.fileOps,
+          now: () => nov,
+        });
+        reviewIngestionManifest(db, { manifestId: mRace.id, decision: 'approved' }, () => nov, {
+          targetSubdir: 'ingested',
+          autoDateSubdir: true,
+          roots: env.roots,
+        });
+        // Simulate file already moved out of staging before scan finishes, and concurrent commit failing at index step during Step 2 probe
+        fs.rmSync(racingFile);
+        const racingDest = path.join(env.nasRoot, 'ingested', '2026', '11', 'RACE-2.mp4');
+        fs.mkdirSync(path.dirname(racingDest), { recursive: true });
+        fs.writeFileSync(racingDest, 'p2');
+
+        const racingFileOps: IngestionFileOps = {
+          ...env.fileOps,
+          exists: async (p) => {
+            // While scan probes mProbe's missing NAS destination, mRace transitions reviewed -> failed
+            db.prepare(`UPDATE ingestion_manifests SET state = 'failed', last_error = 'index failed' WHERE id = ?`).run(
+              mRace.id,
+            );
+            return env.fileOps.exists(p);
+          },
+        };
+
+        const dec = new Date(2026, 11, 1, 0, 5, 0);
+        const scan = await scanStagingDirectory(db, {
+          stagingDir: env.stagingDir,
+          targetRootId: 'nas-main',
+          targetSubdir: 'ingested',
+          autoDateSubdir: true,
+          roots: env.roots,
+          fileOps: racingFileOps,
+          now: () => dec,
+        });
+        assert.equal(scan.ok, true);
+        // mProbe (confirmed missing destination) was cleaned up; mRace (transitioned during probe) MUST be preserved!
+        assert.equal(getIngestionManifestById(db, mProbe.id), null);
+        const preservedRace = getIngestionManifestById(db, mRace.id);
+        assert.ok(preservedRace, 'Concurrent reviewed -> failed recovery manifest must not be deleted');
+        assert.equal(preservedRace.state, 'failed');
+        assert.equal(preservedRace.targetRelativePath, 'ingested/2026/11/RACE-2.mp4');
+      } finally {
+        db.close();
+      }
     } finally {
       fs.rmSync(env.tmpDir, { recursive: true, force: true });
     }

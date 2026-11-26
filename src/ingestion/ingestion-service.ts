@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { extractCatalogNumber, extractIsoDate } from '../inventory/tagstudio-inventory.ts';
 import { normalizeLabel, runMutation } from '../mutations/transaction.ts';
-import { computeIngestionTargetRelativePath, parseIsoYearMonth } from '../types.ts';
+import { computeIngestionTargetRelativePath, normalizeTargetSubdir, parseIsoYearMonth } from '../types.ts';
 import type {
   CommitIngestionResult,
   DeleteStagingFileInput,
@@ -191,17 +191,7 @@ export function listIngestionManifests(
   return rows.map(mapManifestRow);
 }
 
-export { computeIngestionTargetRelativePath, parseIsoYearMonth };
-
-export function normalizeTargetSubdir(raw: string): string {
-  if (!raw.trim()) return '';
-  return raw
-    .replace(/\\/g, '/')
-    .replace(/^\/+|\/+$/g, '')
-    .split('/')
-    .filter((seg) => seg && seg !== '.' && seg !== '..')
-    .join('/');
-}
+export { computeIngestionTargetRelativePath, normalizeTargetSubdir, parseIsoYearMonth };
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   if (timeoutMs <= 0) return promise;
@@ -367,9 +357,9 @@ export async function scanStagingDirectory(
   const nowIso = nowDate.toISOString();
   const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
   const autoDateSubdir = options.autoDateSubdir ?? true;
-  const initialManifests = listIngestionManifests(db);
-  const preview = await previewStagingPlan({ ...options, autoDateSubdir, now: () => nowDate });
 
+  // Step 1: Pure async filesystem scan (never pre-read DB snapshot before SMB/FS I/O).
+  const preview = await previewStagingPlan({ ...options, autoDateSubdir, now: () => nowDate });
   if (!preview.ok) {
     return {
       ok: false,
@@ -379,153 +369,163 @@ export async function scanStagingDirectory(
       autoDateSubdir,
       elapsedMs: Date.now() - started,
       files: [],
-      manifests: initialManifests,
+      manifests: listIngestionManifests(db),
       error: preview.error,
     };
   }
 
-  const frozenIds = new Set(listFrozenIngestionManifests(db).map((m) => m.id));
-  const unindexedByTempPath = new Map<string, IngestionManifest>();
-  const unindexedByFilename = new Map<string, IngestionManifest>();
-  for (const m of initialManifests) {
-    if (m.state === 'indexed') continue;
-    const tempKey = m.tempPath.toLowerCase();
-    if (!unindexedByTempPath.has(tempKey)) {
-      unindexedByTempPath.set(tempKey, m);
-    }
-    const key = m.filename.toLowerCase();
-    if (!unindexedByFilename.has(key)) {
-      unindexedByFilename.set(key, m);
-    }
-  }
-  const previewTempPaths = new Set(preview.files.map((f) => f.tempPath.toLowerCase()));
-
-  const matchedManifestIds = new Set<number>();
-  const files: StagingFileItem[] = [];
-
-  for (const f of preview.files) {
-    const tempKey = f.tempPath.toLowerCase();
-    const filenameKey = f.filename.toLowerCase();
-    let existing = unindexedByTempPath.get(tempKey);
-    if (existing && matchedManifestIds.has(existing.id)) {
-      existing = undefined;
-    }
-    if (!existing) {
-      const byName = unindexedByFilename.get(filenameKey);
-      // Only rebind by filename if not already claimed and no other scanned file owns its exact tempPath.
-      if (byName && !matchedManifestIds.has(byName.id) && !previewTempPaths.has(byName.tempPath.toLowerCase())) {
-        existing = byName;
-      }
-    }
-    if (existing) {
-      matchedManifestIds.add(existing.id);
-      // Issue #69 B3 Freeze Invariant: once a manifest has entered 'moving' or 'failed',
-      // never recalculate its persisted target_relative_path on rescan.
-      const pathFrozen = existing.state === 'moving' || existing.state === 'failed';
-      const effectiveTargetRel = pathFrozen
-        ? existing.targetRelativePath
-        : computeIngestionTargetRelativePath({
-            filename: f.filename,
-            targetSubdir: cleanSubdir,
-            autoDateSubdir,
-            mediaDate: existing.mediaDate ?? extractIsoDate(f.filename),
-            now: nowDate,
-          });
-      const nextSourceId = `staging:${effectiveTargetRel.toLowerCase()}:${f.fileSize}`;
-      const tempChanged = existing.tempPath.toLowerCase() !== f.tempPath.toLowerCase();
-      const targetChanged =
-        existing.targetRootId !== options.targetRootId ||
-        existing.targetRelativePath !== effectiveTargetRel ||
-        existing.fileSize !== f.fileSize ||
-        existing.sourceId !== nextSourceId;
-
-      if (!frozenIds.has(existing.id) && (tempChanged || targetChanged)) {
-        const nextState: IngestionState =
-          tempChanged && existing.state === 'failed'
-            ? existing.reviewDecision === 'approved'
-              ? 'reviewed'
-              : 'planned'
-            : existing.state;
-        const nextError = tempChanged && existing.state === 'failed' ? null : existing.lastError;
-        const sourceIdConflict = db
-          .prepare('SELECT id FROM ingestion_manifests WHERE source_id = ? AND id <> ? LIMIT 1')
-          .get(nextSourceId, existing.id) as { id: number } | undefined;
-        const safeSourceId = sourceIdConflict ? `${nextSourceId}#${existing.id}` : nextSourceId;
-
-        db.prepare(
-          `UPDATE ingestion_manifests
-           SET source_id = ?,
-               temp_path = ?,
-               target_root_id = ?,
-               target_relative_path = ?,
-               filename = ?,
-               file_size = ?,
-               state = ?,
-               last_error = ?,
-               updated_at = ?
-           WHERE id = ? AND state = ? AND updated_at = ?`,
-        ).run(
-          safeSourceId,
-          f.tempPath,
-          options.targetRootId,
-          effectiveTargetRel,
-          f.filename,
-          f.fileSize,
-          nextState,
-          nextError,
-          nowIso,
-          existing.id,
-          existing.state,
-          existing.updatedAt,
-        );
-        existing = getIngestionManifestById(db, existing.id) ?? existing;
-        unindexedByFilename.set(filenameKey, existing);
-      }
-    }
-
-    files.push({
-      ...f,
-      manifestId: existing?.id ?? null,
-      state: existing?.state ?? null,
-      reviewDecision: existing?.reviewDecision ?? null,
-    });
-  }
-
-  // B2: Automatically delete stale unindexed manifests whose staged file is no longer in `stagingDir`,
-  // preserving running/frozen manifests and approved `moving`/`failed` recovery candidates whose target file already exists.
+  // Step 2: Async NAS destination existence probe for unmatched approved moving/failed recovery candidates.
+  // Only records explicitly confirmed absent (`false`) may be deleted in Step 3.
   const scannedFilenameKeys = new Set(preview.files.map((f) => f.filename.toLowerCase()));
-  for (const m of initialManifests) {
-    if (m.state === 'indexed') continue;
-    if (matchedManifestIds.has(m.id) || scannedFilenameKeys.has(m.filename.toLowerCase())) continue;
-    if (frozenIds.has(m.id)) continue;
-
+  const scannedTempPaths = new Set(preview.files.map((f) => f.tempPath.toLowerCase()));
+  const probeFrozenIds = new Set(listFrozenIngestionManifests(db).map((m) => m.id));
+  const confirmedDestMissing = new Set<number>();
+  for (const m of listIngestionManifests(db)) {
+    if (m.state === 'indexed' || probeFrozenIds.has(m.id)) continue;
+    if (scannedTempPaths.has(m.tempPath.toLowerCase()) || scannedFilenameKeys.has(m.filename.toLowerCase())) continue;
     if (m.reviewDecision === 'approved' && (m.state === 'moving' || m.state === 'failed')) {
       const resolution = resolveAllowlistedUncPath(options.roots, m.targetRootId, m.targetRelativePath);
-      if (resolution.ok) {
-        try {
-          if (await fileOps.exists(resolution.resolvedUncPath)) {
-            continue;
-          }
-        } catch {
-          // If destination probe fails transiently, keep the recovery candidate rather than deleting it.
-          continue;
+      if (!resolution.ok) continue;
+      try {
+        const exists = await fileOps.exists(resolution.resolvedUncPath);
+        if (!exists) {
+          confirmedDestMissing.add(m.id);
         }
+      } catch {
+        // Transient destination probe error: keep recovery candidate.
+      }
+    }
+  }
+
+  // Step 3: Single synchronous BEGIN IMMEDIATE transaction (zero awaits inside) so concurrent
+  // commit/reconcile/review/fetch writes cannot interleave with manifest rebinding or stale cleanup.
+  const files: StagingFileItem[] = [];
+  let manifests: IngestionManifest[] = [];
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const currentManifests = listIngestionManifests(db);
+    const frozenIds = new Set(listFrozenIngestionManifests(db).map((m) => m.id));
+    const unindexedByTempPath = new Map<string, IngestionManifest>();
+    const unindexedByFilename = new Map<string, IngestionManifest>();
+    for (const m of currentManifests) {
+      if (m.state === 'indexed') continue;
+      const tempKey = m.tempPath.toLowerCase();
+      if (!unindexedByTempPath.has(tempKey)) {
+        unindexedByTempPath.set(tempKey, m);
+      }
+      const key = m.filename.toLowerCase();
+      if (!unindexedByFilename.has(key)) {
+        unindexedByFilename.set(key, m);
       }
     }
 
-    // Recheck live row state and running task ownership before deleting stale manifest
-    // so a concurrent commit that entered 'moving' during an earlier await is never deleted.
-    const latest = getIngestionManifestById(db, m.id);
-    if (!latest || latest.state === 'indexed' || latest.state === 'moving' || findManifestTask(db, m.id)) {
-      continue;
-    }
-    db.prepare(
-      `DELETE FROM ingestion_manifests
-       WHERE id = ? AND state = ? AND updated_at = ? AND state NOT IN ('indexed', 'moving')`,
-    ).run(m.id, latest.state, latest.updatedAt);
-  }
+    const matchedManifestIds = new Set<number>();
+    for (const f of preview.files) {
+      const tempKey = f.tempPath.toLowerCase();
+      const filenameKey = f.filename.toLowerCase();
+      let existing = unindexedByTempPath.get(tempKey);
+      if (existing && matchedManifestIds.has(existing.id)) {
+        existing = undefined;
+      }
+      if (!existing) {
+        const byName = unindexedByFilename.get(filenameKey);
+        // Only rebind by filename if not already claimed and no other scanned file owns its exact tempPath.
+        if (byName && !matchedManifestIds.has(byName.id) && !scannedTempPaths.has(byName.tempPath.toLowerCase())) {
+          existing = byName;
+        }
+      }
+      if (existing) {
+        matchedManifestIds.add(existing.id);
+        // Issue #69 B3 Freeze Invariant: once a manifest has entered 'moving' or 'failed',
+        // never recalculate its persisted target_relative_path on rescan.
+        const pathFrozen = existing.state === 'moving' || existing.state === 'failed';
+        const effectiveTargetRel = pathFrozen
+          ? existing.targetRelativePath
+          : computeIngestionTargetRelativePath({
+              filename: f.filename,
+              targetSubdir: cleanSubdir,
+              autoDateSubdir,
+              mediaDate: existing.mediaDate ?? extractIsoDate(f.filename),
+              now: nowDate,
+            });
+        const nextSourceId = `staging:${effectiveTargetRel.toLowerCase()}:${f.fileSize}`;
+        const tempChanged = existing.tempPath.toLowerCase() !== f.tempPath.toLowerCase();
+        const targetChanged =
+          existing.targetRootId !== options.targetRootId ||
+          existing.targetRelativePath !== effectiveTargetRel ||
+          existing.fileSize !== f.fileSize ||
+          existing.sourceId !== nextSourceId;
 
-  const manifests = listIngestionManifests(db);
+        if (!frozenIds.has(existing.id) && existing.state !== 'moving' && (tempChanged || targetChanged)) {
+          const nextState: IngestionState =
+            tempChanged && existing.state === 'failed'
+              ? existing.reviewDecision === 'approved'
+                ? 'reviewed'
+                : 'planned'
+              : existing.state;
+          const nextError = tempChanged && existing.state === 'failed' ? null : existing.lastError;
+          const sourceIdConflict = db
+            .prepare('SELECT id FROM ingestion_manifests WHERE source_id = ? AND id <> ? LIMIT 1')
+            .get(nextSourceId, existing.id) as { id: number } | undefined;
+          const safeSourceId = sourceIdConflict ? `${nextSourceId}#${existing.id}` : nextSourceId;
+
+          db.prepare(
+            `UPDATE ingestion_manifests
+             SET source_id = ?,
+                 temp_path = ?,
+                 target_root_id = ?,
+                 target_relative_path = ?,
+                 filename = ?,
+                 file_size = ?,
+                 state = ?,
+                 last_error = ?,
+                 updated_at = ?
+             WHERE id = ?`,
+          ).run(
+            safeSourceId,
+            f.tempPath,
+            options.targetRootId,
+            effectiveTargetRel,
+            f.filename,
+            f.fileSize,
+            nextState,
+            nextError,
+            nowIso,
+            existing.id,
+          );
+          existing = getIngestionManifestById(db, existing.id) ?? existing;
+          unindexedByFilename.set(filenameKey, existing);
+        }
+      }
+
+      files.push({
+        ...f,
+        targetRelativePath: existing ? existing.targetRelativePath : f.targetRelativePath,
+        manifestId: existing?.id ?? null,
+        state: existing?.state ?? null,
+        reviewDecision: existing?.reviewDecision ?? null,
+      });
+    }
+
+    // Stale unindexed cleanup: preserve indexed, running/frozen manifests, and any moving or
+    // approved+failed manifest unless Step 2 explicitly confirmed its NAS destination is absent.
+    for (const m of currentManifests) {
+      if (m.state === 'indexed' || frozenIds.has(m.id)) continue;
+      if (matchedManifestIds.has(m.id) || scannedFilenameKeys.has(m.filename.toLowerCase())) continue;
+      const needsConfirmedMissing =
+        m.state === 'moving' || (m.reviewDecision === 'approved' && m.state === 'failed');
+      if (needsConfirmedMissing && !confirmedDestMissing.has(m.id)) {
+        continue;
+      }
+      db.prepare('DELETE FROM ingestion_manifests WHERE id = ?').run(m.id);
+    }
+
+    manifests = listIngestionManifests(db);
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
 
   return {
     ok: true,
@@ -1330,7 +1330,8 @@ export async function commitIngestionManifest(
   // Once in 'moving' or 'failed', preserve the frozen target_relative_path across retries/reconcile.
   let finalTargetRelativePath = manifest.targetRelativePath;
   if (
-    manifest.state === 'reviewed' &&
+    manifest.state !== 'moving' &&
+    manifest.state !== 'failed' &&
     (options.targetSubdir !== undefined || options.autoDateSubdir !== undefined)
   ) {
     finalTargetRelativePath = computeIngestionTargetRelativePath({

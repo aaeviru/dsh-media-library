@@ -496,8 +496,20 @@ export function parseIsoYearMonth(
 }
 
 /**
+ * Normalize a configured ingestion target subdirectory by trimming each path segment
+ * and stripping empty / `.` / `..` segments. Idempotent and aligned with `unc-path.ts`.
+ */
+export function normalizeTargetSubdir(raw: string): string {
+  return raw
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((seg) => seg.trim())
+    .filter((seg) => seg && seg !== '.' && seg !== '..')
+    .join('/');
+}
+
+/**
  * Pure Host/Client shared helper computing the canonical target relative path for ingestion (`Issue #69 B1/B2`).
- * - Expects `targetSubdir` to be already normalized or raw (without re-trimming segment spaces that `normalizeTargetSubdir` preserves).
  * - When `autoDateSubdir` is false, preserves flat `<targetSubdir>/<filename>` (or `<filename>` when subdir is empty).
  * - When `autoDateSubdir` is true, appends `YYYY/MM` from valid `mediaDate` (`YYYY-MM-DD`), falling back to local `now`.
  */
@@ -508,14 +520,7 @@ export function computeIngestionTargetRelativePath(options: {
   readonly mediaDate?: string | null | undefined;
   readonly now?: Date | undefined;
 }): string {
-  const cleanSubdir = options.targetSubdir.trim()
-    ? options.targetSubdir
-        .replace(/\\/g, '/')
-        .replace(/^\/+|\/+$/g, '')
-        .split('/')
-        .filter((seg) => seg && seg !== '.' && seg !== '..')
-        .join('/')
-    : '';
+  const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
   if (!options.autoDateSubdir) {
     return cleanSubdir ? `${cleanSubdir}/${options.filename}` : options.filename;
   }
