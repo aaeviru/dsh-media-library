@@ -13,6 +13,7 @@ export interface Config {
   stagingDir: Volatile<string>;
   allowCrossDeviceCopy: boolean;
   ingestionTargetSubdir: Volatile<string>;
+  ingestionAutoDateSubdir: Volatile<boolean>;
   cmadbBaseUrl: string;
   ppvdbBaseUrl: string;
   avWikiBaseUrl: Volatile<string>;
@@ -63,6 +64,10 @@ export const Config = Schema.object({
   ingestionTargetSubdir: Schema.string()
     .default('ingested')
     .description('Fixed target subdirectory under uncRoot where reviewed files are moved (keeping original filename).')
+    .volatile(),
+  ingestionAutoDateSubdir: Schema.boolean()
+    .default(true)
+    .description('Automatically archive ingested files into YYYY/MM subdirectories based on media_date (falls back to current year/month when missing or invalid).')
     .volatile(),
   cmadbBaseUrl: Schema.string()
     .default('https://fc2cmadb.com')

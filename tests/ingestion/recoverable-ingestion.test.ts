@@ -75,6 +75,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
           stagingDir: tempDir,
           targetRootId: 'nas-main',
           targetSubdir: 'ingested',
+          autoDateSubdir: false,
           roots,
         });
         assert.equal(dryRun.ok, true);
@@ -318,7 +319,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         // Same-share instant rename for mA:
         const commitA = await commitIngestionManifest(db, { manifestId: mA.id, stagingDir: tempDir, roots, fileOps });
         assert.equal(commitA.ok, true);
-        assert.equal(fs.existsSync(path.join(targetDir, 'FC2-PPV-4545625.mp4')), true);
+        assert.equal(fs.existsSync(path.join(path.dirname(targetDir), mA.targetRelativePath)), true);
         assert.equal(fs.existsSync(fileA), false);
 
         // Idempotent replay of completed manifest does NOT duplicate media or tags.
@@ -353,8 +354,9 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         // Crash point 2: moved-not-indexed (file moved manually while manifest is stuck in `moving`).
         reviewIngestionManifest(db, { manifestId: mB.id, decision: 'approved', newTagNames: ['RecoveredTag'] });
         db.prepare(`UPDATE ingestion_manifests SET state = 'moving' WHERE id = ?`).run(mB.id);
-        fs.mkdirSync(targetDir, { recursive: true });
-        fs.copyFileSync(fileB, path.join(targetDir, 'FC2-PPV-9999999.mkv'));
+        const destB = path.join(path.dirname(targetDir), mB.targetRelativePath);
+        fs.mkdirSync(path.dirname(destB), { recursive: true });
+        fs.copyFileSync(fileB, destB);
 
         const rec2 = await reconcileIngestionManifests(db, { stagingDir: tempDir, roots, fileOps });
         assert.equal(rec2.movedNotIndexedFixed, 1);
@@ -362,7 +364,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         assert.equal(Number((db.prepare('SELECT COUNT(*) AS c FROM media_files').get() as { c: number }).c), 3);
 
         // Crash point 3: indexed-but-missing (destination file disappears after indexing).
-        fs.rmSync(path.join(targetDir, 'FC2-PPV-9999999.mkv'));
+        fs.rmSync(destB);
         const rec3 = await reconcileIngestionManifests(db, { stagingDir: tempDir, roots, fileOps });
         assert.equal(rec3.indexedButMissingMarked, 1);
         const statusRow = db.prepare('SELECT status FROM media_files WHERE filename = ?').get('FC2-PPV-9999999.mkv') as { status: string };
@@ -655,7 +657,7 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
     try {
       const homeStagingDir = path.join(tmpDir, 'home-temp');
       const privateStagingDir = path.join(tmpDir, 'private-temp');
-      const targetDir = path.join(tmpDir, 'nas-root', 'FC2', '2026-09-4963189');
+      const nasRoot = path.join(tmpDir, 'nas-root');
       fs.mkdirSync(homeStagingDir, { recursive: true });
       fs.mkdirSync(privateStagingDir, { recursive: true });
       const dbPath = path.join(tmpDir, 'library.sqlite3');
@@ -802,8 +804,9 @@ describe('Recoverable Media Ingestion & Metadata Fetcher (Issue #7 B1..B5)', () 
         // Prepare mRecovery as a moved-not-indexed candidate (approved + moving + destination file exists, source missing)
         reviewIngestionManifest(db, { manifestId: mRecovery.id, decision: 'approved' });
         db.prepare(`UPDATE ingestion_manifests SET state = 'moving' WHERE id = ?`).run(mRecovery.id);
-        fs.mkdirSync(targetDir, { recursive: true });
-        fs.renameSync(recoveryFile, path.join(targetDir, 'FC2-PPV-4000002-recovered.mp4'));
+        const recoveryDest = path.join(nasRoot, mRecovery.targetRelativePath);
+        fs.mkdirSync(path.dirname(recoveryDest), { recursive: true });
+        fs.renameSync(recoveryFile, recoveryDest);
 
         // Freeze mFrozen with a running task while its file is removed from staging
         const frozenLock = startIngestionTask(db, `manifest:${mFrozen.id}`, 'fetch', 'Running fetch...');

@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { extractCatalogNumber, extractIsoDate } from '../inventory/tagstudio-inventory.ts';
 import { normalizeLabel, runMutation } from '../mutations/transaction.ts';
+import { computeIngestionTargetRelativePath, parseIsoYearMonth } from '../types.ts';
 import type {
   CommitIngestionResult,
   DeleteStagingFileInput,
@@ -190,6 +191,8 @@ export function listIngestionManifests(
   return rows.map(mapManifestRow);
 }
 
+export { computeIngestionTargetRelativePath, parseIsoYearMonth };
+
 export function normalizeTargetSubdir(raw: string): string {
   return raw
     .trim()
@@ -219,6 +222,8 @@ async function walkStagingVideosAsync(
   dir: string,
   baseDir: string,
   targetSubdir: string,
+  autoDateSubdir: boolean,
+  nowDate: Date,
   acc: Array<{
     filename: string;
     relativePath: string;
@@ -235,13 +240,20 @@ async function walkStagingVideosAsync(
     if (entry.name.startsWith('.')) continue;
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      await walkStagingVideosAsync(fullPath, baseDir, targetSubdir, acc);
+      await walkStagingVideosAsync(fullPath, baseDir, targetSubdir, autoDateSubdir, nowDate, acc);
     } else if (entry.isFile()) {
       const ext = path.extname(entry.name).toLowerCase();
       if (!VIDEO_EXTENSIONS.has(ext)) continue;
       const stat = await fsp.stat(fullPath);
       const rel = path.relative(baseDir, fullPath).replace(/\\/g, '/');
-      const targetRel = targetSubdir ? `${targetSubdir}/${entry.name}` : entry.name;
+      const inferredDate = extractIsoDate(entry.name);
+      const targetRel = computeIngestionTargetRelativePath({
+        filename: entry.name,
+        targetSubdir,
+        autoDateSubdir,
+        mediaDate: inferredDate,
+        now: nowDate,
+      });
       const fc2 = parseFc2Code(path.basename(entry.name, ext));
       const cat = fc2?.code ?? extractCatalogNumber(entry.name);
       acc.push({
@@ -265,8 +277,10 @@ export async function previewStagingPlan(options: {
   readonly stagingDir: string;
   readonly targetRootId: string;
   readonly targetSubdir: string;
+  readonly autoDateSubdir?: boolean | undefined;
   readonly roots: readonly MediaRootConfig[];
   readonly timeoutMs?: number | undefined;
+  readonly now?: (() => Date) | undefined;
 }): Promise<{
   readonly ok: boolean;
   readonly files: readonly StagingFileItem[];
@@ -279,6 +293,8 @@ export async function previewStagingPlan(options: {
   }
 
   const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
+  const autoDateSubdir = options.autoDateSubdir ?? true;
+  const nowDate = (options.now ?? (() => new Date()))();
   const timeoutMs = options.timeoutMs ?? 5000;
 
   try {
@@ -296,7 +312,11 @@ export async function previewStagingPlan(options: {
       mtimeIso: string;
       catalogNumber: string | null;
     }> = [];
-    await withTimeout(walkStagingVideosAsync(stagingDir, stagingDir, cleanSubdir, rawFiles), timeoutMs, `readdir(${stagingDir})`);
+    await withTimeout(
+      walkStagingVideosAsync(stagingDir, stagingDir, cleanSubdir, autoDateSubdir, nowDate, rawFiles),
+      timeoutMs,
+      `readdir(${stagingDir})`,
+    );
 
     const targetRelativePaths: string[] = [];
     for (const f of rawFiles) {
@@ -334,6 +354,7 @@ export async function scanStagingDirectory(
     readonly stagingDir: string;
     readonly targetRootId: string;
     readonly targetSubdir: string;
+    readonly autoDateSubdir?: boolean | undefined;
     readonly roots: readonly MediaRootConfig[];
     readonly timeoutMs?: number | undefined;
     readonly fileOps?: IngestionFileOps | undefined;
@@ -342,10 +363,12 @@ export async function scanStagingDirectory(
 ): Promise<ScanStagingResult> {
   const started = Date.now();
   const fileOps = options.fileOps ?? defaultIngestionFileOps;
-  const nowIso = (options.now ?? (() => new Date()))().toISOString();
+  const nowDate = (options.now ?? (() => new Date()))();
+  const nowIso = nowDate.toISOString();
   const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
+  const autoDateSubdir = options.autoDateSubdir ?? true;
   const initialManifests = listIngestionManifests(db);
-  const preview = await previewStagingPlan(options);
+  const preview = await previewStagingPlan({ ...options, autoDateSubdir, now: () => nowDate });
 
   if (!preview.ok) {
     return {
@@ -353,6 +376,7 @@ export async function scanStagingDirectory(
       stagingDir: options.stagingDir,
       targetRootId: options.targetRootId,
       targetSubdir: cleanSubdir,
+      autoDateSubdir,
       elapsedMs: Date.now() - started,
       files: [],
       manifests: initialManifests,
@@ -395,11 +419,23 @@ export async function scanStagingDirectory(
     }
     if (existing) {
       matchedManifestIds.add(existing.id);
-      const nextSourceId = `staging:${f.targetRelativePath.toLowerCase()}:${f.fileSize}`;
+      // Issue #69 B3 Freeze Invariant: once a manifest has entered 'moving' or 'failed',
+      // never recalculate its persisted target_relative_path on rescan.
+      const pathFrozen = existing.state === 'moving' || existing.state === 'failed';
+      const effectiveTargetRel = pathFrozen
+        ? existing.targetRelativePath
+        : computeIngestionTargetRelativePath({
+            filename: f.filename,
+            targetSubdir: cleanSubdir,
+            autoDateSubdir,
+            mediaDate: existing.mediaDate ?? extractIsoDate(f.filename),
+            now: nowDate,
+          });
+      const nextSourceId = `staging:${effectiveTargetRel.toLowerCase()}:${f.fileSize}`;
       const tempChanged = existing.tempPath.toLowerCase() !== f.tempPath.toLowerCase();
       const targetChanged =
         existing.targetRootId !== options.targetRootId ||
-        existing.targetRelativePath !== f.targetRelativePath ||
+        existing.targetRelativePath !== effectiveTargetRel ||
         existing.fileSize !== f.fileSize ||
         existing.sourceId !== nextSourceId;
 
@@ -432,7 +468,7 @@ export async function scanStagingDirectory(
           safeSourceId,
           f.tempPath,
           options.targetRootId,
-          f.targetRelativePath,
+          effectiveTargetRel,
           f.filename,
           f.fileSize,
           nextState,
@@ -485,6 +521,7 @@ export async function scanStagingDirectory(
     stagingDir: options.stagingDir,
     targetRootId: options.targetRootId,
     targetSubdir: cleanSubdir,
+    autoDateSubdir,
     elapsedMs: Date.now() - started,
     files,
     manifests,
@@ -579,6 +616,7 @@ export async function ensureManifestForStagingFile(
     readonly relativePath?: string | undefined;
     readonly targetRootId: string;
     readonly targetSubdir: string;
+    readonly autoDateSubdir?: boolean | undefined;
     readonly roots: readonly MediaRootConfig[];
     readonly stagingDir?: string | undefined;
     readonly fileOps?: IngestionFileOps | undefined;
@@ -586,7 +624,8 @@ export async function ensureManifestForStagingFile(
   },
 ): Promise<IngestionManifest> {
   const fileOps = options.fileOps ?? defaultIngestionFileOps;
-  const now = (options.now ?? (() => new Date()))().toISOString();
+  const nowDate = (options.now ?? (() => new Date()))();
+  const now = nowDate.toISOString();
   let tempPath: string;
   if (options.relativePath !== undefined) {
     tempPath = resolveStagingRelativePath(options.stagingDir ?? '', options.relativePath);
@@ -598,7 +637,15 @@ export async function ensureManifestForStagingFile(
   }
   const filename = path.win32.basename(tempPath);
   const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
-  const targetRel = cleanSubdir ? `${cleanSubdir}/${filename}` : filename;
+  const autoDateSubdir = options.autoDateSubdir ?? true;
+  const inferredDate = extractIsoDate(filename);
+  const targetRel = computeIngestionTargetRelativePath({
+    filename,
+    targetSubdir: cleanSubdir,
+    autoDateSubdir,
+    mediaDate: inferredDate,
+    now: nowDate,
+  });
 
   const check = resolveAllowlistedUncPath(options.roots, options.targetRootId, targetRel);
   if (!check.ok) {
@@ -650,12 +697,23 @@ export async function ensureManifestForStagingFile(
 
   if (existingUnindexed) {
     const mapped = mapManifestRow(existingUnindexed);
+    const pathFrozen = mapped.state === 'moving' || mapped.state === 'failed';
+    const effectiveTargetRel = pathFrozen
+      ? mapped.targetRelativePath
+      : computeIngestionTargetRelativePath({
+          filename,
+          targetSubdir: cleanSubdir,
+          autoDateSubdir,
+          mediaDate: mapped.mediaDate ?? inferredDate,
+          now: nowDate,
+        });
+    const effectiveSourceId = `staging:${effectiveTargetRel.toLowerCase()}:${fileSize}`;
     const tempChanged = mapped.tempPath.toLowerCase() !== tempPath.toLowerCase();
     const targetChanged =
       mapped.targetRootId !== options.targetRootId ||
-      mapped.targetRelativePath !== targetRel ||
+      mapped.targetRelativePath !== effectiveTargetRel ||
       mapped.fileSize !== fileSize ||
-      mapped.sourceId !== sourceId;
+      mapped.sourceId !== effectiveSourceId;
     if ((tempChanged || targetChanged) && !findManifestTask(db, mapped.id)) {
       const nextState: IngestionState =
         tempChanged && mapped.state === 'failed'
@@ -666,8 +724,8 @@ export async function ensureManifestForStagingFile(
       const nextError = tempChanged && mapped.state === 'failed' ? null : mapped.lastError;
       const sourceIdConflict = db
         .prepare('SELECT id FROM ingestion_manifests WHERE source_id = ? AND id <> ? LIMIT 1')
-        .get(sourceId, mapped.id) as { id: number } | undefined;
-      const safeSourceId = sourceIdConflict ? `${sourceId}#${mapped.id}` : sourceId;
+        .get(effectiveSourceId, mapped.id) as { id: number } | undefined;
+      const safeSourceId = sourceIdConflict ? `${effectiveSourceId}#${mapped.id}` : effectiveSourceId;
       const updateInfo = db.prepare(
         `UPDATE ingestion_manifests
          SET source_id = ?,
@@ -684,7 +742,7 @@ export async function ensureManifestForStagingFile(
         safeSourceId,
         tempPath,
         options.targetRootId,
-        targetRel,
+        effectiveTargetRel,
         filename,
         fileSize,
         nextState,
@@ -717,7 +775,6 @@ export async function ensureManifestForStagingFile(
   const ext = path.extname(filename);
   const fc2 = parseFc2Code(path.basename(filename, ext));
   const catalogNumber = fc2?.code ?? extractCatalogNumber(filename);
-  const inferredDate = extractIsoDate(filename);
 
   const info = db
     .prepare(
@@ -918,6 +975,11 @@ export function reviewIngestionManifest(
   db: DatabaseSync,
   input: ReviewIngestionInput & { readonly manifestId: number },
   now: () => Date = () => new Date(),
+  targetOptions?: {
+    readonly targetSubdir?: string | undefined;
+    readonly autoDateSubdir?: boolean | undefined;
+    readonly roots?: readonly MediaRootConfig[] | undefined;
+  },
 ): ReviewIngestionResult {
   const manifest = getIngestionManifestById(db, input.manifestId);
   if (!manifest) {
@@ -972,17 +1034,39 @@ export function reviewIngestionManifest(
     }
   }
 
-  const ts = now().toISOString();
+  const nowDate = now();
+  const ts = nowDate.toISOString();
   const nextTitle = input.title !== undefined ? input.title.trim() || null : manifest.title;
   const nextCatalog = input.catalogNumber !== undefined ? input.catalogNumber.trim() || null : manifest.catalogNumber;
   const nextDate = input.mediaDate !== undefined ? input.mediaDate.trim() || null : manifest.mediaDate;
   const nextState: IngestionState = input.decision === 'approved' ? 'reviewed' : 'planned';
+
+  // Issue #69 B3: Solidify target_relative_path during review unless already frozen in 'moving'/'failed'.
+  let nextTargetRelativePath = manifest.targetRelativePath;
+  const pathFrozen = manifest.state === 'moving' || manifest.state === 'failed';
+  if (!pathFrozen && targetOptions && (targetOptions.targetSubdir !== undefined || targetOptions.autoDateSubdir !== undefined)) {
+    const computed = computeIngestionTargetRelativePath({
+      filename: manifest.filename,
+      targetSubdir: targetOptions.targetSubdir ?? '',
+      autoDateSubdir: targetOptions.autoDateSubdir ?? true,
+      mediaDate: nextDate,
+      now: nowDate,
+    });
+    if (targetOptions.roots) {
+      const check = resolveAllowlistedUncPath(targetOptions.roots, manifest.targetRootId, computed);
+      if (!check.ok) {
+        return { ok: false, code: 'INVALID_INPUT', message: `${check.code}: ${check.message}` };
+      }
+    }
+    nextTargetRelativePath = computed;
+  }
 
   db.prepare(
     `UPDATE ingestion_manifests
      SET title = ?,
          catalog_number = ?,
          media_date = ?,
+         target_relative_path = ?,
          tags_json = ?,
          review_decision = ?,
          state = ?,
@@ -993,6 +1077,7 @@ export function reviewIngestionManifest(
     nextTitle,
     nextCatalog,
     nextDate,
+    nextTargetRelativePath,
     JSON.stringify([...tagMap.values()]),
     input.decision,
     nextState,
@@ -1160,6 +1245,8 @@ export async function commitIngestionManifest(
     readonly manifestId: number;
     readonly roots: readonly MediaRootConfig[];
     readonly stagingDir?: string | undefined;
+    readonly targetSubdir?: string | undefined;
+    readonly autoDateSubdir?: boolean | undefined;
     readonly onPhase?: ((phase: IngestionPhase) => void) | undefined;
     readonly fileOps?: IngestionFileOps | undefined;
     readonly allowCrossDeviceCopy?: boolean | undefined;
@@ -1168,9 +1255,10 @@ export async function commitIngestionManifest(
 ): Promise<CommitIngestionResult> {
   const fileOps = options.fileOps ?? defaultIngestionFileOps;
   const nowFn = options.now ?? (() => new Date());
-  const ts = nowFn().toISOString();
+  const nowDate = nowFn();
+  const ts = nowDate.toISOString();
 
-  const manifest = getIngestionManifestById(db, options.manifestId);
+  let manifest = getIngestionManifestById(db, options.manifestId);
   if (!manifest) {
     return {
       ok: false,
@@ -1210,10 +1298,27 @@ export async function commitIngestionManifest(
     };
   }
 
+  // Issue #69 B3 Freeze Invariant:
+  // Compute & solidify target_relative_path strictly BEFORE transitioning to 'moving' (only when state is 'reviewed').
+  // Once in 'moving' or 'failed', preserve the frozen target_relative_path across retries/reconcile.
+  let finalTargetRelativePath = manifest.targetRelativePath;
+  if (
+    manifest.state === 'reviewed' &&
+    (options.targetSubdir !== undefined || options.autoDateSubdir !== undefined)
+  ) {
+    finalTargetRelativePath = computeIngestionTargetRelativePath({
+      filename: manifest.filename,
+      targetSubdir: options.targetSubdir ?? '',
+      autoDateSubdir: options.autoDateSubdir ?? true,
+      mediaDate: manifest.mediaDate,
+      now: nowDate,
+    });
+  }
+
   const resolution = resolveAllowlistedUncPath(
     options.roots,
     manifest.targetRootId,
-    manifest.targetRelativePath,
+    finalTargetRelativePath,
   );
   if (!resolution.ok) {
     db.prepare(`UPDATE ingestion_manifests SET state = 'failed', last_error = ?, updated_at = ? WHERE id = ?`).run(
@@ -1227,6 +1332,15 @@ export async function commitIngestionManifest(
       message: resolution.message,
       manifest: getIngestionManifestById(db, manifest.id),
     };
+  }
+
+  if (finalTargetRelativePath !== manifest.targetRelativePath) {
+    db.prepare(`UPDATE ingestion_manifests SET target_relative_path = ?, updated_at = ? WHERE id = ?`).run(
+      finalTargetRelativePath,
+      ts,
+      manifest.id,
+    );
+    manifest = getIngestionManifestById(db, manifest.id) ?? manifest;
   }
 
   const preExisting = db

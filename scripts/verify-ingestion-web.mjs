@@ -282,6 +282,14 @@ export async function verifyIngestionWeb(page) {
   console.log('Issue #45 cold-install E2E: filename-bound manifest rebinding across stagingDir change and stale manifest cleanup on Scan: PASS');
 
   await page.getByTestId('ingestion-file-issue30-slow.mp4').click();
+  // Issue #69 B5: live preview updates target path YYYY/MM as media_date draft changes
+  await page.getByTestId('ingestion-date-input').fill('2024-08-15');
+  await page.waitForFunction(() =>
+    document.querySelector('[data-testid="ingestion-target-preview"]')?.textContent?.trim() ===
+      'ingested/2024/08/issue30-slow.mp4'
+  );
+  await page.getByTestId('ingestion-date-input').fill('');
+  console.log('Issue #69 cold-install E2E: B5 live YYYY/MM target path preview updates with media_date draft: PASS');
   await page.getByTestId('ingestion-title-input').fill('Issue 30 controlled rename');
   const requested = page.waitForRequest('**/api/mediaLibrary/commitIngestion');
   await page.getByTestId('ingestion-commit-btn').click();

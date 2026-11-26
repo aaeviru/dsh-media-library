@@ -17,6 +17,7 @@ export {
 } from './metadata-fetcher.ts';
 export {
   commitIngestionManifest,
+  computeIngestionTargetRelativePath,
   defaultIngestionFileOps,
   ensureManifestForStagingFile,
   fetchMetadataForManifest,
@@ -30,6 +31,7 @@ export {
   listIngestionTasks,
   markInterruptedIngestionTasks,
   normalizeTargetSubdir,
+  parseIsoYearMonth,
   previewStagingPlan,
   reconcileIngestionManifests,
   reviewIngestionManifest,

@@ -39,7 +39,11 @@ function fixture(overrides: Partial<IngestionFileOps> = {}, options: Partial<Spi
     const reviewed = await service.reviewIngestion({ relativePath: name, decision: 'approved', title: name });
     assert.equal(reviewed.ok, true);
     assert.ok(reviewed.manifest);
-    return { id: reviewed.manifest.id, source, destination: path.join(target, name) };
+    return {
+      id: reviewed.manifest.id,
+      source,
+      destination: path.join(dir, reviewed.manifest.targetRelativePath),
+    };
   };
   return { service, prepare, ops, dir, staging, target, map };
 }
@@ -125,7 +129,7 @@ test('existing target reuse rejects a different tail and preserves source withou
   const f = fixture();
   const bytes = Buffer.alloc(4 * 1024 * 1024, 7);
   const item = await f.prepare('reuse.mp4', bytes);
-  fs.mkdirSync(f.target, { recursive: true });
+  fs.mkdirSync(path.dirname(item.destination), { recursive: true });
   bytes[bytes.length - 1] = 8;
   fs.writeFileSync(item.destination, bytes);
   const result = await f.service.commitIngestion({ manifestId: item.id });
@@ -197,7 +201,7 @@ for (const fault of ['beginning', 'middle', 'end', 'short', 'error', 'match'] as
       },
     });
     const item = await f.prepare();
-    fs.mkdirSync(f.target, { recursive: true });
+    fs.mkdirSync(path.dirname(item.destination), { recursive: true });
     fs.copyFileSync(item.source, item.destination);
     const result = await f.service.commitIngestion({ manifestId: item.id });
     assert.equal(result.ok, fault === 'match');
@@ -220,7 +224,7 @@ test('small matching files are compared once per file before reuse', async () =>
     return defaultIngestionFileOps.readRange(f.map(p), offset, length);
   } });
   const item = await f.prepare();
-  fs.mkdirSync(f.target, { recursive: true });
+  fs.mkdirSync(path.dirname(item.destination), { recursive: true });
   fs.copyFileSync(item.source, item.destination);
   assert.equal((await f.service.commitIngestion({ manifestId: item.id })).ok, true);
   assert.equal(totalRead, 24);
@@ -302,7 +306,7 @@ for (const operation of ['probe', 'copy', 'hash', 'reconcile-read'] as const) {
     const other = await f.prepare('other.mp4');
     if (operation === 'reconcile-read') {
       assert.equal((await f.service.commitIngestion({ manifestId: item.id })).ok, false);
-      fs.mkdirSync(f.target, { recursive: true });
+      fs.mkdirSync(path.dirname(item.destination), { recursive: true });
       fs.copyFileSync(item.source, item.destination);
     }
     armed = true;
@@ -331,7 +335,7 @@ test('reconcile refuses incomplete targets and never cleans an unapproved source
   const f = fixture({ rename() { throw new Error('network failure'); } });
   const item = await f.prepare();
   assert.equal((await f.service.commitIngestion({ manifestId: item.id })).ok, false);
-  fs.mkdirSync(f.target, { recursive: true });
+  fs.mkdirSync(path.dirname(item.destination), { recursive: true });
   fs.writeFileSync(item.destination, 'short');
   assert.equal((await f.service.reconcileIngestion()).ok, false);
   fs.copyFileSync(item.source, item.destination);
