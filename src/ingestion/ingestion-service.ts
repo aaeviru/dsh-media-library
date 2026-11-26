@@ -194,8 +194,8 @@ export function listIngestionManifests(
 export { computeIngestionTargetRelativePath, parseIsoYearMonth };
 
 export function normalizeTargetSubdir(raw: string): string {
+  if (!raw.trim()) return '';
   return raw
-    .trim()
     .replace(/\\/g, '/')
     .replace(/^\/+|\/+$/g, '')
     .split('/')
@@ -463,7 +463,7 @@ export async function scanStagingDirectory(
                state = ?,
                last_error = ?,
                updated_at = ?
-           WHERE id = ? AND state = ?`,
+           WHERE id = ? AND state = ? AND updated_at = ?`,
         ).run(
           safeSourceId,
           f.tempPath,
@@ -476,6 +476,7 @@ export async function scanStagingDirectory(
           nowIso,
           existing.id,
           existing.state,
+          existing.updatedAt,
         );
         existing = getIngestionManifestById(db, existing.id) ?? existing;
         unindexedByFilename.set(filenameKey, existing);
@@ -512,7 +513,16 @@ export async function scanStagingDirectory(
       }
     }
 
-    db.prepare('DELETE FROM ingestion_manifests WHERE id = ? AND state <> ?').run(m.id, 'indexed');
+    // Recheck live row state and running task ownership before deleting stale manifest
+    // so a concurrent commit that entered 'moving' during an earlier await is never deleted.
+    const latest = getIngestionManifestById(db, m.id);
+    if (!latest || latest.state === 'indexed' || latest.state === 'moving' || findManifestTask(db, m.id)) {
+      continue;
+    }
+    db.prepare(
+      `DELETE FROM ingestion_manifests
+       WHERE id = ? AND state = ? AND updated_at = ? AND state NOT IN ('indexed', 'moving')`,
+    ).run(m.id, latest.state, latest.updatedAt);
   }
 
   const manifests = listIngestionManifests(db);
@@ -1055,9 +1065,15 @@ export function reviewIngestionManifest(
   if (
     !pathFrozen &&
     targetOptions &&
-    targetOptions.roots &&
     (targetOptions.targetSubdir !== undefined || targetOptions.autoDateSubdir !== undefined)
   ) {
+    if (!targetOptions.roots) {
+      return {
+        ok: false,
+        code: 'INVALID_INPUT',
+        message: 'Host roots allowlist is required when recomputing target_relative_path during review.',
+      };
+    }
     const computed = computeIngestionTargetRelativePath({
       filename: manifest.filename,
       targetSubdir: targetOptions.targetSubdir ?? '',
@@ -1332,7 +1348,9 @@ export async function commitIngestionManifest(
     finalTargetRelativePath,
   );
   if (!resolution.ok) {
-    db.prepare(`UPDATE ingestion_manifests SET state = 'failed', last_error = ?, updated_at = ? WHERE id = ?`).run(
+    // Pre-move validation failure: record last_error without entering 'moving'/'failed'
+    // so fixing configuration or media_date can recompute target_relative_path cleanly.
+    db.prepare(`UPDATE ingestion_manifests SET last_error = ?, updated_at = ? WHERE id = ?`).run(
       resolution.message,
       ts,
       manifest.id,

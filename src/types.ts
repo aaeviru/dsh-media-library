@@ -508,12 +508,14 @@ export function computeIngestionTargetRelativePath(options: {
   readonly mediaDate?: string | null | undefined;
   readonly now?: Date | undefined;
 }): string {
-  const cleanSubdir = options.targetSubdir
-    .replace(/\\/g, '/')
-    .replace(/^\/+|\/+$/g, '')
-    .split('/')
-    .filter((seg) => seg && seg !== '.' && seg !== '..')
-    .join('/');
+  const cleanSubdir = options.targetSubdir.trim()
+    ? options.targetSubdir
+        .replace(/\\/g, '/')
+        .replace(/^\/+|\/+$/g, '')
+        .split('/')
+        .filter((seg) => seg && seg !== '.' && seg !== '..')
+        .join('/')
+    : '';
   if (!options.autoDateSubdir) {
     return cleanSubdir ? `${cleanSubdir}/${options.filename}` : options.filename;
   }

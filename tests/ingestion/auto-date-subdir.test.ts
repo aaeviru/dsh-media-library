@@ -289,15 +289,19 @@ describe('Auto YYYY/MM Ingestion Target Folder (Issue #69 B1..B5)', () => {
         });
         assert.equal(m.targetRelativePath, 'ingested/2026/11/RETRY-777.mp4');
 
-        // Review WITHOUT roots must NOT overwrite target_relative_path with unvalidated input
+        // Review WITHOUT roots must fail closed with INVALID_INPUT and preserve persisted path
         const unvalidatedRev = reviewIngestionManifest(
           db,
           { manifestId: m.id, decision: 'approved', mediaDate: '' },
           () => novEnd,
           { targetSubdir: 'C:/evil', autoDateSubdir: true },
         );
-        assert.equal(unvalidatedRev.ok, true);
-        assert.equal(unvalidatedRev.manifest?.targetRelativePath, 'ingested/2026/11/RETRY-777.mp4');
+        assert.equal(unvalidatedRev.ok, false);
+        assert.equal(unvalidatedRev.code, 'INVALID_INPUT');
+        assert.equal(getIngestionManifestById(db, m.id)?.targetRelativePath, 'ingested/2026/11/RETRY-777.mp4');
+
+        // Idempotent double-normalization check for segment trailing spaces
+        assert.equal(normalizeTargetSubdir(normalizeTargetSubdir('incoming /')), 'incoming ');
 
         // Transition to 'failed' with November destination frozen
         db.prepare(`UPDATE ingestion_manifests SET state = 'failed', last_error = 'network blip' WHERE id = ?`).run(m.id);
