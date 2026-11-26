@@ -246,6 +246,7 @@ export interface SpikeServiceOptions {
   readonly configuredNasBackupDir?: string | (() => string) | undefined;
   readonly configuredStagingDir?: string | (() => string) | undefined;
   readonly configuredTargetSubdir?: string | (() => string) | undefined;
+  readonly configuredAutoDateSubdir?: boolean | (() => boolean) | undefined;
   readonly cmadbBaseUrl?: string | undefined;
   readonly ppvdbBaseUrl?: string | undefined;
   readonly configuredAvWikiBaseUrl?: string | (() => string) | undefined;
@@ -402,6 +403,7 @@ export class MediaLibrarySpikeService {
   private configuredNasBackupDir: string | (() => string);
   private configuredStagingDir: string | (() => string);
   private configuredTargetSubdir: string | (() => string);
+  private configuredAutoDateSubdir: boolean | (() => boolean);
   private readonly cmadbBaseUrl: string;
   private readonly ppvdbBaseUrl: string;
   private configuredAvWikiBaseUrl: string | (() => string);
@@ -442,6 +444,7 @@ export class MediaLibrarySpikeService {
     this.configuredNasBackupDir = options.configuredNasBackupDir ?? '';
     this.configuredStagingDir = options.configuredStagingDir ?? '';
     this.configuredTargetSubdir = options.configuredTargetSubdir ?? 'ingested';
+    this.configuredAutoDateSubdir = options.configuredAutoDateSubdir ?? true;
     this.cmadbBaseUrl = options.cmadbBaseUrl ?? 'https://fc2cmadb.com';
     this.ppvdbBaseUrl = options.ppvdbBaseUrl ?? 'https://fc2ppvdb.com';
     this.configuredAvWikiBaseUrl = options.configuredAvWikiBaseUrl ?? 'https://av-wiki.net';
@@ -482,6 +485,12 @@ export class MediaLibrarySpikeService {
 
   private readStringSetting(value: string | (() => string)): string {
     return typeof value === 'function' ? value() : value;
+  }
+
+  private readAutoDateSubdir(): boolean {
+    return typeof this.configuredAutoDateSubdir === 'function'
+      ? Boolean(this.configuredAutoDateSubdir())
+      : Boolean(this.configuredAutoDateSubdir);
   }
 
   private createMetadataFetcher(): MetadataFetcher {
@@ -736,6 +745,8 @@ export class MediaLibrarySpikeService {
       localDatabasePath: this.localDatabasePath,
       spikeOverridePath: this.spikeOverridePath,
       activeUncRoot,
+      ingestionTargetSubdir: normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir)),
+      ingestionAutoDateSubdir: this.readAutoDateSubdir(),
       roots,
       items,
     };
@@ -937,6 +948,7 @@ export class MediaLibrarySpikeService {
         stagingDir: effectiveStagingDir,
         targetRootId: DEFAULT_M1_ROOT_ID,
         targetSubdir,
+        autoDateSubdir: this.readAutoDateSubdir(),
         elapsedMs: 0,
         files: [],
         manifests: await this.listIngestionManifests(),
@@ -950,6 +962,7 @@ export class MediaLibrarySpikeService {
         stagingDir: effectiveStagingDir,
         targetRootId: DEFAULT_M1_ROOT_ID,
         targetSubdir,
+        autoDateSubdir: this.readAutoDateSubdir(),
         elapsedMs: 0,
         files: [],
         manifests: await this.listIngestionManifests(),
@@ -957,6 +970,7 @@ export class MediaLibrarySpikeService {
       };
     }
 
+    const autoDateSubdir = this.readAutoDateSubdir();
     const { db } = openMediaLibraryDatabase({ dbPath: this.localDatabasePath });
     let scanRes: ScanStagingResult;
     try {
@@ -964,6 +978,7 @@ export class MediaLibrarySpikeService {
         stagingDir: effectiveStagingDir,
         targetRootId: DEFAULT_M1_ROOT_ID,
         targetSubdir,
+        autoDateSubdir,
         roots,
         timeoutMs: this.probeTimeoutMs,
         fileOps: this.ingestionFileOps,
@@ -1050,6 +1065,7 @@ export class MediaLibrarySpikeService {
           stagingDir: this.ingestionStagingDir(),
           targetRootId: DEFAULT_M1_ROOT_ID,
           targetSubdir,
+          autoDateSubdir: this.readAutoDateSubdir(),
           roots,
           fileOps: this.ingestionFileOps,
           now: this.now,
@@ -1154,6 +1170,7 @@ export class MediaLibrarySpikeService {
             stagingDir: this.ingestionStagingDir(),
             targetRootId: DEFAULT_M1_ROOT_ID,
             targetSubdir,
+            autoDateSubdir: this.readAutoDateSubdir(),
             roots,
             fileOps: this.ingestionFileOps,
             now: this.now,
@@ -1165,7 +1182,16 @@ export class MediaLibrarySpikeService {
         }
         const active = findManifestTask(db, manifestId);
         if (active) return { ok: false as const, code: 'IN_PROGRESS' as const, message: `Task #${active.id} freezes this Manifest until it finishes.` };
-        return reviewIngestionManifest(db, { ...input, manifestId }, this.now);
+        return reviewIngestionManifest(
+          db,
+          { ...input, manifestId },
+          this.now,
+          {
+            targetSubdir,
+            autoDateSubdir: this.readAutoDateSubdir(),
+            roots,
+          },
+        );
       });
     } finally {
       const nextCount = (stagingManifestOpsInFlight.get(this.localDatabasePath) ?? 1) - 1;
@@ -1210,6 +1236,8 @@ export class MediaLibrarySpikeService {
           manifestId: input.manifestId,
           allowCrossDeviceCopy: this.allowCrossDeviceCopy,
           stagingDir: this.ingestionStagingDir(),
+          targetSubdir: normalizeTargetSubdir(this.readStringSetting(this.configuredTargetSubdir)),
+          autoDateSubdir: this.readAutoDateSubdir(),
           onPhase: phase => {
             updateIngestionPhase(db, lock.taskId, phase, this.now);
             this.retainIngestionTask(db, lock.taskId);

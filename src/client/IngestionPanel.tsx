@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  computeIngestionTargetRelativePath,
   normalizeTagName,
   type IngestionManifest,
   type IngestionTask,
@@ -51,6 +52,8 @@ interface DraftFields {
 // scanned temp files, selected row, or unsubmitted title/tag drafts.
 const sessionCache: {
   stagedFiles: readonly StagingFileItem[];
+  targetSubdir: string;
+  autoDateSubdir: boolean;
   hasScannedOnce: boolean;
   selectedKey: string | null;
   dirtyDrafts: Record<string, DraftFields>;
@@ -58,6 +61,8 @@ const sessionCache: {
   showPerformerDrawer: boolean;
 } = {
   stagedFiles: [],
+  targetSubdir: 'ingested',
+  autoDateSubdir: true,
   hasScannedOnce: false,
   selectedKey: null,
   dirtyDrafts: {},
@@ -93,6 +98,8 @@ export function IngestionPanel({
   onCommitted: () => void;
 }) {
   const [stagedFiles, setStagedFiles] = useState<readonly StagingFileItem[]>(() => sessionCache.stagedFiles);
+  const [targetSubdir, setTargetSubdir] = useState<string>(() => sessionCache.targetSubdir);
+  const [autoDateSubdir, setAutoDateSubdir] = useState<boolean>(() => sessionCache.autoDateSubdir);
   const [manifests, setManifests] = useState<readonly IngestionManifest[]>([]);
   const [tasks, setTasks] = useState<readonly IngestionTask[]>([]);
   const [performerAliases, setPerformerAliases] = useState<readonly PerformerAliasRecord[]>([]);
@@ -186,12 +193,23 @@ export function IngestionPanel({
 
   const reloadServerState = useCallback(async () => {
     try {
-      const [mRes, tRes, paRes, pqRes] = await Promise.all([
+      const [mRes, tRes, paRes, pqRes, statusRes] = await Promise.all([
         mediaLibrary.listIngestionManifests(),
         mediaLibrary.listIngestionTasks(),
         mediaLibrary.listPerformerAliases(),
         mediaLibrary.listPerformerReviewQueue({ status: 'pending' }),
+        mediaLibrary.spikeStatus(),
       ]);
+      if (statusRes.ok) {
+        if (typeof statusRes.value.ingestionTargetSubdir === 'string') {
+          sessionCache.targetSubdir = statusRes.value.ingestionTargetSubdir;
+          setTargetSubdir(statusRes.value.ingestionTargetSubdir);
+        }
+        if (typeof statusRes.value.ingestionAutoDateSubdir === 'boolean') {
+          sessionCache.autoDateSubdir = statusRes.value.ingestionAutoDateSubdir;
+          setAutoDateSubdir(statusRes.value.ingestionAutoDateSubdir);
+        }
+      }
       if (mRes.ok) {
         setManifests(mRes.value);
       } else {
@@ -249,6 +267,12 @@ export function IngestionPanel({
           return;
         }
         setManifests(res.value.manifests);
+        sessionCache.targetSubdir = res.value.targetSubdir;
+        setTargetSubdir(res.value.targetSubdir);
+        if (typeof res.value.autoDateSubdir === 'boolean') {
+          sessionCache.autoDateSubdir = res.value.autoDateSubdir;
+          setAutoDateSubdir(res.value.autoDateSubdir);
+        }
         if (res.value.ok) {
           sessionCache.stagedFiles = res.value.files;
           sessionCache.hasScannedOnce = true;
@@ -934,7 +958,19 @@ export function IngestionPanel({
                 <div className={css.rowBetween}>
                   <div>
                     <strong>{t('ingestionTargetLabel')}:</strong>{' '}
-                    <code>{selected.targetRelativePath}</code>
+                    <code data-testid="ingestion-target-preview">
+                      {selected.manifest &&
+                      (selected.manifest.state === 'moving' ||
+                        selected.manifest.state === 'failed' ||
+                        selected.manifest.state === 'indexed')
+                        ? selected.targetRelativePath
+                        : computeIngestionTargetRelativePath({
+                            filename: selected.filename,
+                            targetSubdir,
+                            autoDateSubdir,
+                            mediaDate: activeDraft.mediaDate,
+                          })}
+                    </code>
                   </div>
                   {selected.manifest?.metadataSource ? (
                     <span className={css.mutedSm}>({selected.manifest.metadataSource})</span>

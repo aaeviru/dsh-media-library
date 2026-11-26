@@ -51,6 +51,8 @@ export interface SpikeStatus {
   readonly localDatabasePath: string;
   readonly spikeOverridePath: string;
   readonly activeUncRoot: string;
+  readonly ingestionTargetSubdir?: string | undefined;
+  readonly ingestionAutoDateSubdir?: boolean | undefined;
   readonly roots: readonly MediaRootConfig[];
   readonly items: readonly M1TestMediaItem[];
 }
@@ -458,10 +460,76 @@ export interface ScanStagingResult {
   readonly stagingDir: string;
   readonly targetRootId: string;
   readonly targetSubdir: string;
+  readonly autoDateSubdir?: boolean | undefined;
   readonly elapsedMs: number;
   readonly files: readonly StagingFileItem[];
   readonly manifests: readonly IngestionManifest[];
   readonly error?: string | undefined;
+}
+
+/**
+ * Parse a strict calendar ISO date (`YYYY-MM-DD`) into `{ year, month }`.
+ * Returns `null` for empty, malformed, or non-existent calendar dates (e.g. `2025-02-30`).
+ */
+export function parseIsoYearMonth(
+  mediaDate: string | null | undefined,
+): { readonly year: string; readonly month: string } | null {
+  if (typeof mediaDate !== 'string') return null;
+  const trimmed = mediaDate.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (!match) return null;
+  const yearNum = Number(match[1]);
+  const monthNum = Number(match[2]);
+  const dayNum = Number(match[3]);
+  if (monthNum < 1 || monthNum > 12 || dayNum < 1 || dayNum > 31) return null;
+  const check = new Date(0);
+  check.setUTCFullYear(yearNum, monthNum - 1, dayNum);
+  check.setUTCHours(0, 0, 0, 0);
+  if (
+    check.getUTCFullYear() !== yearNum ||
+    check.getUTCMonth() !== monthNum - 1 ||
+    check.getUTCDate() !== dayNum
+  ) {
+    return null;
+  }
+  return { year: match[1]!, month: match[2]! };
+}
+
+/**
+ * Normalize a configured ingestion target subdirectory by trimming each path segment
+ * and stripping empty / `.` / `..` segments. Idempotent and aligned with `unc-path.ts`.
+ */
+export function normalizeTargetSubdir(raw: string): string {
+  return raw
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((seg) => seg.trim())
+    .filter((seg) => seg && seg !== '.' && seg !== '..')
+    .join('/');
+}
+
+/**
+ * Pure Host/Client shared helper computing the canonical target relative path for ingestion (`Issue #69 B1/B2`).
+ * - When `autoDateSubdir` is false, preserves flat `<targetSubdir>/<filename>` (or `<filename>` when subdir is empty).
+ * - When `autoDateSubdir` is true, appends `YYYY/MM` from valid `mediaDate` (`YYYY-MM-DD`), falling back to local `now`.
+ */
+export function computeIngestionTargetRelativePath(options: {
+  readonly filename: string;
+  readonly targetSubdir: string;
+  readonly autoDateSubdir: boolean;
+  readonly mediaDate?: string | null | undefined;
+  readonly now?: Date | undefined;
+}): string {
+  const cleanSubdir = normalizeTargetSubdir(options.targetSubdir);
+  if (!options.autoDateSubdir) {
+    return cleanSubdir ? `${cleanSubdir}/${options.filename}` : options.filename;
+  }
+  const parsed = parseIsoYearMonth(options.mediaDate);
+  const effectiveNow = options.now ?? new Date();
+  const yyyyMm = parsed
+    ? `${parsed.year}/${parsed.month}`
+    : `${String(effectiveNow.getFullYear()).padStart(4, '0')}/${String(effectiveNow.getMonth() + 1).padStart(2, '0')}`;
+  return cleanSubdir ? `${cleanSubdir}/${yyyyMm}/${options.filename}` : `${yyyyMm}/${options.filename}`;
 }
 
 export interface FetchIngestionMetadataInput {

@@ -85,6 +85,7 @@ export class MediaLibraryRemote extends TypertRemoteService {
       configuredStagingDir: () => config.stagingDir.get(),
       allowCrossDeviceCopy: config.allowCrossDeviceCopy,
       configuredTargetSubdir: () => config.ingestionTargetSubdir.get(),
+      configuredAutoDateSubdir: () => config.ingestionAutoDateSubdir.get(),
       cmadbBaseUrl: config.cmadbBaseUrl,
       ppvdbBaseUrl: config.ppvdbBaseUrl,
       configuredAvWikiBaseUrl: () => config.avWikiBaseUrl.get(),
